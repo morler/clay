@@ -95,8 +95,12 @@ int clay_term_color_enabled(void);
    constant passed to printf/fputs with this. */
 const char *clay_color(const char *code);
 
-/* Display columns in a UTF-8 string; skips ANSI escapes, no wide-glyph
-   handling. */
+/* Width of one UTF-8 scalar and its byte length in a NUL-terminated string.
+   Invalid or incomplete sequences consume one byte and occupy one column;
+   NULL or NUL returns zero bytes and columns. bytes may be NULL. */
+size_t clay_utf8_char_width(const char *s, size_t *bytes);
+
+/* Display columns in a UTF-8 string; skips ANSI escapes. */
 size_t clay_utf8_width(const char *s);
 
 /* Prints `text` as an OSC 8 hyperlink to `url`; plain text if the

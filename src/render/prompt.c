@@ -181,7 +181,14 @@ static void paste_block_insert(ClayStr *buf, ClayArray *blocks, size_t *cursor, 
     clay_str_free(&placeholder);
 }
 
-/* Deletes the byte before *cursor. If it belongs to a paste placeholder,
+static size_t utf8_prev(const char *text, size_t pos) {
+    if (pos == 0) return 0;
+    pos--;
+    while (pos > 0 && ((unsigned char)text[pos] & 0xc0) == 0x80) pos--;
+    return pos;
+}
+
+/* Deletes the character before *cursor. If it belongs to a paste placeholder,
    the whole block goes at once (wherever it sits, not just at the tail)
    instead of chewing through the placeholder text one byte at a time. */
 static void prompt_backspace(ClayStr *buf, ClayArray *blocks, size_t *cursor) {
@@ -199,17 +206,17 @@ static void prompt_backspace(ClayStr *buf, ClayArray *blocks, size_t *cursor) {
         return;
     }
 
-    clay_str_remove_n(buf, *cursor - 1, 1);
-    paste_blocks_shift(blocks, *cursor, -1);
-    (*cursor)--;
+    size_t start = utf8_prev(buf->data, *cursor);
+    size_t len = *cursor - start;
+    clay_str_remove_n(buf, start, len);
+    paste_blocks_shift(blocks, *cursor, -(long)len);
+    *cursor = start;
 }
 
-/* Moves *cursor one byte left/right, jumping clean over a paste
-   placeholder instead of stepping into the middle of it. */
+/* Moves *cursor one UTF-8 character left/right, jumping over paste placeholders. */
 static void prompt_cursor_left(ClayStr *buf, ClayArray *blocks, size_t *cursor) {
-    (void)buf;
     if (*cursor == 0) return;
-    (*cursor)--;
+    *cursor = utf8_prev(buf->data, *cursor);
     size_t bi = paste_block_covering(blocks, *cursor);
     if (bi != (size_t)-1) *cursor = ((ClayPasteBlock *)clay_array_get(blocks, bi))->start;
 }
@@ -217,6 +224,7 @@ static void prompt_cursor_left(ClayStr *buf, ClayArray *blocks, size_t *cursor) 
 static void prompt_cursor_right(ClayStr *buf, ClayArray *blocks, size_t *cursor) {
     if (*cursor >= buf->len) return;
     (*cursor)++;
+    while (*cursor < buf->len && ((unsigned char)buf->data[*cursor] & 0xc0) == 0x80) (*cursor)++;
     size_t bi = paste_block_covering(blocks, *cursor);
     if (bi != (size_t)-1) *cursor = ((ClayPasteBlock *)clay_array_get(blocks, bi))->end;
 }
@@ -317,15 +325,12 @@ static void completion_add_clipped(ClayStr *line, const char *text, int availabl
     int limit = available > 3 ? available - 3 : available;
     size_t bytes = 0;
     int width = 0;
-    while (text[bytes] && width < limit) {
-        unsigned char byte = (unsigned char)text[bytes];
-        size_t char_bytes = 1;
-        if ((byte & 0xE0) == 0xC0) char_bytes = 2;
-        else if ((byte & 0xF0) == 0xE0) char_bytes = 3;
-        else if ((byte & 0xF8) == 0xF0) char_bytes = 4;
-        if (!text[bytes + char_bytes - 1]) break;
+    while (text[bytes]) {
+        size_t char_bytes;
+        size_t cells = clay_utf8_char_width(text + bytes, &char_bytes);
+        if (cells > (size_t)(limit - width)) break;
         bytes += char_bytes;
-        width++;
+        width += (int)cells;
     }
     clay_str_insert_n(line, line->len, text, bytes);
     if (available > 3) clay_str_push(line, "...");
@@ -627,7 +632,10 @@ static char *interactive_prompt_line(ClayCommandRegistry *commands) {
                 clay_str_push_char(&burst, nch);
             }
 
-            if (burst.len >= CLAY_PASTE_MIN_CHARS) {
+            size_t ascii_len = 0;
+            while (ascii_len < burst.len && (unsigned char)burst.data[ascii_len] < 0x80) ascii_len++;
+            /* shortcut: non-ASCII pastes stay expanded; use bracketed paste to identify them reliably. */
+            if (burst.len >= CLAY_PASTE_MIN_CHARS && ascii_len == burst.len) {
                 paste_block_insert(&buf, &blocks, &cursor, burst.data, burst.len);
             } else {
                 paste_blocks_shift(&blocks, cursor, (long)burst.len);
@@ -684,10 +692,11 @@ int clay_prompt_was_interrupted(void) {
     return g_last_line_interrupted;
 }
 
-static void render_secret_line(const char *question, size_t len) {
+static void render_secret_line(const char *question, const ClayStr *buf) {
     clay_term_clear_line();
     printf("%s%s%s  ", clay_color(CLAY_WHITE), question, clay_color(CLAY_RESET));
-    for (size_t i = 0; i < len; i++) fputc('*', stdout);
+    for (size_t i = 0; i < buf->len; i++)
+        if (((unsigned char)buf->data[i] & 0xc0) != 0x80) fputc('*', stdout);
     fflush(stdout);
 }
 
@@ -707,7 +716,7 @@ char *clay_prompt_secret(const char *question) {
     int got_eof = 0;
 
     clay_term_raw_enable();
-    render_secret_line(question, buf.len);
+    render_secret_line(question, &buf);
 
     for (;;) {
         char ch = 0;
@@ -719,14 +728,17 @@ char *clay_prompt_secret(const char *question) {
             got_eof = 1;
             break;
         } else if (key == CLAY_KEY_BACKSPACE) {
-            if (buf.len > 0) buf.data[--buf.len] = '\0';
+            if (buf.len > 0) {
+                buf.len = utf8_prev(buf.data, buf.len);
+                buf.data[buf.len] = '\0';
+            }
         } else if (key == CLAY_KEY_CHAR) {
             clay_str_push_char(&buf, ch);
         } else {
             continue;
         }
 
-        render_secret_line(question, buf.len);
+        render_secret_line(question, &buf);
     }
 
     fputc('\n', stdout);

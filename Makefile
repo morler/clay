@@ -160,7 +160,9 @@ TEST_OBJ_ALL := $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(CHAT_TEST_OBJ) \
 	$(REPO_MAP_TEST_OBJ) $(ENV_BLOCK_TEST_OBJ) $(COMPACT_TEST_OBJ) \
 	$(CODEX_TEST_OBJ) $(GROK_TEST_OBJ) $(UNDO_TEST_OBJ) \
 	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(TEST_OBJ)
-TEST_DEP := $(TEST_OBJ_ALL:.o=.d)
+UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
+UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
+TEST_DEP := $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d)
 
 # Windows cross-build via mingw-w64. With CURL_LINK=dynamic, clay.exe needs
 # libcurl-4.dll and its own dependency DLLs alongside it.
@@ -182,7 +184,7 @@ UNIT_TEST_TARGETS := $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(CHAT_TEST_TARGE
 	$(TODOWRITE_TEST_TARGET) $(ASK_USER_TEST_TARGET) $(TASKS_TEST_TARGET) $(MODES_TEST_TARGET) $(SUBAGENT_TEST_TARGET) $(PROCESS_TEST_TARGET) $(MCP_TEST_TARGET) \
 	$(REPO_MAP_TEST_TARGET) $(ENV_BLOCK_TEST_TARGET) $(COMPACT_TEST_TARGET) \
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
-	$(SKILL_TEST_TARGET)
+	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
 .PHONY: all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
 
@@ -204,6 +206,15 @@ $(TARGET): $(OBJ) | $(BIN_DIR)
 
 test: $(UNIT_TEST_TARGETS)
 	@set -e; for test_binary in $^; do ./$$test_binary; done
+
+$(BIN_DIR)/test_prompt_utf8: $(filter-out $(BUILD_DIR)/render/prompt.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_prompt_utf8.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_term_width: $(LIB_OBJ) $(BUILD_DIR)/tests/test_term_width.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_wrap_utf8: $(LIB_OBJ) $(BUILD_DIR)/tests/test_wrap_utf8.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS) -Wl,--wrap=clay_term_width
 
 test-openai: $(TEST_TARGET)
 	@./$<

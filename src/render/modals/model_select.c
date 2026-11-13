@@ -236,7 +236,11 @@ ClayModelSelection clay_model_select(const ClayModelProvider *providers, int pro
         } else if (key == CLAY_KEY_DOWN) {
             if (filtered_count > 0) selected = (selected + 1) % filtered_count;
         } else if (key == CLAY_KEY_BACKSPACE) {
-            if (filter.len > 0) filter.data[--filter.len] = '\0';
+            if (filter.len > 0) {
+                filter.len--;
+                while (filter.len > 0 && ((unsigned char)filter.data[filter.len] & 0xc0) == 0x80) filter.len--;
+                filter.data[filter.len] = '\0';
+            }
         } else if (key == CLAY_KEY_CHAR) {
             clay_str_push_char(&filter, ch);
         } else if (key == CLAY_KEY_ENTER) {

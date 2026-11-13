@@ -391,8 +391,11 @@ static void render_locked(void) {
     g_last_input.data[cursor] = '\0';
     size_t start = 0;
     int omitted = 0;
-    while ((int)clay_utf8_width(g_last_input.data + start) > input_space - 1 &&
-           start < cursor) {
+    size_t before_cursor = clay_utf8_width(g_last_input.data);
+    int cursor_limit = input_space > 0 ? input_space - 1 : 0;
+    int scroll = before_cursor > (size_t)cursor_limit;
+    if (scroll && input_space > 1) cursor_limit--;
+    while (scroll && before_cursor > (size_t)cursor_limit && start < cursor) {
         unsigned char byte = (unsigned char)g_last_input.data[start];
         if (byte == 0x1b) {
             start++;
@@ -411,18 +414,13 @@ static void render_locked(void) {
             } else if (g_last_input.data[start]) {
                 start++;
             }
-        } else if ((byte & 0xE0) == 0xC0) {
-            start += 2;
-        } else if ((byte & 0xF0) == 0xE0) {
-            start += 3;
-        } else if ((byte & 0xF8) == 0xF0) {
-            start += 4;
         } else {
-            start++;
+            size_t bytes;
+            before_cursor -= clay_utf8_char_width(g_last_input.data + start, &bytes);
+            start += bytes;
         }
-        omitted = 1;
+        omitted = input_space > 1;
     }
-    int before_cursor = (int)clay_utf8_width(g_last_input.data + start);
     g_last_input.data[cursor] = saved;
     if (omitted && input_space > 0) fputs("…", stdout);
     clay_term_write_clipped(g_last_input.data + start,
@@ -457,7 +455,7 @@ static void render_locked(void) {
 
     if (rows_to_visit > 1) clay_term_cursor_up(rows_to_visit - 1);
 
-    clay_term_cursor_col(prompt_prefix + (omitted && input_space > 0 ? 1 : 0) + before_cursor);
+    clay_term_cursor_col(prompt_prefix + (omitted && input_space > 0 ? 1 : 0) + (int)before_cursor);
 
     g_last_line_count = total_now;
     fflush(stdout);

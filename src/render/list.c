@@ -108,17 +108,55 @@ void clay_turn_header(const char *model) {
            model && *model ? model : "model", clay_color(CLAY_RESET));
 }
 
-/* Bytes of `text` that fit in `columns` display columns, on a UTF-8
-   boundary. */
-static size_t prefix_within_width(const char *text, int columns) {
+/* Return zero for an incomplete escape, which may continue in another chunk. */
+static size_t ansi_bytes(const char *text) {
+    const unsigned char *p = (const unsigned char *)text + 1;
+    if (*p == '[') {
+        p++;
+        while (*p && (*p < 0x40 || *p > 0x7e)) p++;
+        if (!*p) return 0;
+        p++;
+    } else if (*p == ']') {
+        p++;
+        while (*p && *p != 0x07 && !(*p == 0x1b && p[1] == 0x5c)) p++;
+        if (!*p) return 0;
+        p += *p == 0x07 ? 1 : 2;
+    } else {
+        if (!*p) return 0;
+        p++;
+    }
+    return (size_t)(p - (const unsigned char *)text);
+}
+
+/* Bytes fitting on UTF-8 and ANSI sequence boundaries. */
+static size_t prefix_within_width(const char *text, int columns, int *used) {
     size_t offset = 0;
-    int used = 0;
-    while (text[offset] && used < columns) {
-        unsigned char c = (unsigned char)text[offset];
-        offset += (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
-        used++;
+    *used = 0;
+    while (text[offset]) {
+        size_t bytes;
+        if ((unsigned char)text[offset] == 0x1b) {
+            bytes = ansi_bytes(text + offset);
+            if (!bytes) return offset + strlen(text + offset);
+        } else {
+            size_t width = clay_utf8_char_width(text + offset, &bytes);
+            if (width > (size_t)(columns - *used)) break;
+            *used += (int)width;
+        }
+        offset += bytes;
     }
     return offset;
+}
+
+/* A delimiter inside a streamed escape is data, not a word boundary. */
+static int inside_ansi(const char *text) {
+    for (size_t i = 0; text[i]; i++) {
+        if ((unsigned char)text[i] == 0x1b) {
+            size_t bytes = ansi_bytes(text + i);
+            if (!bytes) return 1;
+            i += bytes - 1;
+        }
+    }
+    return 0;
 }
 
 void clay_wrap_init(ClayWrap *wrap, int indent,
@@ -150,21 +188,33 @@ void clay_wrap_flush(ClayWrap *wrap) {
     if (wrap->col + word_width > limit && wrap->indent + word_width <= limit)
         wrap_break(wrap);
     /* A word longer than the row itself has to be cut somewhere. */
-    while (wrap->col + (int)clay_utf8_width(wrap->word.data) > limit) {
+    while (wrap->word.len && wrap->col + (int)clay_utf8_width(wrap->word.data) > limit) {
         int room = limit - wrap->col;
-        if (room <= 0) {
-            wrap_break(wrap);
-            continue;
+        int used;
+        size_t bytes = prefix_within_width(wrap->word.data, room > 0 ? room : 0, &used);
+        if (bytes && !used && wrap->col == wrap->indent && wrap->word.data[bytes]) {
+            size_t char_bytes;
+            clay_utf8_char_width(wrap->word.data + bytes, &char_bytes);
+            bytes += char_bytes;
         }
-        size_t bytes = prefix_within_width(wrap->word.data, room);
+        if (!bytes) {
+            if (wrap->col > wrap->indent) {
+                wrap_break(wrap);
+                continue;
+            }
+            /* A character wider than the entire row must overflow to progress. */
+            clay_utf8_char_width(wrap->word.data, &bytes);
+        }
         ClayStr piece;
         clay_str_init(&piece);
         clay_str_push_n(&piece, wrap->word.data, bytes);
         wrap->write(piece.data, wrap->user_data);
+        wrap->col += (int)clay_utf8_width(piece.data);
         clay_str_free(&piece);
         clay_str_remove_n(&wrap->word, 0, bytes);
-        wrap_break(wrap);
+        if (wrap->word.len) wrap_break(wrap);
     }
+    if (!wrap->word.len) return;
     wrap->write(wrap->word.data, wrap->user_data);
     wrap->col += (int)clay_utf8_width(wrap->word.data);
     clay_str_clear(&wrap->word);
@@ -173,23 +223,21 @@ void clay_wrap_flush(ClayWrap *wrap) {
 void clay_wrap_write(ClayWrap *wrap, const char *text) {
     if (!text || !*text) return;
     for (const unsigned char *p = (const unsigned char *)text; *p;) {
-        if (*p == '\n') {
+        int escaped = (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') &&
+                      wrap->word.len && inside_ansi(wrap->word.data);
+        if (*p == '\n' && !escaped) {
             clay_wrap_flush(wrap);
             wrap_break(wrap);
             p++;
             continue;
         }
-        if (*p == '\r') {
+        if (*p == '\r' && !escaped) {
             p++;
             continue;
         }
-        size_t len = (*p & 0xE0) == 0xC0   ? 2
-                     : (*p & 0xF0) == 0xE0 ? 3
-                     : (*p & 0xF8) == 0xF0 ? 4
-                                           : 1;
-        clay_str_push_n(&wrap->word, (const char *)p, len);
-        if (*p == ' ' || *p == '\t') clay_wrap_flush(wrap);
-        p += len;
+        clay_str_push_char(&wrap->word, (char)*p);
+        if ((*p == ' ' || *p == '\t') && !escaped) clay_wrap_flush(wrap);
+        p++;
     }
 }
 

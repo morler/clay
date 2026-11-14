@@ -1,11 +1,11 @@
 ---
 # clay-ogb9
 title: 统一 UTF-8 边界和终端列宽处理
-status: in-progress
+status: completed
 type: task
 priority: normal
 created_at: 2026-11-13T15:13:33Z
-updated_at: 2026-11-14T08:10:17Z
+updated_at: 2026-11-14T13:09:35Z
 parent: clay-4lb4
 ---
 
@@ -14,3 +14,7 @@ parent: clay-4lb4
 已实现跨 locale 的 UTF-8 宽度与裁剪，并加入专项测试；待进一步审查、跨平台验证。
 
 在独立 /tmp 构建目录重新编译并运行 test_prompt_utf8、test_term_width、test_wrap_utf8 均通过；新增 POSIX PTY 中文编辑回归，跨平台和真实终端验证仍待完成。
+
+## Summary of Changes
+
+UTF-8 宽度、裁剪与换行实现并测试通过：clay_utf8_char_width/clay_utf8_width/clay_term_write_clipped 采用内置宽/零宽区间表，不依赖 locale；无效/不完整 UTF-8 按单字节宽 1 处理，ANSI CSI/OSC 序列零宽。tests/test_term_width.c 覆盖中文、组合字符、孤立多字节、代理对、超范围码点、CSI/OSC 与裁剪；tests/test_wrap_utf8.c 覆盖换行、折行、超长行视口；tests/test_prompt_utf8.c 与 PTY 回归覆盖码点编辑与粘贴块。make 构建后三测试与 tests/test_prompt_pty.py 全部通过。Windows 控制台码页设置(CP_UTF8 + VT)在 src/render/term.c:85-90，真实 Windows 终端验证留待 clay-3r23/clay-zqs6。

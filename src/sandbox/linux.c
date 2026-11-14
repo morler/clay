@@ -157,6 +157,19 @@ static int setup_system_dirs(const ClayStr *root) {
         clay_str_free(&target);
         if (!ok) return -1;
     }
+    /* Fedora aliases /usr/bin/* through /etc/alternatives; mount it so those
+       symlinks resolve inside the sandbox. */
+    struct stat alt_st;
+    if (lstat("/etc/alternatives", &alt_st) == 0 && S_ISDIR(alt_st.st_mode)) {
+        ClayStr alt;
+        clay_str_init(&alt);
+        clay_str_push(&alt, root->data);
+        clay_str_push(&alt, "/etc/alternatives");
+        int alt_ok = make_dir_under(root, "/etc") == 0 && make_dir_under(root, "/etc/alternatives") == 0 &&
+            bind_mount("/etc/alternatives", alt.data, 1) == 0;
+        clay_str_free(&alt);
+        if (!alt_ok) return -1;
+    }
     return 0;
 }
 

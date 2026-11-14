@@ -1326,7 +1326,9 @@ ClayCommands *clay_commands_create(ClayApp *app) {
   clay_config_selection_load(&commands->selected_provider,
                              &commands->selected_model);
   int environment_selection = 0;
-  const char *forced_provider = environment_provider();
+  const char *forced_provider = env_value("CLAY_PROVIDER", NULL);
+  if (!forced_provider && !commands->selected_provider)
+    forced_provider = environment_provider();
   if (forced_provider && clay_commands_find_provider(commands, forced_provider)) {
     if (!commands->selected_provider ||
         strcmp(commands->selected_provider, forced_provider) != 0) {

@@ -19,11 +19,43 @@ static void assert_mode(ClayCommands *commands, ClaySandboxMode mode, int auto_a
     free(saved);
 }
 
+static void test_provider_selection(void) {
+    ClayProviderConfig custom = {
+        .id = "custom", .apikey = "custom-key", .base_url = "https://example.com/v1"
+    };
+    assert(clay_config_save(&custom) == 0);
+    assert(clay_config_selection_save("custom", "saved-model") == 0);
+    assert(setenv("OPENAI_API_KEY", "openai-key", 1) == 0);
+    assert(unsetenv("CLAY_PROVIDER") == 0);
+
+    ClayCommands *commands = clay_commands_create(NULL);
+    assert(commands);
+    assert(commands->selected_provider && strcmp(commands->selected_provider, "custom") == 0);
+    assert(commands->selected_model && strcmp(commands->selected_model, "saved-model") == 0);
+    clay_commands_destroy(commands);
+
+    assert(setenv("CLAY_PROVIDER", "openai", 1) == 0);
+    commands = clay_commands_create(NULL);
+    assert(commands);
+    assert(commands->selected_provider && strcmp(commands->selected_provider, "openai") == 0);
+    assert(!commands->selected_model);
+    clay_commands_destroy(commands);
+
+    char *provider = NULL, *model = NULL;
+    assert(clay_config_selection_load(&provider, &model) == 0);
+    assert(provider && strcmp(provider, "custom") == 0);
+    assert(model && strcmp(model, "saved-model") == 0);
+    free(provider);
+    free(model);
+}
+
 int main(void) {
     char template[] = "/tmp/clay_test_modes_XXXXXX";
     char *home = mkdtemp(template);
     assert(home);
+    assert(clearenv() == 0);
     assert(setenv("HOME", home, 1) == 0);
+    test_provider_selection();
     assert(clay_sandbox_supported()); /* the 4-way cycle needs a real sandbox */
 
     ClayCommands commands;

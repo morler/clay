@@ -56,6 +56,12 @@ typedef struct {
 int clay_term_shell_exec(const char *command, ClayStr *output,
                          size_t output_limit, const ClayExecOptions *options,
                          ClayExecResult *result);
+/* input_fd >= 0 supplies a readable descriptor as stdin; -1 inherits stdin.
+   The caller retains ownership and must keep it open until the call returns;
+   the child shares its file offset. Windows rejects nonnegative fds. */
+int clay_term_shell_exec_input(const char *command, ClayStr *output,
+                               size_t output_limit, const ClayExecOptions *options,
+                               ClayExecResult *result, int input_fd);
 int clay_term_change_dir(const char *path);
 
 /* Current directory with the user's home collapsed to "~". Malloc'd,

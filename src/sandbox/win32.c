@@ -56,3 +56,14 @@ int clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, Clay
     }
     return clay_term_shell_exec(command, output, output_limit, options, result);
 }
+
+int clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *command, ClayStr *output,
+                           size_t output_limit, const ClayExecOptions *options,
+                           ClayExecResult *result, int input_fd) {
+    if (input_fd >= 0) {
+        result->exit_code = -1;
+        result->output_truncated = result->timed_out = result->stopped = 0;
+        return -1;
+    }
+    return clay_sandbox_exec(config, command, output, output_limit, options, result);
+}

@@ -29,6 +29,8 @@
 #ifdef __linux__
 static struct stat swap_target;
 static int swap_armed, swap_done;
+static int grep_swap_armed, grep_swap_done;
+static const char *grep_swap_secret;
 int __real_fstat(int fd, struct stat *st);
 int __wrap_fstat(int fd, struct stat *st) {
     int rc = __real_fstat(fd, st);
@@ -40,6 +42,17 @@ int __wrap_fstat(int fd, struct stat *st) {
         swap_done = 1;
     }
     return rc;
+}
+
+int __real_clay_sandbox_exec_input(const ClaySandboxConfig *, const char *, ClayStr *, size_t, const ClayExecOptions *, ClayExecResult *, int);
+int __wrap_clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *command, ClayStr *output, size_t output_limit, const ClayExecOptions *options, ClayExecResult *result, int input_fd) {
+    if (grep_swap_armed) {
+        grep_swap_armed = 0;
+        assert(rename("grep-race.txt", "grep-race-old.txt") == 0);
+        assert(symlink(grep_swap_secret, "grep-race.txt") == 0);
+        grep_swap_done = 1;
+    }
+    return __real_clay_sandbox_exec_input(config, command, output, output_limit, options, result, input_fd);
 }
 #endif
 
@@ -55,6 +68,31 @@ static ClayJson *call(ClayFsTool fn, const char *json_args) {
 static int ok(ClayJson *result) {
     return clay_json_bool_value(clay_json_object_get(result, "ok"));
 }
+
+#ifdef __linux__
+static void test_grep_race(ClayCommands *commands) {
+    /* Pin the regular-file fd before a deterministic path swap. */
+    char race_secret[] = "/tmp/clay_grep_race_XXXXXX";
+    int secret_fd = mkstemp(race_secret);
+    assert(secret_fd >= 0);
+    FILE *race_fixture = fdopen(secret_fd, "w");
+    assert(race_fixture && fputs("grep_race_external_secret\n", race_fixture) >= 0 && fclose(race_fixture) == 0);
+    grep_swap_secret = race_secret;
+    race_fixture = fopen("grep-race.txt", "w");
+    assert(race_fixture && fputs("grep_race_original\n", race_fixture) >= 0 && fclose(race_fixture) == 0);
+    grep_swap_done = 0;
+    grep_swap_armed = 1;
+    ClayJson *race_args = clay_json_parse("{\"pattern\":\"grep_race_\",\"path\":\"grep-race.txt\",\"glob\":\"*.txt\"}", NULL);
+    ClayJson *result = clay_fs_tool_grep(race_args, commands);
+    assert(ok(result));
+    const char *output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(grep_swap_done && output && strstr(output, "grep_race_original"));
+    assert(!strstr(output, "grep_race_external_secret"));
+    clay_json_free(result); clay_json_free(race_args);
+    assert(unlink("grep-race.txt") == 0 && unlink("grep-race-old.txt") == 0);
+    assert(unlink(race_secret) == 0);
+}
+#endif
 
 int main(void) {
     char template[] = "/tmp/clay_test_fs_XXXXXX";
@@ -384,6 +422,10 @@ int main(void) {
     assert(ok(result));
     assert(strstr(clay_json_string_value(clay_json_object_get(result, "output")), "1:line1"));
     clay_json_free(result);
+#ifdef __linux__
+    test_grep_race(&commands);
+#endif
+
     /* Recursive grep must not follow links outside the workspace. */
     char outside_template[] = "/tmp/clay_grep_outside_XXXXXX";
     char *outside_dir = mkdtemp(outside_template);
@@ -420,6 +462,11 @@ int main(void) {
     assert(strstr(output, "2:line2"));
     clay_json_free(result);
     clay_json_free(regex_args);
+    ClayJson *error_args = clay_json_parse("{\"pattern\":\"line1\",\"path\":\"missing.txt\"}", NULL);
+    result = clay_fs_tool_grep(error_args, &commands);
+    assert(!ok(result));
+    assert(strstr(clay_json_string_value(clay_json_object_get(result, "error")), "grep failed"));
+    clay_json_free(result); clay_json_free(error_args);
     char *scratch = clay_chat_scratch_dir(commands.chat);
     ClaySandboxConfig probe = {.mode = CLAY_SANDBOX_MODE_SANDBOX, .workspace_dir = workspace, .scratch_dir = scratch};
     ClayStr probe_output; clay_str_init(&probe_output);
@@ -427,6 +474,9 @@ int main(void) {
     int probe_rc = clay_sandbox_exec(&probe, "test -f /workspace/a.txt", &probe_output, 4096, NULL, &probe_result);
     if (probe_rc == 0 && probe_result.exit_code == 0) {
         commands.sandbox_mode = CLAY_SANDBOX_MODE_SANDBOX;
+#ifdef __linux__
+        test_grep_race(&commands);
+#endif
         result = clay_fs_tool_grep(grep_args, &commands);
         assert(ok(result));
         assert(strstr(clay_json_string_value(clay_json_object_get(result, "output")), "1:line1"));

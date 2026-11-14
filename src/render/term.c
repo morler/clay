@@ -254,12 +254,19 @@ char *clay_term_display_cwd(void) {
 int clay_term_shell_exec(const char *command, ClayStr *output,
                          size_t output_limit, const ClayExecOptions *options,
                          ClayExecResult *result) {
+  return clay_term_shell_exec_input(command, output, output_limit, options, result, -1);
+}
+
+int clay_term_shell_exec_input(const char *command, ClayStr *output,
+                               size_t output_limit, const ClayExecOptions *options,
+                               ClayExecResult *result, int input_fd) {
   result->exit_code = -1;
   result->output_truncated = 0;
   result->timed_out = 0;
   result->stopped = 0;
   int timeout_seconds = exec_timeout_seconds(options);
 #ifdef _WIN32
+  if (input_fd >= 0) return -1;
   SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
   HANDLE read_handle = NULL, write_handle = NULL;
   if (!CreatePipe(&read_handle, &write_handle, &security, 0) ||
@@ -392,6 +399,10 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
   result->stopped = stopped;
   return 0;
 #else
+  if (input_fd >= 0) {
+    int input_flags = fcntl(input_fd, F_GETFL);
+    if (input_flags < 0 || (input_flags & O_ACCMODE) == O_WRONLY) return -1;
+  }
   int pipe_fds[2];
   if (pipe(pipe_fds) != 0) return -1;
   /* Anything still sitting in stdout's buffer would be flushed into the
@@ -405,6 +416,14 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
   }
   if (pid == 0) {
     setpgid(0, 0);
+    if (input_fd >= 0) {
+      if (input_fd == STDIN_FILENO) {
+        if (fcntl(STDIN_FILENO, F_SETFD, 0) < 0) _exit(126);
+      } else {
+        if (dup2(input_fd, STDIN_FILENO) < 0) _exit(126);
+        if (input_fd > STDERR_FILENO) close(input_fd);
+      }
+    }
     dup2(pipe_fds[1], STDOUT_FILENO);
     dup2(pipe_fds[1], STDERR_FILENO);
     close(pipe_fds[0]);

@@ -41,4 +41,10 @@ int clay_sandbox_supported(void);
 int clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, ClayStr *output,
                        size_t output_limit, const ClayExecOptions *options, ClayExecResult *result);
 
+/* As above, with an optional caller-owned stdin descriptor (-1 inherits).
+   Nonnegative input descriptors are supported on Linux only. */
+int clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *command, ClayStr *output,
+                           size_t output_limit, const ClayExecOptions *options,
+                           ClayExecResult *result, int input_fd);
+
 #endif /* CLAY_SANDBOX_H */

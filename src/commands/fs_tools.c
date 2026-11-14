@@ -914,11 +914,66 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
         clay_str_push(&invocation, " --include=");
         clay_term_shell_quote(&invocation, include);
     }
-    clay_str_push(&invocation, " -- ");
     const char *relative = target.data + strlen(workspace_dir);
     while (*relative == '/') relative++;
+
+#ifdef __linux__
+    /* Directories retain the path-based grep behavior; their traversal still
+       has a race. Regular files are pinned before grep starts to avoid it. */
+    int input_fd = -1;
+    int input_open_failed = 0;
+    int root = open(".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (root >= 0 && *relative) {
+        input_fd = read_open_beneath(root, relative, O_RDONLY | O_NONBLOCK);
+        int saved_errno = errno;
+        close(root);
+        errno = saved_errno;
+        if (input_fd >= 0) {
+            struct stat st;
+            if (fstat(input_fd, &st) != 0) {
+                close(input_fd);
+                input_fd = -1;
+                input_open_failed = 1;
+            } else if (!S_ISREG(st.st_mode)) {
+                close(input_fd);
+                input_fd = -1;
+            }
+        } else {
+            input_open_failed = 1;
+        }
+    } else if (root >= 0) {
+        close(root);
+    } else if (*relative) {
+        input_open_failed = 1;
+    }
+    int regular_file = input_fd >= 0;
+    if (regular_file) {
+        /* --label preserves grep's stdin label option without adding a
+           filename prefix, matching explicit single-file grep output. */
+        clay_str_push(&invocation, " --label=");
+        clay_term_shell_quote(&invocation, relative);
+        clay_str_push(&invocation, " -- -");
+    } else {
+        clay_str_push(&invocation, " -- ");
+        clay_term_shell_quote(&invocation, *relative ? relative : ".");
+    }
+#else
+    clay_str_push(&invocation, " -- ");
     clay_term_shell_quote(&invocation, *relative ? relative : ".");
+#endif
     clay_str_free(&target);
+#ifdef __linux__
+    if (input_open_failed) {
+        if (input_fd >= 0) close(input_fd);
+        free(workspace_dir);
+        clay_str_free(&invocation);
+        clay_json_object_set(result, "ok", clay_json_bool(0));
+        clay_json_object_set(result, "output", clay_json_string(""));
+        clay_json_object_set(result, "output_truncated", clay_json_bool(0));
+        clay_json_object_set(result, "error", clay_json_string("grep failed"));
+        return result;
+    }
+#endif
     char *scratch_dir = clay_chat_scratch_dir(commands->chat);
     ClaySandboxConfig sandbox = {
         .mode = commands->sandbox_mode,
@@ -929,7 +984,17 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
     ClayStr output;
     clay_str_init(&output);
     ClayExecResult exec = {0};
-    int rc = clay_sandbox_exec(&sandbox, invocation.data, &output, CLAY_FS_GREP_CAPTURE_LIMIT, NULL, &exec);
+#ifdef __linux__
+    int rc = regular_file
+                 ? clay_sandbox_exec_input(&sandbox, invocation.data, &output,
+                                           CLAY_FS_GREP_CAPTURE_LIMIT, NULL, &exec, input_fd)
+                 : clay_sandbox_exec(&sandbox, invocation.data, &output,
+                                     CLAY_FS_GREP_CAPTURE_LIMIT, NULL, &exec);
+    if (input_fd >= 0) close(input_fd);
+#else
+    int rc = clay_sandbox_exec(&sandbox, invocation.data, &output,
+                               CLAY_FS_GREP_CAPTURE_LIMIT, NULL, &exec);
+#endif
     int exit_code = exec.exit_code;
     int truncated = exec.output_truncated;
     free(workspace_dir);

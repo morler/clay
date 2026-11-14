@@ -1481,6 +1481,72 @@ static struct termios g_orig_termios;
 static int g_raw_active = 0;
 #endif
 
+void clay_term_bracketed_paste_enable(void) {
+#ifndef _WIN32
+  fputs("\x1b[?2004h", stdout);
+  fflush(stdout);
+#endif
+}
+
+void clay_term_bracketed_paste_disable(void) {
+#ifndef _WIN32
+  fputs("\x1b[?2004l", stdout);
+  fflush(stdout);
+#endif
+}
+
+ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
+#ifdef _WIN32
+  (void)out;
+  return CLAY_PASTE_EOF;
+#else
+  char pending[6];
+  size_t pending_len = 0;
+  unsigned char c;
+  const char terminator[] = "[201~";
+  ClayPasteResult result = CLAY_PASTE_COMPLETE;
+  for (;;) {
+    /* Keep draining until the terminator after a failed paste; input cannot be resynchronized by time. */
+    if (result == CLAY_PASTE_COMPLETE && out->len + pending_len >= 16 * 1024 * 1024)
+      result = CLAY_PASTE_LIMIT;
+    if (g_interrupted) {
+      if (result == CLAY_PASTE_COMPLETE) result = CLAY_PASTE_INTERRUPTED;
+      clay_term_take_interrupt();
+    }
+    struct pollfd fd = {STDIN_FILENO, POLLIN, 0};
+    int ready = poll(&fd, 1, -1);
+    if (ready < 0 && errno == EINTR) continue;
+    if (ready < 0) {
+      result = CLAY_PASTE_EOF;
+      break;
+    }
+    ssize_t count = read(STDIN_FILENO, &c, 1);
+    if (count < 0 && errno == EINTR) continue;
+    if (count != 1) {
+      result = CLAY_PASTE_EOF;
+      break;
+    }
+    if (c == 0 && result == CLAY_PASTE_COMPLETE) result = CLAY_PASTE_INVALID;
+    if (pending_len == 0) {
+      if (c == 27) pending[pending_len++] = (char)c;
+      else if (result == CLAY_PASTE_COMPLETE) clay_str_push_char(out, (char)c);
+      continue;
+    }
+    if (c == (unsigned char)terminator[pending_len - 1]) {
+      pending[pending_len++] = (char)c;
+      if (pending_len == sizeof(pending)) return result;
+      continue;
+    }
+    if (result == CLAY_PASTE_COMPLETE)
+      for (size_t i = 0; i < pending_len; i++) clay_str_push_char(out, pending[i]);
+    pending_len = 0;
+    if (c == 27) pending[pending_len++] = (char)c;
+    else if (result == CLAY_PASTE_COMPLETE) clay_str_push_char(out, (char)c);
+  }
+  return result;
+#endif
+}
+
 void clay_term_raw_enable(void) {
 #ifndef _WIN32
   if (g_raw_active)
@@ -1610,6 +1676,7 @@ ClayKey clay_term_read_key(char *ch_out) {
       seq_len++;
     }
     seq[seq_len] = '\0';
+    if (strcmp((char *)seq, "[200~") == 0) return CLAY_KEY_PASTE_BEGIN;
     if (strcmp((char *)seq, "[A") == 0) return CLAY_KEY_UP;
     if (strcmp((char *)seq, "[B") == 0) return CLAY_KEY_DOWN;
     if (strcmp((char *)seq, "[C") == 0) return CLAY_KEY_RIGHT;

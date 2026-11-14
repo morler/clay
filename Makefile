@@ -168,7 +168,7 @@ TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(M
 	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(TEST_OBJ)
 UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
 UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
-TEST_DEP := $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d)
+TEST_DEP := $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d
 
 # Windows cross-build via mingw-w64. With CURL_LINK=dynamic, clay.exe needs
 # libcurl-4.dll and its own dependency DLLs alongside it.
@@ -192,7 +192,7 @@ UNIT_TEST_TARGETS := $(BIN_DIR)/test_workspace_fd $(CLI_TEST_TARGET) $(COMMAND_T
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
 	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
-.PHONY: test-workspace-fd all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
+.PHONY: test-pty test-workspace-fd all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
 
 all: build
 
@@ -212,6 +212,12 @@ $(TARGET): $(OBJ) | $(BIN_DIR)
 
 test: $(UNIT_TEST_TARGETS)
 	@set -e; for test_binary in $^; do ./$$test_binary; done
+
+test-pty: $(BIN_DIR)/test_prompt_pty_driver
+	python3 tests/test_prompt_pty.py $<
+
+$(BIN_DIR)/test_prompt_pty_driver: $(LIB_OBJ) $(BUILD_DIR)/tests/test_prompt_pty_driver.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_prompt_utf8: $(filter-out $(BUILD_DIR)/render/prompt.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_prompt_utf8.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS)

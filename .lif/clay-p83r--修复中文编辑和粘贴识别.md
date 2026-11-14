@@ -5,7 +5,7 @@ status: todo
 type: task
 priority: normal
 created_at: 2026-11-13T15:13:33Z
-updated_at: 2026-11-13T15:39:30Z
+updated_at: 2026-11-14T09:31:02Z
 parent: clay-4lb4
 blocked_by:
     - clay-ogb9
@@ -14,3 +14,9 @@ blocked_by:
 修复 src/render/prompt.c 左右移动、退格和粘贴块偏移，确保不拆分 UTF-8 码点；检查密钥输入、src/render/modals/model_select.c 和其他文本输入路径。优先用 bracketed paste 标记识别粘贴，设计不支持该协议时的兼容行为，避免仅按字节数误判中文输入。验收：中英混排移动、插入、删除、输入法提交和粘贴测试通过，快捷键与英文输入不退化。
 
 已实现码点编辑、密码与筛选退格；非 ASCII 粘贴暂不折叠，bracketed paste 和交互验证待完成。
+
+新增 make test-pty：通过 POSIX 伪终端验证中文逐字节输入、光标移动、退格及提交和英文编辑；bracketed paste 及输入法实测仍待完成。
+
+POSIX bracketed paste 已实现并通过 PTY 回归（中文、分片标记、超限、中断、EOF）；make test 通过。超限或中断后持续丢弃直到结束标记，缺失标记会卡住输入，尚需安全恢复；CR 转 LF、NUL 截断、控制序列安全、Windows 和真实输入法仍需验证。
+
+新增含 NUL 粘贴整块拒绝及 PTY 回归，避免静默截断；移除不安全的超时退出方案，异常粘贴仍隔离至结束标记，以免迟到字节进入 shell。无结束标记仍会等待；协议内提前结束标记和控制序列风险待审查。Windows _getch 路径尚未支持 Unicode。

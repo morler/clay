@@ -465,6 +465,7 @@ static char *interactive_prompt_line(ClayCommandRegistry *commands) {
     int history_pos = -1; /* -1 = editing a fresh line, not browsing history */
     int got_eof = 0;
     int interrupted = 0;
+    int incomplete_paste = 0;
     int clear_armed = 0;
     int reverse_search_active = 0;
     int reverse_search_before = -1;
@@ -480,6 +481,7 @@ static char *interactive_prompt_line(ClayCommandRegistry *commands) {
     char pending_ch = 0;
 
     clay_term_raw_enable();
+    clay_term_bracketed_paste_enable();
     clay_below_set_editing(1);
     completion_render(&completion, commands, &buf, cursor);
 
@@ -509,7 +511,22 @@ static char *interactive_prompt_line(ClayCommandRegistry *commands) {
             clay_below_set_enabled("hint", 0);
         }
 
-        if (key == CLAY_KEY_ENTER) {
+        if (key == CLAY_KEY_PASTE_BEGIN) {
+            ClayStr pasted; clay_str_init(&pasted);
+            ClayPasteResult paste_result = clay_term_read_bracketed_paste(&pasted);
+            if (paste_result == CLAY_PASTE_COMPLETE && pasted.len > 0)
+                paste_block_insert(&buf, &blocks, &cursor, pasted.data, pasted.len);
+            else clay_str_free(&pasted);
+            history_pos = -1;
+            if (paste_result == CLAY_PASTE_EOF) {
+                incomplete_paste = 1;
+                break;
+            }
+            if (paste_result != CLAY_PASTE_COMPLETE) {
+                clay_below_set_text("hint", "Paste discarded; existing input preserved");
+                clay_below_set_enabled("hint", 1);
+            }
+        } else if (key == CLAY_KEY_ENTER) {
             if (!completion_apply(&completion, &buf, &blocks, &cursor, &history_pos)) break;
         } else if (key == CLAY_KEY_CLEAR_SCREEN) {
             clay_below_clear_screen();
@@ -657,12 +674,13 @@ static char *interactive_prompt_line(ClayCommandRegistry *commands) {
     clay_below_set_enabled("hint", 0);
     clay_below_set_editing(0);
     clay_below_finish();
+    clay_term_bracketed_paste_disable();
     clay_term_raw_disable();
 
     if (interrupted) {
         g_last_line_interrupted = 1;
     }
-    if (interrupted || (got_eof && buf.len == 0)) {
+    if (interrupted || incomplete_paste || (got_eof && buf.len == 0)) {
         clay_str_free(&buf);
         clay_str_free(&reverse_search_query);
         paste_blocks_free(&blocks);

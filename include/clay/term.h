@@ -125,6 +125,7 @@ typedef enum {
   CLAY_KEY_CLEAR_SCREEN,
   CLAY_KEY_HISTORY_SEARCH,
   CLAY_KEY_ESCAPE,
+  CLAY_KEY_PASTE_BEGIN,
   /* An escape sequence this build has no binding for: a focus or mouse
      report, a Home/End/Delete key, a reply to a terminal query. Never treat
      it as Escape - that would cancel a running turn behind the user's
@@ -134,6 +135,10 @@ typedef enum {
   CLAY_KEY_EOF,
   CLAY_KEY_RESIZE
 } ClayKey;
+
+/* Enables/disables xterm bracketed paste reporting. */
+void clay_term_bracketed_paste_enable(void);
+void clay_term_bracketed_paste_disable(void);
 
 /* Raw mode: no line buffering, no echo. Pair enable/disable around raw
    reads. */
@@ -147,6 +152,11 @@ int clay_term_take_interrupt(void);
 /* Reads one key in raw mode; *ch_out (if set) receives the char for
    CLAY_KEY_CHAR. */
 ClayKey clay_term_read_key(char *ch_out);
+typedef enum {
+  CLAY_PASTE_COMPLETE, CLAY_PASTE_EOF, CLAY_PASTE_INTERRUPTED, CLAY_PASTE_LIMIT, CLAY_PASTE_INVALID
+} ClayPasteResult;
+/* Reads through the terminator; caller must discard output unless complete. */
+ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out);
 ClayKey clay_term_read_key_timeout(char *ch_out, int timeout_ms);
 int clay_term_take_escape(void);
 

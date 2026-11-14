@@ -7,6 +7,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __linux__
+int clay_fs_read_workspace_limited(const char *path, size_t limit, ClayStr *out);
+int clay_fs_write_workspace(const char *path, const void *data, size_t len);
+int clay_fs_unlink_workspace(const char *path);
+#endif
+
 #define CLAY_UNDO_FILE_LIMIT (4 * 1024 * 1024)
 #define CLAY_UNDO_HISTORY_LIMIT 16
 
@@ -22,7 +28,11 @@ static void undo_entry_free(ClayUndoEntry *entry) {
    or oversized file. A missing file is represented by exists == 0. */
 static int read_snapshot(const char *path, char **data, size_t *len, int *exists) {
     ClayStr body;
+#ifdef __linux__
+    if (clay_fs_read_workspace_limited(path, CLAY_UNDO_FILE_LIMIT, &body) == 0) {
+#else
     if (clay_storage_read_limited(path, CLAY_UNDO_FILE_LIMIT, &body) == 0) {
+#endif
         *data = body.data;
         *len = body.len;
         *exists = 1;
@@ -152,10 +162,18 @@ void clay_cmd_undo(const char *args, void *user_data) {
 
     int rc;
     if (entry->before_exists) {
+#ifdef __linux__
+        rc = clay_fs_write_workspace(entry->path, entry->before, entry->before_len);
+#else
         rc = clay_term_write_project_file_atomic(entry->path, entry->before,
                                                entry->before_len);
+#endif
     } else {
+#ifdef __linux__
+        rc = clay_fs_unlink_workspace(entry->path);
+#else
         rc = remove(entry->path);
+#endif
     }
     if (rc != 0) {
         clay_sayc(CLAY_RED, "Could not undo %s: %s", entry->path,

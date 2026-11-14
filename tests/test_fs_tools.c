@@ -11,6 +11,7 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <fcntl.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stddef.h>
 #include <linux/filter.h>
@@ -83,6 +84,10 @@ int main(void) {
         r = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
         const char *message = clay_json_string_value(clay_json_object_get(r, "error"));
         success = success && !ok(r) && message && strstr(message, "a.txt") && !strstr(message, "a.tx-link");
+        clay_json_free(r);
+        r = call(clay_fs_tool_glob, "{\"pattern\":\"*\"}");
+        const char *listing = clay_json_string_value(clay_json_object_get(r, "output"));
+        success = success && ok(r) && listing && strstr(listing, "a.txt") && !strstr(listing, "a.tx-link");
         clay_json_free(r);
         _exit(success ? 0 : 1);
     }
@@ -174,12 +179,65 @@ int main(void) {
         assert(!strstr(clay_json_string_value(clay_json_object_get(result, "error")), "sensitive-unique"));
         clay_json_free(result);
     }
+    pid_t glob_child = fork();
+    assert(glob_child >= 0);
+    if (glob_child == 0) {
+        for (int i = 0; i < 40000; i++)
+            if (syscall(SYS_renameat2, AT_FDCWD, "race", AT_FDCWD, "race-link", RENAME_EXCHANGE) != 0)
+                _exit(1);
+        _exit(0);
+    }
+    for (int i = 0; i < 1000; i++) {
+        result = call(clay_fs_tool_glob, "{\"pattern\":\"*\"}");
+        assert(ok(result));
+        output = clay_json_string_value(clay_json_object_get(result, "output"));
+        assert(!strstr(output, "sensitive-unique"));
+        clay_json_free(result);
+        result = call(clay_fs_tool_glob, "{\"pattern\":\"*\",\"path\":\"race\"}");
+        if (ok(result)) {
+            output = clay_json_string_value(clay_json_object_get(result, "output"));
+            assert(!strstr(output, "sensitive-unique"));
+        }
+        clay_json_free(result);
+    }
     int status;
+    assert(waitpid(glob_child, &status, 0) == glob_child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     assert(waitpid(child, &status, 0) == child);
     assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
 #else
     printf("renameat2 unavailable; race test skipped\n");
+#endif
+#if defined(SYS_renameat2)
+    if (exchange == 0) {
+        char target[512];
+        snprintf(target, sizeof(target), "%s/mutate", outside);
+        FILE *sentinel = fopen(target, "w");
+        assert(sentinel && fputs("outside-secret", sentinel) >= 0 && fclose(sentinel) == 0);
+        pid_t writer = fork();
+        assert(writer >= 0);
+        if (!writer) {
+            for (int i = 0; i < 30000; i++)
+                if (syscall(SYS_renameat2, AT_FDCWD, "race", AT_FDCWD, "race-link", RENAME_EXCHANGE))
+                    _exit(1);
+            _exit(0);
+        }
+        for (int i = 0; i < 1000; i++) {
+            result = call(clay_fs_tool_write, "{\"path\":\"race/mutate\",\"content\":\"inside\"}");
+            clay_json_free(result);
+            result = call(clay_fs_tool_edit, "{\"path\":\"race/mutate\",\"oldString\":\"inside\",\"newString\":\"changed\"}");
+            clay_json_free(result);
+        }
+        int status;
+        assert(waitpid(writer, &status, 0) == writer && WIFEXITED(status) && !WEXITSTATUS(status));
+        char buffer[32] = {0};
+        sentinel = fopen(target, "r");
+        assert(sentinel && fread(buffer, 1, sizeof(buffer)-1, sentinel) == strlen("outside-secret"));
+        assert(fclose(sentinel) == 0 && !strcmp(buffer, "outside-secret"));
+        assert(unlink(target) == 0);
+        unlink("race/mutate");
+    }
 #endif
     assert(unlink("race-link") == 0);
     assert(unlink("race/file") == 0);
@@ -189,6 +247,52 @@ int main(void) {
     assert(rmdir(outside) == 0);
 #endif
 
+#ifdef __linux__
+    /* Apply the limit to the depth-first readdir order, not root files first. */
+    assert(mkdir("glob-order", 0700) == 0);
+    for (int i = 0; i < 501; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "glob-order/dir-%03d", i);
+        assert(mkdir(path, 0700) == 0);
+        snprintf(path, sizeof(path), "glob-order/dir-%03d/source.c", i);
+        FILE *f = fopen(path, "w"); assert(f); assert(fclose(f) == 0);
+        snprintf(path, sizeof(path), "glob-order/file-%03d", i);
+        f = fopen(path, "w"); assert(f); assert(fclose(f) == 0);
+    }
+    DIR *order_dir = opendir("glob-order");
+    assert(order_dir);
+    char expected[500][64];
+    int count = 0, sources = 0;
+    struct dirent *order_entry;
+    while (count < 500 && (order_entry = readdir(order_dir))) {
+        if (strncmp(order_entry->d_name, "dir-", 4) == 0) {
+            snprintf(expected[count++], sizeof(expected[0]), "%.7s/source.c", order_entry->d_name);
+            sources++;
+        } else if (strncmp(order_entry->d_name, "file-", 5) == 0) {
+            snprintf(expected[count++], sizeof(expected[0]), "%.8s", order_entry->d_name);
+        }
+    }
+    assert(closedir(order_dir) == 0);
+    assert(count == 500 && sources > 0);
+    ClayArray ordered_matches;
+    clay_array_init(&ordered_matches, sizeof(char *));
+    int truncated = 0;
+    clay_fs_walk_files("glob-order", "", "*", &ordered_matches, &truncated);
+    assert(truncated && ordered_matches.count == 500);
+    for (int i = 0; i < count; i++) {
+        char *match = *(char **)clay_array_get(&ordered_matches, i);
+        assert(strcmp(match, expected[i]) == 0);
+        free(match);
+    }
+    clay_array_free(&ordered_matches);
+    for (int i = 0; i < 501; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "glob-order/dir-%03d/source.c", i); assert(unlink(path) == 0);
+        snprintf(path, sizeof(path), "glob-order/dir-%03d", i); assert(rmdir(path) == 0);
+        snprintf(path, sizeof(path), "glob-order/file-%03d", i); assert(unlink(path) == 0);
+    }
+    assert(rmdir("glob-order") == 0);
+#endif
     struct stat st;
     assert(chmod("a.txt", 0755) == 0);
     result = call(clay_fs_tool_write, "{\"path\":\"a.txt\",\"content\":\"line1\\nline2\\n\"}");

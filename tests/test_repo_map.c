@@ -8,6 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#endif
 
 static void write_file(const char *path, const char *content) {
     FILE *file = fopen(path, "w");
@@ -84,6 +89,77 @@ int main(void) {
     assert(strstr(output, "util.py"));
     clay_json_free(result);
 
+#ifdef __linux__
+    /* ctags must not run even in unleashed mode: it could follow a raced link. */
+    char outside_template[] = "/tmp/clay_repo_map_outside_XXXXXX";
+    char *outside = mkdtemp(outside_template);
+    assert(outside);
+    char ctags[512], marker[512], secret[512], linkpath[512], temp[512], script[2048];
+    snprintf(ctags, sizeof(ctags), "%s/ctags", outside);
+    snprintf(marker, sizeof(marker), "%s/ran", outside);
+    snprintf(secret, sizeof(secret), "%s/secret.c", outside);
+    snprintf(linkpath, sizeof(linkpath), "%s/race.c", workspace);
+    snprintf(temp, sizeof(temp), "%s/swap", workspace);
+    snprintf(script, sizeof(script), "#!/bin/sh\n: > '%s'\necho 'LEAK function 1 /outside/secret.c'\n", marker);
+    write_file(ctags, script);
+    assert(chmod(ctags, 0700) == 0);
+    pid_t probe = fork();
+    assert(probe >= 0);
+    if (probe == 0) { execl(ctags, ctags, (char *)NULL); _exit(127); }
+    int probe_status;
+    assert(waitpid(probe, &probe_status, 0) == probe);
+    assert(WIFEXITED(probe_status) && WEXITSTATUS(probe_status) == 0);
+    assert(access(marker, F_OK) == 0);
+    assert(unlink(marker) == 0);
+    write_file(secret, "int SECRET_OUTSIDE(void) {\n helper helper helper helper\n}\n");
+    assert(setenv("PATH", outside, 1) == 0);
+    write_file(linkpath, "/* safe */\n");
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        for (;;) {
+            if (symlink(secret, temp) == 0) rename(temp, linkpath);
+            unlink(temp);
+            FILE *f = fopen(temp, "w");
+            if (f) { fputs("/* safe */\n", f); fclose(f); rename(temp, linkpath); }
+        }
+    }
+    for (int i = 0; i < 150; i++) {
+        result = clay_fs_tool_repo_map(NULL, &commands);
+        assert(clay_json_bool_value(clay_json_object_get(result, "ok")));
+        source = clay_json_string_value(clay_json_object_get(result, "source"));
+        output = clay_json_string_value(clay_json_object_get(result, "output"));
+        assert(source && strcmp(source, "heuristic") == 0);
+        assert(!strstr(output, "SECRET_OUTSIDE") && !strstr(output, "LEAK"));
+        assert(strstr(output, " helper\t(refs: 4)"));
+        clay_json_free(result);
+    }
+    assert(kill(child, SIGTERM) == 0);
+    assert(waitpid(child, NULL, 0) == child);
+    assert(access(marker, F_OK) != 0);
+    unlink(temp); unlink(linkpath); unlink(secret); unlink(ctags);
+    rmdir(outside);
+#endif
+
+    char many[512];
+    for (int i = 0; i < 501; i++) {
+        snprintf(many, sizeof(many), "%s/extra_%03d.txt", workspace, i);
+        write_file(many, "no symbols\n");
+    }
+    result = clay_fs_tool_repo_map(NULL, &commands);
+    assert(clay_json_bool_value(clay_json_object_get(result, "scan_truncated")));
+    assert(clay_json_bool_value(clay_json_object_get(result, "output_truncated")));
+    clay_json_free(result);
+    assert(unlink(c_path) == 0);
+    assert(unlink(py_path) == 0);
+    result = clay_fs_tool_repo_map(NULL, &commands);
+    assert(clay_json_bool_value(clay_json_object_get(result, "scan_truncated")));
+    assert(clay_json_bool_value(clay_json_object_get(result, "output_truncated")));
+    clay_json_free(result);
+    for (int i = 0; i < 501; i++) {
+        snprintf(many, sizeof(many), "%s/extra_%03d.txt", workspace, i);
+        assert(unlink(many) == 0);
+    }
     if (original_path_copy) {
         setenv("PATH", original_path_copy, 1);
         free(original_path_copy);

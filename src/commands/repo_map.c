@@ -1,4 +1,8 @@
 #include "context.h"
+#ifdef __linux__
+#include "clay/workspace_fd.h"
+#include <unistd.h>
+#endif
 
 #include <ctype.h>
 #include <stdio.h>
@@ -32,6 +36,7 @@ static char *dup_range(const char *start, size_t len) {
     return copy;
 }
 
+#ifndef __linux__
 static void next_field(const char *p, const char *end, const char **field_start, size_t *field_len,
                        const char **next) {
     while (p < end && *p == ' ') p++;
@@ -90,6 +95,27 @@ static int try_ctags(ClayCommands *commands, const char *workspace_dir, ClayArra
     }
     clay_str_free(&output);
     return symbols->count > 0;
+}
+
+#endif
+
+static FILE *open_scanned_file(const char *workspace_dir, int root, const char *rel) {
+#ifdef __linux__
+    (void)workspace_dir;
+    int fd = clay_workspace_fd_read(root, rel);
+    if (fd < 0) return NULL;
+    FILE *file = fdopen(fd, "rb");
+    if (!file) close(fd);
+    return file;
+#else
+    (void)root;
+    ClayStr abs;
+    clay_str_init(&abs);
+    clay_str_printf(&abs, "%s/%s", workspace_dir, rel);
+    FILE *file = fopen(abs.data, "rb");
+    clay_str_free(&abs);
+    return file;
+#endif
 }
 
 static int is_ident_char(char c) {
@@ -263,7 +289,7 @@ static int match_line(const char *ext, const char *line, const char **name_start
     return 0;
 }
 
-static void heuristic_scan(const char *workspace_dir, ClayArray *files, ClayArray *symbols) {
+static void heuristic_scan(const char *workspace_dir, int root, ClayArray *files, ClayArray *symbols) {
     for (size_t i = 0; i < files->count && symbols->count < CLAY_REPO_MAP_MAX_SYMBOLS; i++) {
         const char *rel = *(char **)clay_array_get(files, i);
         const char *ext = strrchr(rel, '.');
@@ -274,11 +300,7 @@ static void heuristic_scan(const char *workspace_dir, ClayArray *files, ClayArra
             continue;
         }
 
-        ClayStr abs;
-        clay_str_init(&abs);
-        clay_str_printf(&abs, "%s/%s", workspace_dir, rel);
-        FILE *file = fopen(abs.data, "rb");
-        clay_str_free(&abs);
+        FILE *file = open_scanned_file(workspace_dir, root, rel);
         if (!file) continue;
 
         ClayStr line;
@@ -316,7 +338,7 @@ static void free_counts(const char *key, void *value, void *ctx) {
    counter for each identifier that matches a known symbol name. Symbols
    sharing a name share a rank - good enough to surface what's widely used
    without per-definition disambiguation. */
-static void rank_symbols(const char *workspace_dir, ClayArray *files, ClayArray *symbols) {
+static void rank_symbols(const char *workspace_dir, int root, ClayArray *files, ClayArray *symbols) {
     ClayMap *counts = clay_map_create();
     for (size_t i = 0; i < symbols->count; i++) {
         ClayRepoSymbol *symbol = clay_array_get(symbols, i);
@@ -328,11 +350,7 @@ static void rank_symbols(const char *workspace_dir, ClayArray *files, ClayArray 
 
     for (size_t i = 0; i < files->count; i++) {
         const char *rel = *(char **)clay_array_get(files, i);
-        ClayStr abs;
-        clay_str_init(&abs);
-        clay_str_printf(&abs, "%s/%s", workspace_dir, rel);
-        FILE *file = fopen(abs.data, "rb");
-        clay_str_free(&abs);
+        FILE *file = open_scanned_file(workspace_dir, root, rel);
         if (!file) continue;
 
         ClayStr token;
@@ -376,28 +394,53 @@ ClayJson *clay_fs_tool_repo_map(const ClayJson *arguments, void *userdata) {
     ClayCommands *commands = userdata;
     char *workspace_dir = clay_term_cwd();
 
+#ifdef __linux__
+    int root = clay_workspace_fd_open();
+    if (root < 0) {
+        free(workspace_dir);
+        ClayJson *result = clay_json_object();
+        clay_json_object_set(result, "ok", clay_json_bool(0));
+        clay_json_object_set(result, "error", clay_json_string("could not open workspace"));
+        return result;
+    }
+    /* shortcut: ctags recursively reopens paths and can escape via symlink races;
+       restore it only with an fd-confined input mechanism. */
+    (void)commands;
+    int use_ctags = 0;
+#else
+    int root = -1;
+    int use_ctags = 1;
+#endif
     ClayArray symbols;
     clay_array_init(&symbols, sizeof(ClayRepoSymbol));
     const char *source = "ctags";
-    if (!try_ctags(commands, workspace_dir, &symbols)) {
+    int scan_truncated = 0;
+#ifndef __linux__
+    use_ctags = try_ctags(commands, workspace_dir, &symbols);
+#endif
+    if (!use_ctags) {
         source = "heuristic";
         ClayArray files;
         clay_array_init(&files, sizeof(char *));
-        int truncated = 0;
-        clay_fs_walk_files(workspace_dir, "", "*", &files, &truncated);
-        heuristic_scan(workspace_dir, &files, &symbols);
+        clay_fs_walk_files(workspace_dir, "", "*", &files, &scan_truncated);
+        heuristic_scan(workspace_dir, root, &files, &symbols);
         for (size_t i = 0; i < files.count; i++) free(*(char **)clay_array_get(&files, i));
         clay_array_free(&files);
     }
 
     ClayJson *result = clay_json_object();
     if (symbols.count == 0) {
+#ifdef __linux__
+        close(root);
+#endif
         free(workspace_dir);
         clay_array_free(&symbols);
         clay_json_object_set(result, "ok", clay_json_bool(1));
         clay_json_object_set(result, "output",
                              clay_json_string("(no recognized top-level definitions found)"));
-        clay_json_object_set(result, "output_truncated", clay_json_bool(0));
+        clay_json_object_set(result, "output_truncated", clay_json_bool(scan_truncated));
+        clay_json_object_set(result, "scan_truncated", clay_json_bool(scan_truncated));
+        clay_json_object_set(result, "source", clay_json_string(source));
         return result;
     }
 
@@ -405,7 +448,7 @@ ClayJson *clay_fs_tool_repo_map(const ClayJson *arguments, void *userdata) {
     clay_array_init(&rank_files, sizeof(char *));
     int rank_truncated = 0;
     clay_fs_walk_files(workspace_dir, "", "*", &rank_files, &rank_truncated);
-    rank_symbols(workspace_dir, &rank_files, &symbols);
+    rank_symbols(workspace_dir, root, &rank_files, &symbols);
     for (size_t i = 0; i < rank_files.count; i++) free(*(char **)clay_array_get(&rank_files, i));
     clay_array_free(&rank_files);
 
@@ -421,7 +464,8 @@ ClayJson *clay_fs_tool_repo_map(const ClayJson *arguments, void *userdata) {
     }
     clay_json_object_set(result, "ok", clay_json_bool(1));
     clay_json_object_set(result, "output", clay_json_string(out.data));
-    clay_json_object_set(result, "output_truncated", clay_json_bool(symbols.count > shown));
+    clay_json_object_set(result, "output_truncated", clay_json_bool(symbols.count > shown || scan_truncated || rank_truncated));
+    clay_json_object_set(result, "scan_truncated", clay_json_bool(scan_truncated || rank_truncated));
     clay_json_object_set(result, "source", clay_json_string(source));
     clay_str_free(&out);
 
@@ -433,6 +477,9 @@ ClayJson *clay_fs_tool_repo_map(const ClayJson *arguments, void *userdata) {
     }
     clay_array_free(&symbols);
     free(workspace_dir);
+#ifdef __linux__
+    close(root);
+#endif
     return result;
 }
 

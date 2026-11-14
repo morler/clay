@@ -4,6 +4,9 @@
 #include "context.h"
 
 #include "clay/storage.h"
+#ifdef __linux__
+#include "clay/workspace_fd.h"
+#endif
 
 #include <errno.h>
 #include <stdio.h>
@@ -104,10 +107,70 @@ int clay_fs_resolve_workspace_path(const char *workspace_dir, const char *path, 
     return 0;
 }
 
-static int write_whole_file(const char *path, const char *data, size_t len) {
-    return clay_term_write_project_file_atomic(path, data, len);
+#ifdef __linux__
+static int workspace_path(const char *absolute, int *root, const char **relative, char **cwd) {
+    *cwd = clay_term_cwd();
+    if (!*cwd) return -1;
+    size_t n = strlen(*cwd);
+    if (strncmp(absolute, *cwd, n) || (n != 1 && absolute[n] && absolute[n] != '/')) {
+        free(*cwd); errno = EINVAL; return -1;
+    }
+    *relative = absolute + (n == 1 ? 1 : n);
+    if (**relative == '/') ++*relative;
+    *root = clay_workspace_fd_open();
+    if (*root < 0) { free(*cwd); return -1; }
+    return 0;
 }
 
+int clay_fs_read_workspace_limited(const char *path, size_t limit, ClayStr *out) {
+    int root; const char *relative; char *cwd;
+    if (workspace_path(path, &root, &relative, &cwd) != 0) return -1;
+    int fd = clay_workspace_fd_read(root, relative);
+    int error = errno;
+    close(root); free(cwd); errno = error;
+    if (fd < 0) return -1;
+    clay_str_init(out);
+    char buf[4096];
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { error = errno; goto fail; }
+        if (!n) break;
+        if ((size_t)n > limit - out->len) { error = EFBIG; goto fail; }
+        clay_str_push_n(out, buf, (size_t)n);
+    }
+    if (close(fd) < 0) { clay_str_free(out); return -1; }
+    return 0;
+fail:
+    close(fd); clay_str_free(out); errno = error; return -1;
+}
+
+int clay_fs_write_workspace(const char *path, const void *data, size_t len) {
+    int root; const char *relative; char *cwd;
+    if (workspace_path(path, &root, &relative, &cwd) != 0) return -1;
+    int rc = clay_workspace_fd_write(root, relative, data, len);
+    int error = errno; close(root); free(cwd); errno = error;
+    return rc;
+}
+
+int clay_fs_unlink_workspace(const char *path) {
+    int root; const char *relative; char *cwd;
+    if (workspace_path(path, &root, &relative, &cwd) != 0) return -1;
+    int rc = clay_workspace_fd_unlink(root, relative);
+    int error = errno; close(root); free(cwd); errno = error;
+    return rc;
+}
+#endif
+
+static int write_whole_file(const char *path, const char *data, size_t len) {
+#ifdef __linux__
+    return clay_fs_write_workspace(path, data, len);
+#else
+    return clay_term_write_project_file_atomic(path, data, len);
+#endif
+}
+
+#ifndef __linux__
 /* Creates every directory above `abs_path`'s final component. */
 static int make_parent_dirs(const char *abs_path) {
     const char *slash = strrchr(abs_path, '/');
@@ -134,6 +197,8 @@ static int make_parent_dirs(const char *abs_path) {
     clay_str_free(&partial);
     return ok;
 }
+
+#endif
 
 /* Common path arg handling shared by read/write/edit. On success returns 0
    and fills abs_out/workspace_out (caller frees both); on failure fills
@@ -403,7 +468,11 @@ ClayJson *clay_fs_tool_write(const ClayJson *arguments, void *userdata) {
 
     result = clay_json_object();
     clay_json_object_set(result, "path", clay_json_string(path));
-    if (!make_parent_dirs(abs.data) || write_whole_file(abs.data, content, strlen(content)) != 0) {
+    if (
+#ifndef __linux__
+        !make_parent_dirs(abs.data) ||
+#endif
+        write_whole_file(abs.data, content, strlen(content)) != 0) {
         clay_str_free(&abs);
         clay_json_object_set(result, "ok", clay_json_bool(0));
         clay_json_object_set(result, "error", clay_json_string("could not write file"));
@@ -515,7 +584,11 @@ ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
     result = clay_json_object();
     clay_json_object_set(result, "path", clay_json_string(path));
     ClayStr content;
+#ifdef __linux__
+    if (clay_fs_read_workspace_limited(abs.data, CLAY_FS_READ_LIMIT, &content) != 0) {
+#else
     if (clay_storage_read_limited(abs.data, CLAY_FS_READ_LIMIT, &content) != 0) {
+#endif
         clay_str_free(&abs);
         clay_json_object_set(result, "ok", clay_json_bool(0));
         clay_json_object_set(result, "error", clay_json_string(strerror(errno)));
@@ -602,6 +675,82 @@ ClayJson *clay_fs_tool_edit_schema(void) {
     return schema;
 }
 
+#ifdef __linux__
+void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char *pattern, ClayArray *matches,
+                      int *truncated) {
+    if (*truncated || matches->count >= CLAY_FS_GLOB_MAX_MATCHES) { *truncated = 1; return; }
+    char *workspace = clay_term_cwd();
+    ClayStr abs;
+    if (!workspace) return;
+    if (clay_fs_resolve_workspace_path(workspace, base_dir, &abs) != 0) {
+        clay_str_free(&abs);
+        free(workspace);
+        return;
+    }
+    size_t wlen = strlen(workspace);
+    const char *relative = abs.data + (wlen == 1 ? 1 : wlen);
+    if (*relative == '/') relative++;
+    int cwd = open(".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    int root = cwd < 0 ? -1 : read_open_beneath(cwd, relative, O_PATH | O_DIRECTORY);
+    if (cwd >= 0) close(cwd);
+    clay_str_free(&abs);
+    free(workspace);
+    if (root < 0) return;
+
+    ClayArray pending;
+    clay_array_init(&pending, sizeof(char *));
+    char *initial = strdup("");
+    if (initial) clay_array_push_val(&pending, &initial);
+    while (pending.count && !*truncated) {
+        char *prefix = *(char **)clay_array_get(&pending, pending.count - 1);
+        clay_array_remove(&pending, pending.count - 1);
+        int fd = read_open_beneath(root, prefix, O_PATH);
+        struct stat st;
+        int valid = fd >= 0 && fstat(fd, &st) == 0 && !S_ISLNK(st.st_mode);
+        if (fd >= 0) close(fd);
+        if (valid && S_ISDIR(st.st_mode)) {
+            fd = read_open_beneath(root, prefix, O_RDONLY | O_DIRECTORY);
+            DIR *dir = fd < 0 ? NULL : fdopendir(fd);
+            if (!dir && fd >= 0) close(fd);
+            size_t first = pending.count;
+            struct dirent *entry;
+            while (dir && (entry = readdir(dir))) {
+                if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+                    !strcmp(entry->d_name, ".git")) continue;
+                ClayStr rel;
+                clay_str_init(&rel);
+                if (*prefix) { clay_str_push(&rel, prefix); clay_str_push_char(&rel, '/'); }
+                clay_str_push(&rel, entry->d_name);
+                char *copy = strdup(rel.data);
+                if (copy) clay_array_push_val(&pending, &copy);
+                clay_str_free(&rel);
+            }
+            if (dir) closedir(dir);
+            for (size_t i = first, j = pending.count; i < j && i < --j; i++) {
+                char **a = clay_array_get(&pending, i), **b = clay_array_get(&pending, j);
+                char *tmp = *a; *a = *b; *b = tmp;
+            }
+        } else if (valid) {
+            ClayStr match;
+            clay_str_init(&match);
+            if (*rel_prefix) { clay_str_push(&match, rel_prefix); clay_str_push_char(&match, '/'); }
+            clay_str_push(&match, prefix);
+            if (clay_str_wildcard_match(pattern, match.data)) {
+                if (matches->count >= CLAY_FS_GLOB_MAX_MATCHES) *truncated = 1;
+                else {
+                    char *copy = strdup(match.data);
+                    if (copy) clay_array_push_val(matches, &copy);
+                }
+            }
+            clay_str_free(&match);
+        }
+        free(prefix);
+    }
+    for (size_t i = 0; i < pending.count; i++) free(*(char **)clay_array_get(&pending, i));
+    clay_array_free(&pending);
+    close(root);
+}
+#else
 void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char *pattern, ClayArray *matches,
                       int *truncated) {
     if (*truncated || matches->count >= CLAY_FS_GLOB_MAX_MATCHES) {
@@ -650,6 +799,8 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
     for (size_t i = 0; i < entries.count; i++) free(*(char **)clay_array_get(&entries, i));
     clay_array_free(&entries);
 }
+
+#endif
 
 static int compare_strings(const void *a, const void *b) {
     return strcmp(*(char *const *)a, *(char *const *)b);

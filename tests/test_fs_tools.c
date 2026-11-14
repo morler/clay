@@ -9,6 +9,18 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <fcntl.h>
+#include <errno.h>
+#include <stddef.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#endif
 
 typedef ClayJson *(*ClayFsTool)(const ClayJson *arguments, void *userdata);
 
@@ -39,6 +51,143 @@ int main(void) {
     assert(strstr(output, "line1"));
     assert(strstr(output, "line2"));
     clay_json_free(result);
+
+#ifdef __linux__
+    assert(mkfifo("read-fifo", 0600) == 0);
+    alarm(3);
+    result = call(clay_fs_tool_read, "{\"path\":\"read-fifo\"}");
+    alarm(0);
+    assert(!ok(result));
+    clay_json_free(result);
+    assert(unlink("read-fifo") == 0);
+    result = call(clay_fs_tool_read, "{\"path\":\".\"}");
+    assert(!ok(result));
+    clay_json_free(result);
+
+    assert(symlink("a.txt", "a.tx-link") == 0);
+#if defined(SYS_openat2)
+    pid_t filtered = fork();
+    assert(filtered >= 0);
+    if (filtered == 0) {
+        struct sock_filter filter[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat2, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        };
+        struct sock_fprog prog = { .len = sizeof(filter) / sizeof(filter[0]), .filter = filter };
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) || prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) _exit(77);
+        ClayJson *r = call(clay_fs_tool_read, "{\"path\":\"a.txt\"}");
+        int success = ok(r);
+        clay_json_free(r);
+        r = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
+        const char *message = clay_json_string_value(clay_json_object_get(r, "error"));
+        success = success && !ok(r) && message && strstr(message, "a.txt") && !strstr(message, "a.tx-link");
+        clay_json_free(r);
+        _exit(success ? 0 : 1);
+    }
+    int filtered_status;
+    assert(waitpid(filtered, &filtered_status, 0) == filtered);
+    assert(WIFEXITED(filtered_status));
+    if (WEXITSTATUS(filtered_status) == 77) printf("seccomp unavailable; skipped\n");
+    else assert(WEXITSTATUS(filtered_status) == 0);
+#endif
+    result = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
+    assert(!ok(result));
+    assert(!strstr(clay_json_string_value(clay_json_object_get(result, "error")), "a.tx-link"));
+    clay_json_free(result);
+    assert(unlink("a.tx-link") == 0);
+
+    int cwd = open(".", O_RDONLY | O_DIRECTORY);
+    assert(cwd >= 0);
+    for (int i = 0; i < 40; i++) {
+        assert(mkdir("deep", 0700) == 0);
+        assert(chdir("deep") == 0);
+    }
+    assert(fchdir(cwd) == 0);
+    struct rlimit old_limit, low_limit;
+    assert(getrlimit(RLIMIT_NOFILE, &old_limit) == 0);
+    low_limit = old_limit;
+    if (low_limit.rlim_cur > 32) low_limit.rlim_cur = 32;
+    assert(setrlimit(RLIMIT_NOFILE, &low_limit) == 0);
+    result = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
+    assert(!ok(result));
+    assert(strstr(clay_json_string_value(clay_json_object_get(result, "error")), "a.txt"));
+    assert(strstr(clay_json_string_value(clay_json_object_get(result, "error")), "suggestion search depth limit reached"));
+    clay_json_free(result);
+    result = call(clay_fs_tool_read, "{\"path\":\"no-match\"}");
+    assert(!ok(result));
+    assert(strstr(clay_json_string_value(clay_json_object_get(result, "error")), "suggestion search depth limit reached"));
+    clay_json_free(result);
+    assert(setrlimit(RLIMIT_NOFILE, &old_limit) == 0);
+    for (int i = 0; i < 40; i++) assert(chdir("deep") == 0);
+    for (int i = 0; i < 40; i++) {
+        assert(chdir("..") == 0);
+        assert(rmdir("deep") == 0);
+    }
+    close(cwd);
+
+    /* Swap a directory with an escaping symlink while reads are in flight. */
+    char outside[] = "/tmp/clay_read_outside_XXXXXX";
+    assert(mkdtemp(outside));
+    char secret[512];
+    snprintf(secret, sizeof(secret), "%s/file", outside);
+    FILE *f = fopen(secret, "w");
+    assert(f); assert(fputs("outside-secret\n", f) >= 0); assert(fclose(f) == 0);
+    assert(mkdir("race", 0700) == 0);
+    f = fopen("race/file", "w");
+    assert(f); assert(fputs("inside\n", f) >= 0); assert(fclose(f) == 0);
+    char secret_name[512];
+    snprintf(secret_name, sizeof(secret_name), "%s/sensitive-unique", outside);
+    f = fopen(secret_name, "w");
+    assert(f); assert(fclose(f) == 0);
+    assert(symlink(outside, "race-link") == 0);
+#if defined(SYS_renameat2)
+    int exchange = syscall(SYS_renameat2, AT_FDCWD, "race", AT_FDCWD, "race-link", RENAME_EXCHANGE);
+    if (exchange == 0) {
+        assert(syscall(SYS_renameat2, AT_FDCWD, "race", AT_FDCWD, "race-link", RENAME_EXCHANGE) == 0);
+    } else {
+        assert(errno == ENOSYS || errno == EINVAL || errno == EPERM || errno == EOPNOTSUPP);
+        printf("renameat2 exchange unavailable; race test skipped\n");
+    }
+    if (exchange == 0) {
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        for (int i = 0; i < 20000; i++)
+            if (syscall(SYS_renameat2, AT_FDCWD, "race", AT_FDCWD, "race-link", RENAME_EXCHANGE) != 0)
+                _exit(1);
+        _exit(0);
+    }
+    for (int i = 0; i < 3000; i++) {
+        result = call(clay_fs_tool_read, "{\"path\":\"race/file\"}");
+        if (ok(result)) {
+            output = clay_json_string_value(clay_json_object_get(result, "output"));
+            assert(strstr(output, "inside"));
+            assert(!strstr(output, "outside-secret"));
+        }
+        clay_json_free(result);
+    }
+    for (int i = 0; i < 100; i++) {
+        result = call(clay_fs_tool_read, "{\"path\":\"sensitive\"}");
+        assert(!ok(result));
+        assert(!strstr(clay_json_string_value(clay_json_object_get(result, "error")), "sensitive-unique"));
+        clay_json_free(result);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+#else
+    printf("renameat2 unavailable; race test skipped\n");
+#endif
+    assert(unlink("race-link") == 0);
+    assert(unlink("race/file") == 0);
+    assert(rmdir("race") == 0);
+    assert(unlink(secret) == 0);
+    assert(unlink(secret_name) == 0);
+    assert(rmdir(outside) == 0);
+#endif
 
     struct stat st;
     assert(chmod("a.txt", 0755) == 0);

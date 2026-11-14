@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "context.h"
 
 #include "clay/storage.h"
@@ -10,6 +13,18 @@
 #include <windows.h>
 #else
 #include <sys/stat.h>
+#endif
+#ifdef __linux__
+#include <fcntl.h>
+#include <dirent.h>
+#if defined(__has_include)
+#if __has_include(<linux/openat2.h>) && !defined(CLAY_NO_OPENAT2)
+#include <linux/openat2.h>
+#define CLAY_HAVE_OPENAT2 1
+#endif
+#endif
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 #define CLAY_FS_READ_LIMIT (256 * 1024)
@@ -144,6 +159,71 @@ static int resolve_arg_path(const ClayJson *arguments, ClayStr *abs_out, char **
     return 0;
 }
 
+#ifdef __linux__
+static int read_open_beneath(int root, const char *path, int flags) {
+#if defined(CLAY_HAVE_OPENAT2) && defined(SYS_openat2)
+    struct open_how how = { .flags = flags | O_CLOEXEC,
+        .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS };
+    int fd = (int)syscall(SYS_openat2, root, *path ? path : ".", &how, sizeof(how));
+    if (fd >= 0 || (errno != ENOSYS && errno != EINVAL && errno != E2BIG && errno != EPERM)) return fd;
+#endif
+    char *copy = strdup(*path ? path : ".");
+    if (!copy) return -1;
+    int dir = openat(root, ".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (dir < 0) { free(copy); return -1; }
+    char *part = copy;
+    for (;;) {
+        char *slash = strchr(part, '/');
+        if (slash) *slash = '\0';
+        if (!*part || !strcmp(part, "..")) {
+            close(dir); free(copy); errno = EINVAL; return -1;
+        }
+        int next = openat(dir, part, (slash ? O_PATH | O_DIRECTORY : flags) |
+                          O_NOFOLLOW | O_CLOEXEC);
+        int saved_errno = errno;
+        close(dir);
+        if (next < 0) { free(copy); errno = saved_errno; return -1; }
+        if (!slash) { free(copy); return next; }
+        dir = next;
+        part = slash + 1;
+    }
+}
+
+static void read_suggestions(int root, const char *prefix, const char *pattern,
+                             ClayArray *matches, int *truncated, int *depth_truncated, unsigned depth) {
+    /* shortcut: limit search depth to bound open fds, use an iterative walker if deeper suggestions are needed. */
+    if (depth >= 16) { *depth_truncated = 1; return; }
+    int fd = read_open_beneath(root, prefix, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return;
+    DIR *dir = fdopendir(fd);
+    if (!dir) { close(fd); return; }
+    struct dirent *entry;
+    while (!*truncated && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") ||
+            !strcmp(entry->d_name, ".git")) continue;
+        ClayStr rel;
+        clay_str_init(&rel);
+        if (*prefix) { clay_str_push(&rel, prefix); clay_str_push_char(&rel, '/'); }
+        clay_str_push(&rel, entry->d_name);
+        int item = read_open_beneath(root, rel.data, O_PATH);
+        struct stat st;
+        if (item >= 0) {
+            int stat_ok = fstat(item, &st) == 0;
+            close(item);
+            if (stat_ok && S_ISDIR(st.st_mode))
+                read_suggestions(root, rel.data, pattern, matches, truncated, depth_truncated, depth + 1);
+            else if (stat_ok && S_ISREG(st.st_mode) && clay_str_wildcard_match(pattern, rel.data)) {
+                char *copy = strdup(rel.data);
+                if (copy) clay_array_push_val(matches, &copy);
+                if (matches->count >= CLAY_FS_GLOB_MAX_MATCHES) *truncated = 1;
+            }
+        }
+        clay_str_free(&rel);
+    }
+    closedir(dir);
+}
+#endif
+
 ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
     (void)userdata;
     ClayStr abs;
@@ -157,9 +237,41 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
 
     result = clay_json_object();
     clay_json_object_set(result, "path", clay_json_string(path));
+#ifdef __linux__
+    /* Anchor resolution to the working directory. */
+    int root = open(".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    int fd = -1;
+    if (root >= 0) {
+        size_t wlen = strlen(workspace_dir);
+        const char *relative = abs.data + (wlen == 1 ? 1 : wlen);
+        if (*relative == '/') relative++;
+        fd = read_open_beneath(root, relative, O_RDONLY | O_NONBLOCK);
+        if (fd >= 0) {
+            struct stat st;
+            if (fstat(fd, &st) != 0) {
+                int saved_errno = errno;
+                close(fd); fd = -1; errno = saved_errno;
+            } else if (!S_ISREG(st.st_mode)) {
+                close(fd); fd = -1; errno = EINVAL;
+            }
+        }
+        int saved_errno = errno;
+        close(root);
+        errno = saved_errno;
+    }
+    FILE *file = fd < 0 ? NULL : fdopen(fd, "rb");
+    if (fd >= 0 && !file) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+    }
+#else
     FILE *file = fopen(abs.data, "rb");
+#endif
+    int open_errno = errno;
     free(workspace_dir);
     clay_str_free(&abs);
+    errno = open_errno;
     if (!file) {
         clay_json_object_set(result, "ok", clay_json_bool(0));
         ClayStr error;
@@ -178,7 +290,17 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
                 ClayArray matches;
                 clay_array_init(&matches, sizeof(char *));
                 int suggest_truncated = 0;
+#ifdef __linux__
+                int depth_truncated = 0;
+                int suggest_root = open(".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+                if (suggest_root >= 0) {
+                    read_suggestions(suggest_root, "", suggest_pattern.data, &matches, &suggest_truncated, &depth_truncated, 0);
+                    close(suggest_root);
+                }
+                if (depth_truncated) clay_str_push(&error, " (suggestion search depth limit reached)");
+#else
                 clay_fs_walk_files(ws, "", suggest_pattern.data, &matches, &suggest_truncated);
+#endif
                 clay_str_free(&suggest_pattern);
                 free(ws);
                 if (matches.count > 0) {

@@ -81,6 +81,8 @@ run_case(byte_events('你好界') + [b'\x1b[D', b'\x7f'] + byte_events('世') +
          [b'\x1b[C'], '你世界'.encode())
 run_case(byte_events('abc') + [b'\x1b[D', b'\x7f'] + byte_events('X'), b'aXc')
 run_case([bytes([27]) + b"[200~hello" + bytes([10]) + b"world" + bytes([27]) + b"[201~"], b"hello" + bytes([13, 10]) + b"world")
+# Pasted CRLF and lone CR both become LF, matching terminal line breaks.
+run_case([b'\x1b[200~a\r\nb\rc\nd\x1b[201~'], b'a\r\nb\r\nc\r\nd')
 run_case([(b'\x1b[200~' + '中文'.encode(), signal.SIGWINCH, b'\x1b[20', b'1~')], '中文'.encode())
 run_case([b'old', (b'\x1b[200~part', signal.SIGINT, b'\nmalicious\n', b'\x1b[20', b'1~'), b'!'], b'old!')
 run_case([b'old', b'\x1b[200~' + b'x' * (16 * 1024 * 1024) +

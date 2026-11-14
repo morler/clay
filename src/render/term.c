@@ -1495,6 +1495,23 @@ void clay_term_bracketed_paste_disable(void) {
 #endif
 }
 
+#ifndef _WIN32
+/* Pasted CR and CRLF both mean a line break; normalize them to LF. */
+static void paste_push(ClayStr *out, char c, int *last_cr) {
+  if (c == '\r') {
+    clay_str_push_char(out, '\n');
+    *last_cr = 1;
+    return;
+  }
+  if (c == '\n' && *last_cr) {
+    *last_cr = 0;
+    return;
+  }
+  *last_cr = 0;
+  clay_str_push_char(out, c);
+}
+#endif
+
 ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
 #ifdef _WIN32
   (void)out;
@@ -1503,6 +1520,7 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
   char pending[6];
   size_t pending_len = 0;
   unsigned char c;
+  int last_cr = 0;
   const char terminator[] = "[201~";
   ClayPasteResult result = CLAY_PASTE_COMPLETE;
   for (;;) {
@@ -1529,7 +1547,7 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
     if (c == 0 && result == CLAY_PASTE_COMPLETE) result = CLAY_PASTE_INVALID;
     if (pending_len == 0) {
       if (c == 27) pending[pending_len++] = (char)c;
-      else if (result == CLAY_PASTE_COMPLETE) clay_str_push_char(out, (char)c);
+      else if (result == CLAY_PASTE_COMPLETE) paste_push(out, (char)c, &last_cr);
       continue;
     }
     if (c == (unsigned char)terminator[pending_len - 1]) {
@@ -1538,10 +1556,10 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
       continue;
     }
     if (result == CLAY_PASTE_COMPLETE)
-      for (size_t i = 0; i < pending_len; i++) clay_str_push_char(out, pending[i]);
+      for (size_t i = 0; i < pending_len; i++) paste_push(out, pending[i], &last_cr);
     pending_len = 0;
     if (c == 27) pending[pending_len++] = (char)c;
-    else if (result == CLAY_PASTE_COMPLETE) clay_str_push_char(out, (char)c);
+    else if (result == CLAY_PASTE_COMPLETE) paste_push(out, (char)c, &last_cr);
   }
   return result;
 #endif
@@ -1554,6 +1572,9 @@ void clay_term_raw_enable(void) {
   tcgetattr(STDIN_FILENO, &g_orig_termios);
   struct termios raw = g_orig_termios;
   raw.c_lflag &= ~(ECHO | ICANON);
+  /* Keep CR distinct from LF so pasted CRLF can be normalized, and stop
+     ^S/^Q from freezing input. */
+  raw.c_iflag &= ~(ICRNL | IXON);
   raw.c_cc[VMIN] = 1;
   raw.c_cc[VTIME] = 0;
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);

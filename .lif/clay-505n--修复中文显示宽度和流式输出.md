@@ -1,11 +1,11 @@
 ---
 # clay-505n
 title: 修复中文显示宽度和流式输出
-status: in-progress
+status: draft
 type: task
 priority: normal
 created_at: 2026-11-13T15:13:33Z
-updated_at: 2026-11-14T13:30:58Z
+updated_at: 2026-11-14T13:34:42Z
 parent: clay-4lb4
 blocked_by:
     - clay-ogb9
@@ -16,3 +16,5 @@ blocked_by:
 已实现列宽换行、视口和流式分片处理并加入专项测试；仍需终端集成验证。
 
 新增 POSIX PTY 集成回归：8 列中文输入视口与光标移动，缩到 3 列再恢复的重绘与提交；make test-pty 和 UTF-8 专项测试通过。真实终端/字体及提供商流式回复端到端仍待验证。
+
+按用户决定：中文支持暂视为完成，当前工作挂起；既有未验证事项及已知限制保留，恢复时继续处理。

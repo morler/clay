@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "../src/commands/context.h"
 
 #include "clay/json.h"
@@ -21,6 +24,23 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#endif
+
+#ifdef __linux__
+static struct stat swap_target;
+static int swap_armed, swap_done;
+int __real_fstat(int fd, struct stat *st);
+int __wrap_fstat(int fd, struct stat *st) {
+    int rc = __real_fstat(fd, st);
+    if (!rc && swap_armed && st->st_dev == swap_target.st_dev && st->st_ino == swap_target.st_ino &&
+        (fcntl(fd, F_GETFL) & O_PATH) == O_PATH) {
+        swap_armed = 0;
+        assert(rename("glob-swap/target", "glob-swap/old") == 0);
+        assert(rename("glob-swap-replacement", "glob-swap/target") == 0);
+        swap_done = 1;
+    }
+    return rc;
+}
 #endif
 
 typedef ClayJson *(*ClayFsTool)(const ClayJson *arguments, void *userdata);
@@ -248,6 +268,25 @@ int main(void) {
 #endif
 
 #ifdef __linux__
+    /* Replace the checked directory before the walker opens it for enumeration. */
+    assert(mkdir("glob-swap", 0700) == 0);
+    assert(mkdir("glob-swap/target", 0700) == 0);
+    assert(mkdir("glob-swap-replacement", 0700) == 0);
+    FILE *swap_file = fopen("glob-swap-replacement/unexpected", "w");
+    assert(swap_file && fclose(swap_file) == 0);
+    assert(stat("glob-swap/target", &swap_target) == 0);
+    ClayArray swap_matches;
+    clay_array_init(&swap_matches, sizeof(char *));
+    int swap_truncated = 0;
+    swap_armed = 1;
+    clay_fs_walk_files("glob-swap", "", "*", &swap_matches, &swap_truncated);
+    assert(swap_done && !swap_truncated && swap_matches.count == 0);
+    clay_array_free(&swap_matches);
+    assert(unlink("glob-swap/target/unexpected") == 0);
+    assert(rmdir("glob-swap/target") == 0);
+    assert(rmdir("glob-swap/old") == 0);
+    assert(rmdir("glob-swap") == 0);
+
     /* Apply the limit to the depth-first readdir order, not root files first. */
     assert(mkdir("glob-order", 0700) == 0);
     for (int i = 0; i < 501; i++) {
@@ -345,6 +384,34 @@ int main(void) {
     assert(ok(result));
     assert(strstr(clay_json_string_value(clay_json_object_get(result, "output")), "1:line1"));
     clay_json_free(result);
+    /* Recursive grep must not follow links outside the workspace. */
+    char outside_template[] = "/tmp/clay_grep_outside_XXXXXX";
+    char *outside_dir = mkdtemp(outside_template);
+    assert(outside_dir);
+    char outside_file[256], outside_nested[256];
+    snprintf(outside_file, sizeof(outside_file), "%s/file", outside_dir);
+    snprintf(outside_nested, sizeof(outside_nested), "%s/nested", outside_dir);
+    FILE *fixture = fopen(outside_file, "w");
+    assert(fixture && fputs("grep_marker_external_file\n", fixture) >= 0 && fclose(fixture) == 0);
+    fixture = fopen(outside_nested, "w");
+    assert(fixture && fputs("grep_marker_external_directory\n", fixture) >= 0 && fclose(fixture) == 0);
+    assert(mkdir("grep-dir", 0700) == 0);
+    fixture = fopen("grep-dir/ordinary", "w");
+    assert(fixture && fputs("grep_marker_ordinary\n", fixture) >= 0 && fclose(fixture) == 0);
+    assert(symlink(outside_file, "grep-dir/external-file") == 0);
+    assert(symlink(outside_dir, "grep-dir/external-directory") == 0);
+    ClayJson *directory_args = clay_json_parse("{\"pattern\":\"grep_marker\",\"path\":\"grep-dir\"}", NULL);
+    result = clay_fs_tool_grep(directory_args, &commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(output && strstr(output, "grep_marker_ordinary"));
+    assert(!strstr(output, "grep_marker_external_file"));
+    assert(!strstr(output, "grep_marker_external_directory"));
+    clay_json_free(result); clay_json_free(directory_args);
+    assert(unlink("grep-dir/external-file") == 0);
+    assert(unlink("grep-dir/external-directory") == 0);
+    assert(unlink("grep-dir/ordinary") == 0 && rmdir("grep-dir") == 0);
+    assert(unlink(outside_file) == 0 && unlink(outside_nested) == 0 && rmdir(outside_dir) == 0);
     ClayJson *regex_args = clay_json_parse("{\"pattern\":\"line(1|2)+\",\"path\":\"a.txt\"}", NULL);
     result = clay_fs_tool_grep(regex_args, &commands);
     assert(ok(result));

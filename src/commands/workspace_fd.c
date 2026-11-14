@@ -11,7 +11,13 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+#ifdef __has_include
+#if __has_include(<linux/fs.h>)
+#include <linux/fs.h>
+#endif
+#endif
 
 static int parent_fd(int root, const char *path, int create, char **name) {
     if (!path || !*path || *path == '/') { errno = EINVAL; return -1; }
@@ -141,7 +147,16 @@ int clay_workspace_fd_write(int root, const char *path, const void *data, size_t
     if (fsync(tmp) < 0) goto done;
     if (close(tmp) < 0) { tmp = -1; goto done; }
     tmp = -1;
-    if (renameat(dir, temp, dir, name) < 0) goto done;
+    if (old >= 0) {
+        if (renameat(dir, temp, dir, name) < 0) goto done;
+    } else {
+#if defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
+        if (syscall(SYS_renameat2, dir, temp, dir, name, RENAME_NOREPLACE) < 0) goto done;
+#else
+        errno = ENOTSUP;
+        goto done;
+#endif
+    }
     created = 0;
     /* The rename commits the change; directory durability is not guaranteed. */
     rc = 0;

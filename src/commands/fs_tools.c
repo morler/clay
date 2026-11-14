@@ -707,11 +707,14 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
         int fd = read_open_beneath(root, prefix, O_PATH);
         struct stat st;
         int valid = fd >= 0 && fstat(fd, &st) == 0 && !S_ISLNK(st.st_mode);
-        if (fd >= 0) close(fd);
         if (valid && S_ISDIR(st.st_mode)) {
-            fd = read_open_beneath(root, prefix, O_RDONLY | O_DIRECTORY);
-            DIR *dir = fd < 0 ? NULL : fdopendir(fd);
-            if (!dir && fd >= 0) close(fd);
+            int dirfd = read_open_beneath(root, prefix, O_RDONLY | O_DIRECTORY);
+            struct stat dir_st;
+            int same = dirfd >= 0 && fstat(dirfd, &dir_st) == 0 &&
+                       st.st_dev == dir_st.st_dev && st.st_ino == dir_st.st_ino;
+            close(fd);
+            DIR *dir = same ? fdopendir(dirfd) : NULL;
+            if (!dir && dirfd >= 0) close(dirfd);
             size_t first = pending.count;
             struct dirent *entry;
             while (dir && (entry = readdir(dir))) {
@@ -731,6 +734,7 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
                 char *tmp = *a; *a = *b; *b = tmp;
             }
         } else if (valid) {
+            close(fd);
             ClayStr match;
             clay_str_init(&match);
             if (*rel_prefix) { clay_str_push(&match, rel_prefix); clay_str_push_char(&match, '/'); }
@@ -743,6 +747,8 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
                 }
             }
             clay_str_free(&match);
+        } else if (fd >= 0) {
+            close(fd);
         }
         free(prefix);
     }

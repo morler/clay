@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the actual interactive prompt through a POSIX pseudo-terminal."""
 import os
+import fcntl
+import struct
+import termios
 import pty
 import re
 import select
@@ -95,6 +98,54 @@ run_case([b'old', (b'\x1b[200~part', signal.SIGINT, signal.SIGINT, 1.2,
 run_case([b'old', (b'\x1b[200~prefix\x00', 1.2, b'\nmalicious\nsecond\n',
                     b'\x1b[20', b'1~'), b'!'], b'old!')
 run_case([b'old', b'\x1b[200~\x1b\x00tail\x1b[201~', b'!'], b'old!')
+
+def viewport_resize_case():
+    master, slave = pty.openpty()
+    proc = None
+    output = bytearray()
+
+    def resize(columns):
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, columns, 0, 0))
+
+    def wait_for(expected, start):
+        deadline = time.monotonic() + TIMEOUT
+        while expected not in output[start:]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
+                raise AssertionError(('viewport redraw timed out', expected, bytes(output)))
+            output.extend(os.read(master, 65536))
+
+    try:
+        resize(8)
+        proc = subprocess.Popen([sys.argv[1]], stdin=slave, stdout=slave, stderr=slave,
+                                close_fds=True)
+        wait_for(b'\x1b[3G', 0)
+        start = len(output)
+        os.write(master, '中文中文'.encode())
+        wait_for('…文'.encode() + b'\x1b[6G', start)
+        start = len(output)
+        os.write(master, b'\x1b[D')
+        wait_for('…中文'.encode() + b'\x1b[6G', start)
+        start = len(output)
+        resize(3)
+        os.kill(proc.pid, signal.SIGWINCH)
+        wait_for(b'\x1b[0m \x1b[3G', start)
+        start = len(output)
+        resize(8)
+        os.kill(proc.pid, signal.SIGWINCH)
+        wait_for('…中文'.encode() + b'\x1b[6G', start)
+        start = len(output)
+        os.write(master, b'\r')
+        wait_for(b'RESULT:' + '中文中文'.encode() + b'\r\n', start)
+        assert proc.wait(timeout=TIMEOUT) == 0
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.close(master)
+        os.close(slave)
+
+viewport_resize_case()
 
 def eof_case():
     master, slave = pty.openpty()

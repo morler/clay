@@ -65,11 +65,22 @@ int main(void) {
     assert(!strstr(instructions, "Should never be seen."));
     free(instructions);
 
+    /* Worktrees use a .git file rather than a directory. */
+    assert(rmdir(git_dir) == 0);
+    write_file(git_dir, "gitdir: /some/other/repo\n");
+    instructions = clay_commands_load_project_instructions();
+    assert(instructions);
+    root_pos = strstr(instructions, "Root instructions.");
+    sub_pos = strstr(instructions, "Sub instructions.");
+    assert(root_pos && sub_pos && root_pos < sub_pos);
+    assert(!strstr(instructions, "Should never be seen."));
+    free(instructions);
+    assert(remove(git_dir) == 0);
+
     remove(outside_agents);
     remove(clay_md_path);
     remove(agents_path);
     assert(rmdir(sub) == 0);
-    assert(rmdir(git_dir) == 0);
     assert(rmdir(repo) == 0);
     assert(chdir("/tmp") == 0);
     assert(rmdir(root) == 0);

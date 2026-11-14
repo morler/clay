@@ -208,6 +208,9 @@ int clay_term_mkdir(const char *path);
    destination. The temporary file is removed on failure. */
 int clay_term_write_file_atomic(const char *path, const void *data, size_t len);
 
+/* As above, preserving existing POSIX permission bits for project files. */
+int clay_term_write_project_file_atomic(const char *path, const void *data, size_t len);
+
 /* Reads at most max_bytes into a NUL-terminated string. max_bytes == 0 means
    unlimited; exceeding a non-zero limit returns -1 with errno == EFBIG. */
 int clay_term_read_file(const char *path, size_t max_bytes, ClayStr *out);

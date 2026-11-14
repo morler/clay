@@ -56,6 +56,10 @@ COMMAND_TEST_SRC    := tests/test_command.c
 COMMAND_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(COMMAND_TEST_SRC))
 COMMAND_TEST_TARGET := $(BIN_DIR)/test_command
 
+MESSAGE_TEST_SRC    := tests/test_message.c
+MESSAGE_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(MESSAGE_TEST_SRC))
+MESSAGE_TEST_TARGET := $(BIN_DIR)/test_message
+
 CHAT_TEST_SRC    := tests/test_chat.c
 CHAT_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(CHAT_TEST_SRC))
 CHAT_TEST_TARGET := $(BIN_DIR)/test_chat
@@ -152,7 +156,7 @@ SKILL_TEST_SRC    := tests/test_skill.c
 SKILL_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(SKILL_TEST_SRC))
 SKILL_TEST_TARGET := $(BIN_DIR)/test_skill
 
-TEST_OBJ_ALL := $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(CHAT_TEST_OBJ) \
+TEST_OBJ_ALL := $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(MESSAGE_TEST_OBJ) $(CHAT_TEST_OBJ) \
 	$(UUID_TEST_OBJ) $(MEMORY_TEST_OBJ) $(SANDBOX_TEST_OBJ) \
 	$(FS_TOOLS_TEST_OBJ) $(CHECKPOINT_TEST_OBJ) $(PERMISSIONS_TEST_OBJ) \
 	$(CONTEXT_COMPACT_TEST_OBJ) $(PROJECT_INSTRUCTIONS_TEST_OBJ) \
@@ -177,7 +181,7 @@ TARGET_WIN    := $(BIN_DIR_WIN)/clay.exe
 OBJ_WIN := $(patsubst src/%.c,$(BUILD_DIR_WIN)/%.o,$(SRC_WIN))
 DEP_WIN := $(OBJ_WIN:.o=.d)
 
-UNIT_TEST_TARGETS := $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(CHAT_TEST_TARGET) \
+UNIT_TEST_TARGETS := $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(MESSAGE_TEST_TARGET) $(CHAT_TEST_TARGET) \
 	$(UUID_TEST_TARGET) $(MEMORY_TEST_TARGET) $(SANDBOX_TEST_TARGET) \
 	$(FS_TOOLS_TEST_TARGET) $(CHECKPOINT_TEST_TARGET) $(PERMISSIONS_TEST_TARGET) \
 	$(CONTEXT_COMPACT_TEST_TARGET) $(PROJECT_INSTRUCTIONS_TEST_TARGET) \
@@ -186,7 +190,7 @@ UNIT_TEST_TARGETS := $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(CHAT_TEST_TARGE
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
 	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
-.PHONY: all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
+.PHONY: all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
 
 all: build
 
@@ -257,6 +261,12 @@ test-command: $(COMMAND_TEST_TARGET)
 
 $(COMMAND_TEST_TARGET): $(LIB_OBJ) $(COMMAND_TEST_OBJ) | $(BIN_DIR)
 	$(CC) $(LIB_OBJ) $(COMMAND_TEST_OBJ) -o $@ $(LDFLAGS)
+
+test-message: $(MESSAGE_TEST_TARGET)
+	@./$<
+
+$(MESSAGE_TEST_TARGET): $(filter-out $(BUILD_DIR)/commands/message.o,$(LIB_OBJ)) $(MESSAGE_TEST_OBJ) | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
 
 test-chat: $(CHAT_TEST_TARGET)
 	@./$<

@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
 
 #define CLAY_FS_READ_LIMIT (256 * 1024)
 #define CLAY_FS_GREP_LIMIT (64 * 1024)      /* shown inline to the model */
@@ -57,12 +62,35 @@ int clay_fs_resolve_workspace_path(const char *workspace_dir, const char *path, 
 
     size_t wlen = strlen(workspace_dir);
     int contained = strncmp(abs_out->data, workspace_dir, wlen) == 0 &&
-                    (abs_out->data[wlen] == '/' || abs_out->data[wlen] == '\0');
-    return contained ? 0 : -1;
+                    ((wlen == 1 && workspace_dir[0] == '/') ||
+                     abs_out->data[wlen] == '/' || abs_out->data[wlen] == '\0');
+    if (!contained) return -1;
+    char *component = abs_out->data + wlen;
+    if (wlen == 1) component = abs_out->data + 1;
+    while (*component) {
+        if (*component == '/') component++;
+        char *end = strchr(component, '/');
+        if (end) *end = '\0';
+#ifdef _WIN32
+        DWORD attrs = GetFileAttributesA(abs_out->data);
+        int bad = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+        if (attrs == INVALID_FILE_ATTRIBUTES && GetLastError() != ERROR_FILE_NOT_FOUND &&
+            GetLastError() != ERROR_PATH_NOT_FOUND) bad = 1;
+#else
+        struct stat st;
+        int rc = lstat(abs_out->data, &st);
+        int bad = rc == 0 ? S_ISLNK(st.st_mode) : errno != ENOENT && errno != ENOTDIR;
+#endif
+        if (end) *end = '/';
+        if (bad) return -1;
+        if (!end) break;
+        component = end;
+    }
+    return 0;
 }
 
 static int write_whole_file(const char *path, const char *data, size_t len) {
-    return clay_storage_write_atomic_private(path, data, len);
+    return clay_term_write_project_file_atomic(path, data, len);
 }
 
 /* Creates every directory above `abs_path`'s final component. */
@@ -475,12 +503,19 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
         ClayStr full;
         clay_str_init(&full);
         clay_str_push(&full, base_dir);
-        clay_str_push_char(&full, '/');
+        if (full.len && full.data[full.len - 1] != '/') clay_str_push_char(&full, '/');
         clay_str_push(&full, name);
+#ifdef _WIN32
+        DWORD attrs = GetFileAttributesA(full.data);
+        int direct = attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+#else
+        struct stat st;
+        int direct = lstat(full.data, &st) == 0 && !S_ISLNK(st.st_mode);
+#endif
 
-        if (clay_term_is_dir(full.data)) {
+        if (direct && clay_term_is_dir(full.data)) {
             clay_fs_walk_files(full.data, rel.data, pattern, matches, truncated);
-        } else if (clay_str_wildcard_match(pattern, rel.data)) {
+        } else if (direct && clay_str_wildcard_match(pattern, rel.data)) {
             if (matches->count >= CLAY_FS_GLOB_MAX_MATCHES) *truncated = 1;
             else {
                 char *copy = strdup(rel.data);
@@ -583,18 +618,28 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
     }
     clay_json_object_set(result, "pattern", clay_json_string(pattern));
 
+    char *workspace_dir = clay_term_cwd();
+    ClayStr target;
+    if (!workspace_dir || clay_fs_resolve_workspace_path(workspace_dir, path, &target) != 0) {
+        if (workspace_dir) clay_str_free(&target);
+        free(workspace_dir);
+        clay_json_object_set(result, "ok", clay_json_bool(0));
+        clay_json_object_set(result, "error", clay_json_string("path escapes the workspace or contains a symlink"));
+        return result;
+    }
     ClayStr invocation;
     clay_str_init(&invocation);
-    clay_str_push(&invocation, "grep -rn -I --binary-files=without-match -e ");
+    clay_str_push(&invocation, "grep -Ern -I --binary-files=without-match -e ");
     clay_term_shell_quote(&invocation, pattern);
     if (include && *include) {
         clay_str_push(&invocation, " --include=");
         clay_term_shell_quote(&invocation, include);
     }
-    clay_str_push_char(&invocation, ' ');
-    clay_term_shell_quote(&invocation, path);
-
-    char *workspace_dir = clay_term_cwd();
+    clay_str_push(&invocation, " -- ");
+    const char *relative = target.data + strlen(workspace_dir);
+    while (*relative == '/') relative++;
+    clay_term_shell_quote(&invocation, *relative ? relative : ".");
+    clay_str_free(&target);
     char *scratch_dir = clay_chat_scratch_dir(commands->chat);
     ClaySandboxConfig sandbox = {
         .mode = commands->sandbox_mode,

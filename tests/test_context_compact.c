@@ -14,7 +14,46 @@ static void push_message(ClayJson *conversation, const char *role, const char *c
     clay_json_array_push(conversation, message);
 }
 
+static void test_utf8_preview(const char *character, int prefix, int included) {
+    ClayStr output;
+    clay_str_init(&output);
+    for (int i = 0; i < prefix; i++) clay_str_push_char(&output, 'x');
+    clay_str_push(&output, character);
+    for (int i = 0; i < 210; i++) clay_str_push_char(&output, 'y');
+
+    ClayCommands commands = {0};
+    commands.input_tokens = 200000;
+    commands.conversation = clay_json_array();
+    push_message(commands.conversation, "system", "system");
+    push_message(commands.conversation, "user", "old");
+    push_message(commands.conversation, "tool", output.data);
+    for (int i = 0; i < 6; i++) push_message(commands.conversation, "user", "new");
+    assert(clay_commands_maybe_compact(&commands) == 1);
+    const char *summary = clay_json_string_value(clay_json_object_get(
+        clay_json_array_get(commands.conversation, 2), "content"));
+    const char *preview = strchr(summary, '\n');
+    assert(preview);
+    preview++;
+    assert(strncmp(preview, output.data, prefix) == 0);
+    preview += prefix;
+    if (included) {
+        size_t bytes = strlen(character);
+        assert(strncmp(preview, character, bytes) == 0);
+        preview += bytes;
+    }
+    assert(strcmp(preview, "...") == 0);
+    clay_json_free(commands.conversation);
+    clay_str_free(&output);
+}
+
 int main(void) {
+    test_utf8_preview("é", 199, 0);
+    test_utf8_preview("中", 198, 0);
+    test_utf8_preview("😀", 197, 0);
+    test_utf8_preview("é", 198, 1);
+    test_utf8_preview("中", 197, 1);
+    test_utf8_preview("😀", 196, 1);
+
     ClayStr long_output;
     clay_str_init(&long_output);
     for (int i = 0; i < 500; i++) clay_str_push_char(&long_output, 'x');

@@ -1547,7 +1547,8 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
       clay_json_array_push(
           messages, clay_openai_message("assistant", stream.response.data));
     persist_thinking(commands, &stream);
-    clay_chat_finish_turn(commands->chat, messages, turn_start, "aborted");
+    int save_failed =
+        clay_chat_finish_turn(commands->chat, messages, turn_start, "aborted") != 0;
     clay_json_free(messages);
     if (had_response && stream.status_visible) {
       clay_below_status_finish_output();
@@ -1559,6 +1560,8 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
        prompt as if the turn were still going. */
     set_status(seconds, 0);
     clay_sayc(CLAY_YELLOW, "Operation aborted by user.");
+    if (save_failed)
+      clay_sayc(CLAY_RED, "Could not save the chat journal.");
     clay_str_free(&stream.response);
     clay_wrap_free(&stream.wrap);
     clay_str_free(&stream.thinking);
@@ -1567,9 +1570,11 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   }
   /* Running out of rounds is an unfinished turn, not a failed one: the tool
      results are real and the user can say "keep going". */
+  int save_failed;
   if (rc == 0 || rc == CLAY_RUN_OUT_OF_ROUNDS) {
     persist_thinking(commands, &stream);
-    clay_chat_finish_turn(commands->chat, messages, turn_start, "completed");
+    save_failed =
+        clay_chat_finish_turn(commands->chat, messages, turn_start, "completed") != 0;
     clay_json_free(commands->conversation);
     commands->conversation = messages;
     set_status(seconds, rc == 0);
@@ -1597,16 +1602,16 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
       clay_json_array_push(
           messages, clay_openai_message("assistant", stream.response.data));
     persist_thinking(commands, &stream);
-    clay_chat_finish_turn(commands->chat, messages, turn_start,
-                          stream.error_status > 0 ? "provider_error"
-                                                  : "network_error");
+    save_failed = clay_chat_finish_turn(commands->chat, messages, turn_start,
+                                       stream.error_status > 0 ? "provider_error"
+                                                               : "network_error") != 0;
     clay_json_free(messages);
     set_status(seconds, 0);
   }
   /* However the turn ended, say so: a turn that stops mid-job and one that
      dies on a provider error both used to end in silence once any output had
      been streamed. */
-  if (rc != 0 || stream.ended_after_tool) {
+  if (rc != 0 || stream.ended_after_tool || save_failed) {
     if (had_response && stream.status_visible) {
       clay_below_status_finish_output();
       stream.status_visible = 0;
@@ -1624,10 +1629,12 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
                 stream.error_status);
     else if (rc != 0)
       clay_sayc(CLAY_RED, "Provider request failed.");
-    else
+    else if (stream.ended_after_tool)
       clay_sayc(CLAY_GRAY,
                 "The model ended the turn after its last tool call, without a "
                 "closing message.");
+    if (save_failed)
+      clay_sayc(CLAY_RED, "Could not save the chat journal.");
   }
   if (stream.started && clay_term_is_interactive()) {
     if (stream.status_visible)

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 
 #define CLAY_SYSTEM_PROMPT_BASE                                                \
   "You are Clay, a coding agent working in the user's terminal. You " \
@@ -806,7 +807,9 @@ char *clay_commands_load_project_instructions(void) {
     ClayStr git_path;
     clay_str_init(&git_path);
     clay_str_printf(&git_path, "%s/.git", dir);
-    int at_repo_root = clay_term_is_dir(git_path.data);
+    struct stat git_info;
+    int at_repo_root = stat(git_path.data, &git_info) == 0 &&
+                       (S_ISDIR(git_info.st_mode) || S_ISREG(git_info.st_mode));
     clay_str_free(&git_path);
     if (at_repo_root || strcmp(dir, "/") == 0)
       break;
@@ -1152,11 +1155,19 @@ static int collapse_tool_content(ClayJson *message) {
               strlen(CLAY_CONTEXT_COLLAPSED_MARKER)) == 0) {
     return 0;
   }
+  size_t preview = 0;
+  while (preview < CLAY_CONTEXT_TOOL_PREVIEW) {
+    size_t bytes;
+    clay_utf8_char_width(text + preview, &bytes);
+    if (preview + bytes > CLAY_CONTEXT_TOOL_PREVIEW)
+      break;
+    preview += bytes;
+  }
   ClayStr summary;
   clay_str_init(&summary);
   clay_str_printf(&summary, "%s%zu bytes, showing the first %d]\n%.*s...",
                   CLAY_CONTEXT_COLLAPSED_MARKER, len, CLAY_CONTEXT_TOOL_PREVIEW,
-                  CLAY_CONTEXT_TOOL_PREVIEW, text);
+                  (int)preview, text);
   clay_json_object_set(message, "content", clay_json_string(summary.data));
   clay_str_free(&summary);
   return 1;

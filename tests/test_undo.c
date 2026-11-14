@@ -7,12 +7,13 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 extern char *mkdtemp(char *template);
 
 static void write_file(const char *path, const char *content) {
-    assert(clay_term_write_file_atomic(path, content, strlen(content)) == 0);
+    assert(clay_term_write_project_file_atomic(path, content, strlen(content)) == 0);
 }
 
 static void assert_file(const char *path, const char *expected) {
@@ -33,12 +34,15 @@ int main(void) {
     clay_array_init(&commands.undo_history, sizeof(ClayUndoEntry));
 
     write_file("existing.txt", "before");
+    assert(chmod("existing.txt", 0755) == 0);
     assert(clay_commands_undo_prepare(&commands, "existing.txt"));
     write_file("existing.txt", "after");
     clay_commands_undo_commit(&commands);
     assert(commands.undo_history.count == 1);
     clay_cmd_undo("", &commands);
     assert_file("existing.txt", "before");
+    struct stat st;
+    assert(stat("existing.txt", &st) == 0 && (st.st_mode & 0777) == 0755);
     assert(commands.undo_history.count == 0);
 
     assert(clay_commands_undo_prepare(&commands, "new.txt"));
@@ -55,6 +59,20 @@ int main(void) {
     clay_cmd_undo("", &commands);
     assert_file("changed.txt", "external");
     assert(commands.undo_history.count == 1);
+
+    assert(mkdir("dir", 0700) == 0);
+    write_file("dir/file", "before");
+    assert(clay_commands_undo_prepare(&commands, "dir/file"));
+    write_file("dir/file", "after");
+    clay_commands_undo_commit(&commands);
+    assert(rename("dir", "saved") == 0);
+    assert(symlink("/tmp", "dir") == 0);
+    size_t count = commands.undo_history.count;
+    clay_cmd_undo("", &commands);
+    assert(commands.undo_history.count == count);
+    assert_file("saved/file", "after");
+    assert(!clay_commands_undo_prepare(&commands, "dir/file"));
+    unlink("dir"); remove("saved/file"); rmdir("saved");
 
     clay_commands_undo_destroy(&commands);
     remove("existing.txt");

@@ -37,6 +37,16 @@ static int read_snapshot(const char *path, char **data, size_t *len, int *exists
     return -1;
 }
 
+static int undo_path_safe(const char *path) {
+    char *workspace = clay_term_cwd();
+    if (!workspace) return 0;
+    ClayStr checked;
+    int safe = clay_fs_resolve_workspace_path(workspace, path, &checked) == 0;
+    clay_str_free(&checked);
+    free(workspace);
+    return safe;
+}
+
 static int snapshot_matches(const char *path, const char *expected,
                             size_t expected_len, int expected_exists) {
     char *current = NULL;
@@ -85,7 +95,8 @@ int clay_commands_undo_prepare(ClayCommands *commands, const char *path) {
 void clay_commands_undo_commit(ClayCommands *commands) {
     if (!commands || !commands->undo_pending_valid) return;
     ClayUndoEntry *pending = &commands->undo_pending;
-    if (read_snapshot(pending->path, &pending->after, &pending->after_len,
+    if (!undo_path_safe(pending->path) ||
+        read_snapshot(pending->path, &pending->after, &pending->after_len,
                       &pending->after_exists) != 0) {
         clay_commands_undo_discard(commands);
         return;
@@ -130,7 +141,8 @@ void clay_cmd_undo(const char *args, void *user_data) {
 
     ClayUndoEntry *entry = clay_array_get(&commands->undo_history,
                                           commands->undo_history.count - 1);
-    if (!snapshot_matches(entry->path, entry->after, entry->after_len,
+    if (!undo_path_safe(entry->path) ||
+        !snapshot_matches(entry->path, entry->after, entry->after_len,
                            entry->after_exists)) {
         clay_sayc(CLAY_RED,
                   "Cannot undo %s: it changed after the last write/edit.",
@@ -140,7 +152,7 @@ void clay_cmd_undo(const char *args, void *user_data) {
 
     int rc;
     if (entry->before_exists) {
-        rc = clay_storage_write_atomic_private(entry->path, entry->before,
+        rc = clay_term_write_project_file_atomic(entry->path, entry->before,
                                                entry->before_len);
     } else {
         rc = remove(entry->path);

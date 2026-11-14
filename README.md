@@ -154,6 +154,8 @@ session can be used by `-p` as-is; headless Codex sessions may provide
 
 **Your workspace is part of the conversation.** When the model needs evidence, it reads, searches, and edits files directly instead of guessing — `shell_exec` is still there for everything else (builds, tests, git, other programs).
 
+File tools reject symbolic links in workspace paths (including links that remain inside the workspace), and glob/grep do not follow them during recursive searches. These checks protect against static symlink escapes only: concurrent filesystem changes can race the checks (TOCTOU), so they are not a security boundary against a hostile local process.
+
 **Isolated by default, unleashed when you want.** On Linux, `shell_exec` runs in its own user/mount/pid/network namespaces: `/workspace` maps to your project, `/scratch` and `/tmp` are a per-conversation scratch dir, host paths and inherited environment variables are unavailable, and CPU, memory, process, file-size, and wall-clock limits apply. `/sandbox` switches to Unleashed (no sandbox). Windows runs Unleashed only, for now.
 
 **Explicit consent, not endless prompts.** Reads, edits, and a curated set of safe commands (`ls`, `cat`, `git status`, ...) are approved by default; anything else — arbitrary shell commands, mainly — asks the first time and can be remembered for the rest of the session via `/permissions`. `/plan` is the stricter mode: no writes, no edits, and a blocklist keeps `rm`/`mv`/`cp` and mutating `git` subcommands from running at all, regardless of what `/permissions` allows.

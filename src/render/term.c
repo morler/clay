@@ -29,6 +29,9 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#endif
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -1781,7 +1784,8 @@ int clay_term_mkdir(const char *path) {
 #endif
 }
 
-int clay_term_write_file_atomic(const char *path, const void *data, size_t len) {
+static int write_file_atomic(const char *path, const void *data, size_t len,
+                             int preserve_mode) {
   if (!path || (!data && len > 0)) return -1;
 #ifdef _WIN32
   char directory[MAX_PATH];
@@ -1810,13 +1814,51 @@ int clay_term_write_file_atomic(const char *path, const void *data, size_t len) 
     DeleteFileA(temporary);
     return -1;
   }
-  if (!MoveFileExA(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+  if (preserve_mode) {
+    char backup[MAX_PATH];
+    if (!GetTempFileNameA(directory, "clb", 0, backup)) {
+      DeleteFileA(temporary);
+      return -1;
+    }
+    if (!DeleteFileA(backup)) {
+      DeleteFileA(temporary);
+      return -1;
+    }
+    if (ReplaceFileA(path, temporary, backup, 0, NULL, NULL)) {
+      DeleteFileA(backup);
+    } else {
+      DWORD error = GetLastError();
+      if (error == ERROR_FILE_NOT_FOUND &&
+          MoveFileExA(temporary, path, MOVEFILE_WRITE_THROUGH)) return 0;
+      /* ReplaceFile may move the original to the backup even on failure. */
+      if (error == ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 &&
+          !MoveFileExA(backup, path, MOVEFILE_WRITE_THROUGH))
+        fprintf(stderr, "clay: original file preserved at %s; restore it manually\n", backup);
+      DeleteFileA(temporary);
+      return -1;
+    }
+  } else if (!MoveFileExA(temporary, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     DeleteFileA(temporary);
     return -1;
   }
-  clay_term_restrict_file(path);
+  if (!preserve_mode) clay_term_restrict_file(path);
   return 0;
 #else
+  struct stat existing;
+  int have_mode = 0;
+  if (preserve_mode) {
+    if (stat(path, &existing) == 0) {
+#ifdef __linux__
+      /* shortcut: reject ACLs rather than lose them; use an ACL API to preserve them. */
+      if (getxattr(path, "system.posix_acl_access", NULL, 0) >= 0 || errno != ENODATA) return -1;
+      have_mode = 1;
+#else
+      /* shortcut: ACL detection is unavailable; use a native ACL API to enable replacement. */
+      return -1;
+#endif
+    }
+    else if (errno != ENOENT) return -1;
+  }
   ClayStr temporary;
   clay_str_init(&temporary);
   clay_str_printf(&temporary, "%s.tmp.XXXXXX", path);
@@ -1834,6 +1876,11 @@ int clay_term_write_file_atomic(const char *path, const void *data, size_t len) 
   }
   int ok = fwrite(data, 1, len, file) == len;
   if (ok && fflush(file) != 0) ok = 0;
+#ifdef __linux__
+  if (ok && have_mode &&
+      (fgetxattr(fileno(file), "system.posix_acl_access", NULL, 0) >= 0 || errno != ENODATA)) ok = 0;
+#endif
+  if (ok && have_mode && fchmod(fileno(file), existing.st_mode & 0777) != 0) ok = 0;
   if (ok && fsync(fileno(file)) != 0) ok = 0;
   if (fclose(file) != 0) ok = 0;
   if (!ok) {
@@ -1846,10 +1893,17 @@ int clay_term_write_file_atomic(const char *path, const void *data, size_t len) 
     clay_str_free(&temporary);
     return -1;
   }
-  clay_term_restrict_file(path);
   clay_str_free(&temporary);
   return 0;
 #endif
+}
+
+int clay_term_write_file_atomic(const char *path, const void *data, size_t len) {
+  return write_file_atomic(path, data, len, 0);
+}
+
+int clay_term_write_project_file_atomic(const char *path, const void *data, size_t len) {
+  return write_file_atomic(path, data, len, 1);
 }
 
 int clay_term_read_file(const char *path, size_t max_bytes, ClayStr *out) {

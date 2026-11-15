@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "../src/commands/context.h"
 
 #include "clay/json.h"
@@ -71,6 +74,36 @@ int renameat(int olddir, const char *old, int newdir, const char *new) {
 }
 #endif
 
+#ifdef __linux__
+static struct stat swap_target;
+static int swap_armed, swap_done;
+static int grep_swap_armed, grep_swap_done;
+static const char *grep_swap_secret;
+int __real_fstat(int fd, struct stat *st);
+int __wrap_fstat(int fd, struct stat *st) {
+    int rc = __real_fstat(fd, st);
+    if (!rc && swap_armed && st->st_dev == swap_target.st_dev && st->st_ino == swap_target.st_ino &&
+        (fcntl(fd, F_GETFL) & O_PATH) == O_PATH) {
+        swap_armed = 0;
+        assert(rename("glob-swap/target", "glob-swap/old") == 0);
+        assert(rename("glob-swap-replacement", "glob-swap/target") == 0);
+        swap_done = 1;
+    }
+    return rc;
+}
+
+int __real_clay_sandbox_exec_input(const ClaySandboxConfig *, const char *, ClayStr *, size_t, const ClayExecOptions *, ClayExecResult *, int);
+int __wrap_clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *command, ClayStr *output, size_t output_limit, const ClayExecOptions *options, ClayExecResult *result, int input_fd) {
+    if (grep_swap_armed) {
+        grep_swap_armed = 0;
+        assert(rename("grep-race.txt", "grep-race-old.txt") == 0);
+        assert(symlink(grep_swap_secret, "grep-race.txt") == 0);
+        grep_swap_done = 1;
+    }
+    return __real_clay_sandbox_exec_input(config, command, output, output_limit, options, result, input_fd);
+}
+#endif
+
 typedef ClayJson *(*ClayFsTool)(const ClayJson *arguments, void *userdata);
 
 static ClayJson *call(ClayFsTool fn, const char *json_args) {
@@ -120,6 +153,30 @@ static void test_windows_paths(void) {
         clay_str_free(&out);
     }
 }
+#ifdef __linux__
+static void test_grep_race(ClayCommands *commands) {
+    /* Pin the regular-file fd before a deterministic path swap. */
+    char race_secret[] = "/tmp/clay_grep_race_XXXXXX";
+    int secret_fd = mkstemp(race_secret);
+    assert(secret_fd >= 0);
+    FILE *race_fixture = fdopen(secret_fd, "w");
+    assert(race_fixture && fputs("grep_race_external_secret\n", race_fixture) >= 0 && fclose(race_fixture) == 0);
+    grep_swap_secret = race_secret;
+    race_fixture = fopen("grep-race.txt", "w");
+    assert(race_fixture && fputs("grep_race_original\n", race_fixture) >= 0 && fclose(race_fixture) == 0);
+    grep_swap_done = 0;
+    grep_swap_armed = 1;
+    ClayJson *race_args = clay_json_parse("{\"pattern\":\"grep_race_\",\"path\":\"grep-race.txt\",\"glob\":\"*.txt\"}", NULL);
+    ClayJson *result = clay_fs_tool_grep(race_args, commands);
+    assert(ok(result));
+    const char *output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(grep_swap_done && output && strstr(output, "grep_race_original"));
+    assert(!strstr(output, "grep_race_external_secret"));
+    clay_json_free(result); clay_json_free(race_args);
+    assert(unlink("grep-race.txt") == 0 && unlink("grep-race-old.txt") == 0);
+    assert(unlink(race_secret) == 0);
+}
+#endif
 
 int main(void) {
     test_windows_paths();
@@ -392,6 +449,25 @@ int main(void) {
 #endif
 
 #ifdef __linux__
+    /* Replace the checked directory before the walker opens it for enumeration. */
+    assert(mkdir("glob-swap", 0700) == 0);
+    assert(mkdir("glob-swap/target", 0700) == 0);
+    assert(mkdir("glob-swap-replacement", 0700) == 0);
+    FILE *swap_file = fopen("glob-swap-replacement/unexpected", "w");
+    assert(swap_file && fclose(swap_file) == 0);
+    assert(stat("glob-swap/target", &swap_target) == 0);
+    ClayArray swap_matches;
+    clay_array_init(&swap_matches, sizeof(char *));
+    int swap_truncated = 0;
+    swap_armed = 1;
+    clay_fs_walk_files("glob-swap", "", "*", &swap_matches, &swap_truncated);
+    assert(swap_done && !swap_truncated && swap_matches.count == 0);
+    clay_array_free(&swap_matches);
+    assert(unlink("glob-swap/target/unexpected") == 0);
+    assert(rmdir("glob-swap/target") == 0);
+    assert(rmdir("glob-swap/old") == 0);
+    assert(rmdir("glob-swap") == 0);
+
     /* Apply the limit to the depth-first readdir order, not root files first. */
     assert(mkdir("glob-order", 0700) == 0);
     for (int i = 0; i < 501; i++) {
@@ -489,6 +565,38 @@ int main(void) {
     assert(ok(result));
     assert(strstr(clay_json_string_value(clay_json_object_get(result, "output")), "1:line1"));
     clay_json_free(result);
+#ifdef __linux__
+    test_grep_race(&commands);
+#endif
+
+    /* Recursive grep must not follow links outside the workspace. */
+    char outside_template[] = "/tmp/clay_grep_outside_XXXXXX";
+    char *outside_dir = mkdtemp(outside_template);
+    assert(outside_dir);
+    char outside_file[256], outside_nested[256];
+    snprintf(outside_file, sizeof(outside_file), "%s/file", outside_dir);
+    snprintf(outside_nested, sizeof(outside_nested), "%s/nested", outside_dir);
+    FILE *fixture = fopen(outside_file, "w");
+    assert(fixture && fputs("grep_marker_external_file\n", fixture) >= 0 && fclose(fixture) == 0);
+    fixture = fopen(outside_nested, "w");
+    assert(fixture && fputs("grep_marker_external_directory\n", fixture) >= 0 && fclose(fixture) == 0);
+    assert(mkdir("grep-dir", 0700) == 0);
+    fixture = fopen("grep-dir/ordinary", "w");
+    assert(fixture && fputs("grep_marker_ordinary\n", fixture) >= 0 && fclose(fixture) == 0);
+    assert(symlink(outside_file, "grep-dir/external-file") == 0);
+    assert(symlink(outside_dir, "grep-dir/external-directory") == 0);
+    ClayJson *directory_args = clay_json_parse("{\"pattern\":\"grep_marker\",\"path\":\"grep-dir\"}", NULL);
+    result = clay_fs_tool_grep(directory_args, &commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(output && strstr(output, "grep_marker_ordinary"));
+    assert(!strstr(output, "grep_marker_external_file"));
+    assert(!strstr(output, "grep_marker_external_directory"));
+    clay_json_free(result); clay_json_free(directory_args);
+    assert(unlink("grep-dir/external-file") == 0);
+    assert(unlink("grep-dir/external-directory") == 0);
+    assert(unlink("grep-dir/ordinary") == 0 && rmdir("grep-dir") == 0);
+    assert(unlink(outside_file) == 0 && unlink(outside_nested) == 0 && rmdir(outside_dir) == 0);
     ClayJson *regex_args = clay_json_parse("{\"pattern\":\"line(1|2)+\",\"path\":\"a.txt\"}", NULL);
     result = clay_fs_tool_grep(regex_args, &commands);
     assert(ok(result));
@@ -506,6 +614,9 @@ int main(void) {
         {"{\"pattern\":\"\",\"path\":\"a.txt\"}", NULL, "0"},
         {"{\"pattern\":\"line1\",\"path\":\"a.txt\",\"glob\":\"*.c\"}", "", "1"},
         {"{\"pattern\":\"line1\",\"path\":\"a.txt\",\"glob\":\"*.txt\"}", "1:line1\n", "1"},
+        {"{\"pattern\":\"[\",\"path\":\"a.txt\",\"glob\":\"*.c\"}", NULL, "0"},
+        {"{\"pattern\":\"line1\",\"path\":\"a.txt\",\"glob\":\"[ab].txt\"}", "1:line1\n", "1"},
+        {"{\"pattern\":\"line1\",\"path\":\"a.txt\",\"glob\":\"x/*.txt\"}", "", "1"},
         {"{\"pattern\":\"line1' ; echo INJECTED; #\",\"path\":\"a.txt\"}", "", "1"},
     };
     for (size_t i = 0; i < sizeof(grep_cases) / sizeof(grep_cases[0]); i++) {
@@ -565,6 +676,11 @@ int main(void) {
     assert(unlink(outside_file) == 0); assert(rmdir(race_outside) == 0);
     } else printf("grep race baseline: /usr/bin/grep unavailable; skipped\n");
 #endif
+    ClayJson *error_args = clay_json_parse("{\"pattern\":\"line1\",\"path\":\"missing.txt\"}", NULL);
+    result = clay_fs_tool_grep(error_args, &commands);
+    assert(!ok(result));
+    assert(strstr(clay_json_string_value(clay_json_object_get(result, "error")), "grep failed"));
+    clay_json_free(result); clay_json_free(error_args);
     char *scratch = clay_chat_scratch_dir(commands.chat);
     ClaySandboxConfig probe = {.mode = CLAY_SANDBOX_MODE_SANDBOX, .workspace_dir = workspace, .scratch_dir = scratch};
     ClayStr probe_output; clay_str_init(&probe_output);
@@ -572,6 +688,9 @@ int main(void) {
     int probe_rc = clay_sandbox_exec(&probe, "test -f /workspace/a.txt", &probe_output, 4096, NULL, &probe_result);
     if (probe_rc == 0 && probe_result.exit_code == 0) {
         commands.sandbox_mode = CLAY_SANDBOX_MODE_SANDBOX;
+#ifdef __linux__
+        test_grep_race(&commands);
+#endif
         result = clay_fs_tool_grep(grep_args, &commands);
         assert(ok(result));
         assert(strstr(clay_json_string_value(clay_json_object_get(result, "output")), "1:line1"));

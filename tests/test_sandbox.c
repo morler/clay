@@ -2,6 +2,7 @@
 #include "clay/str.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +65,64 @@ int main(void) {
     ClayStr output;
     clay_str_init(&output);
     int exit_code = -1;
+
+    char path[] = "/tmp/clay_input_XXXXXX";
+    int input = mkstemp(path);
+    assert(input >= 0 && write(input, "input-ok\n", 9) == 9);
+    close(input);
+    input = open(path, O_RDONLY | O_CLOEXEC);
+    assert(input >= 0);
+    unlink(path);
+    ClaySandboxConfig config = {.mode = CLAY_SANDBOX_MODE_UNLEASHED,
+                                .workspace_dir = workspace, .scratch_dir = scratch};
+    ClayExecResult exec;
+    assert(clay_sandbox_exec_input(&config, "cat", &output, 65536, NULL, &exec, input) == 0);
+    assert(exec.exit_code == 0 && strcmp(output.data, "input-ok\n") == 0);
+    assert(fcntl(input, F_GETFD) & FD_CLOEXEC);
+    assert(lseek(input, 0, SEEK_SET) == 0);
+    clay_str_clear(&output);
+    assert(clay_term_shell_exec_input("cat", &output, 65536, NULL, &exec, input) == 0);
+    assert(exec.exit_code == 0 && strcmp(output.data, "input-ok\n") == 0);
+    int saved = dup(STDIN_FILENO);
+    assert(saved >= 0 && dup2(input, STDIN_FILENO) == STDIN_FILENO);
+    assert(fcntl(STDIN_FILENO, F_SETFD, FD_CLOEXEC) == 0);
+    assert(lseek(input, 0, SEEK_SET) == 0);
+    clay_str_clear(&output);
+    assert(clay_term_shell_exec_input("cat", &output, 65536, NULL, &exec, 0) == 0);
+    assert(exec.exit_code == 0 && strcmp(output.data, "input-ok\n") == 0);
+    assert(fcntl(STDIN_FILENO, F_GETFD) & FD_CLOEXEC);
+    clay_str_clear(&output);
+    assert(clay_sandbox_exec(&config, "cat", &output, 65536, NULL, &exec) == 0);
+    assert(exec.exit_code != 0);
+    assert(fcntl(STDIN_FILENO, F_SETFD, 0) == 0);
+    assert(lseek(input, 0, SEEK_SET) == 0);
+    clay_str_clear(&output);
+    assert(clay_sandbox_exec(&config, "cat", &output, 65536, NULL, &exec) == 0);
+    assert(exec.exit_code == 0 && strcmp(output.data, "input-ok\n") == 0);
+    assert(dup2(saved, STDIN_FILENO) == STDIN_FILENO);
+    close(saved);
+    int invalid = dup(input);
+    assert(invalid >= 0);
+    close(invalid);
+    clay_str_clear(&output);
+    assert(clay_sandbox_exec_input(&config, "echo must-not-run", &output, 65536, NULL, &exec, invalid) == -1);
+    assert(output.len == 0);
+    assert(lseek(input, 0, SEEK_SET) == 0);
+    config.mode = CLAY_SANDBOX_MODE_SANDBOX;
+    assert(clay_sandbox_exec_input(&config, "cat; echo sandbox-ran", &output, 65536, NULL, &exec, input) == 0);
+    if (exec.exit_code == 126) {
+        assert(!output.data || strstr(output.data, "sandbox-ran") == NULL);
+    } else {
+        assert(exec.exit_code == 0);
+        assert(strstr(output.data, "input-ok\n") && strstr(output.data, "sandbox-ran"));
+    }
+    config.workspace_dir = "/this-workspace-does-not-exist-clay-test";
+    clay_str_clear(&output);
+    assert(clay_sandbox_exec_input(&config, "echo must-not-run", &output, 65536, NULL, &exec, input) == 0);
+    assert(exec.exit_code == 126);
+    assert(!output.data || strstr(output.data, "must-not-run") == NULL);
+    close(input);
+    clay_str_clear(&output);
 
     int rc = run(CLAY_SANDBOX_MODE_SANDBOX, workspace, scratch, "echo hi > /workspace/marker && cat /workspace/marker",
                  &output, &exit_code);

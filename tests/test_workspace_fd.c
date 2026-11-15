@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "clay/workspace_fd.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -85,12 +86,19 @@ static void assert_no_temp(void) {
     while ((entry = readdir(dir))) assert(strncmp(entry->d_name, ".clay-", 6));
     assert(closedir(dir) == 0);
 }
+static const char *fsync_race_target;
 
 int fsync(int fd) {
     struct stat st;
     assert(fstat(fd, &st) == 0);
     if (S_ISDIR(st.st_mode)) { ++directory_syncs; errno = EIO; return -1; }
     if (fail_file_sync) { errno = EIO; return -1; }
+    if (fsync_race_target) {
+        int target = open(fsync_race_target, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        assert(target >= 0);
+        assert(write(target, "concurrent", 10) == 10 && close(target) == 0);
+        fsync_race_target = NULL;
+    }
     return (int)syscall(SYS_fsync, fd);
 }
 
@@ -206,6 +214,23 @@ int main(void) {
     memset(unchanged_text, 0, sizeof(unchanged_text));
     assert(unchanged >= 0 && read(unchanged, unchanged_text, 5) == 5);
     assert(!strcmp(unchanged_text, "world") && close(unchanged) == 0);
+
+    {
+    fsync_race_target = "race/file";
+    errno = 0;
+    assert(clay_workspace_fd_write(root, "race/file", "loser", 5) < 0 && errno == EEXIST);
+    int race_fd = open("race/file", O_RDONLY);
+    char race_text[11] = {0};
+    assert(race_fd >= 0 && read(race_fd, race_text, 10) == 10 && !strcmp(race_text, "concurrent"));
+    assert(close(race_fd) == 0);
+    DIR *race_dir = opendir("race");
+    assert(race_dir);
+    struct dirent *entry;
+    while ((entry = readdir(race_dir)))
+        assert(strncmp(entry->d_name, ".clay-", 6) != 0);
+    assert(closedir(race_dir) == 0);
+    assert(unlink("race/file") == 0 && rmdir("race") == 0);
+    }
 
     gid_t groups[128];
     int ngroups = getgroups(128, groups);

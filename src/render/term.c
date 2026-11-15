@@ -257,12 +257,19 @@ char *clay_term_display_cwd(void) {
 int clay_term_shell_exec(const char *command, ClayStr *output,
                          size_t output_limit, const ClayExecOptions *options,
                          ClayExecResult *result) {
+  return clay_term_shell_exec_input(command, output, output_limit, options, result, -1);
+}
+
+int clay_term_shell_exec_input(const char *command, ClayStr *output,
+                               size_t output_limit, const ClayExecOptions *options,
+                               ClayExecResult *result, int input_fd) {
   result->exit_code = -1;
   result->output_truncated = 0;
   result->timed_out = 0;
   result->stopped = 0;
   int timeout_seconds = exec_timeout_seconds(options);
 #ifdef _WIN32
+  if (input_fd >= 0) return -1;
   SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
   HANDLE read_handle = NULL, write_handle = NULL;
   if (!CreatePipe(&read_handle, &write_handle, &security, 0) ||
@@ -397,6 +404,10 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
   result->stopped = stopped;
   return 0;
 #else
+  if (input_fd >= 0) {
+    int input_flags = fcntl(input_fd, F_GETFL);
+    if (input_flags < 0 || (input_flags & O_ACCMODE) == O_WRONLY) return -1;
+  }
   int pipe_fds[2];
   if (pipe(pipe_fds) != 0) return -1;
   /* Anything still sitting in stdout's buffer would be flushed into the
@@ -410,6 +421,14 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
   }
   if (pid == 0) {
     setpgid(0, 0);
+    if (input_fd >= 0) {
+      if (input_fd == STDIN_FILENO) {
+        if (fcntl(STDIN_FILENO, F_SETFD, 0) < 0) _exit(126);
+      } else {
+        if (dup2(input_fd, STDIN_FILENO) < 0) _exit(126);
+        if (input_fd > STDERR_FILENO) close(input_fd);
+      }
+    }
     dup2(pipe_fds[1], STDOUT_FILENO);
     dup2(pipe_fds[1], STDERR_FILENO);
     close(pipe_fds[0]);
@@ -1501,6 +1520,23 @@ void clay_term_bracketed_paste_disable(void) {
 #endif
 }
 
+#ifndef _WIN32
+/* Pasted CR and CRLF both mean a line break; normalize them to LF. */
+static void paste_push(ClayStr *out, char c, int *last_cr) {
+  if (c == '\r') {
+    clay_str_push_char(out, '\n');
+    *last_cr = 1;
+    return;
+  }
+  if (c == '\n' && *last_cr) {
+    *last_cr = 0;
+    return;
+  }
+  *last_cr = 0;
+  clay_str_push_char(out, c);
+}
+#endif
+
 ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
 #ifdef _WIN32
   (void)out;
@@ -1509,6 +1545,7 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
   char pending[6];
   size_t pending_len = 0;
   unsigned char c;
+  int last_cr = 0;
   const char terminator[] = "[201~";
   ClayPasteResult result = CLAY_PASTE_COMPLETE;
   for (;;) {
@@ -1534,7 +1571,7 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
     if (c == 0 && result == CLAY_PASTE_COMPLETE) result = CLAY_PASTE_INVALID;
     if (pending_len == 0) {
       if (c == 27) pending[pending_len++] = (char)c;
-      else if (result == CLAY_PASTE_COMPLETE) clay_str_push_char(out, (char)c);
+      else if (result == CLAY_PASTE_COMPLETE) paste_push(out, (char)c, &last_cr);
       continue;
     }
     if (c == (unsigned char)terminator[pending_len - 1]) {
@@ -1543,10 +1580,10 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
       continue;
     }
     if (result == CLAY_PASTE_COMPLETE)
-      for (size_t i = 0; i < pending_len; i++) clay_str_push_char(out, pending[i]);
+      for (size_t i = 0; i < pending_len; i++) paste_push(out, pending[i], &last_cr);
     pending_len = 0;
     if (c == 27) pending[pending_len++] = (char)c;
-    else if (result == CLAY_PASTE_COMPLETE) clay_str_push_char(out, (char)c);
+    else if (result == CLAY_PASTE_COMPLETE) paste_push(out, (char)c, &last_cr);
   }
   return result;
 #endif
@@ -1559,6 +1596,9 @@ void clay_term_raw_enable(void) {
   tcgetattr(STDIN_FILENO, &g_orig_termios);
   struct termios raw = g_orig_termios;
   raw.c_lflag &= ~(ECHO | ICANON);
+  /* Keep CR distinct from LF so pasted CRLF can be normalized, and stop
+     ^S/^Q from freezing input. */
+  raw.c_iflag &= ~(ICRNL | IXON);
   raw.c_cc[VMIN] = 1;
   raw.c_cc[VTIME] = 0;
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);

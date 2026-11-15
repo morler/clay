@@ -157,6 +157,19 @@ static int setup_system_dirs(const ClayStr *root) {
         clay_str_free(&target);
         if (!ok) return -1;
     }
+    /* Fedora aliases /usr/bin/* through /etc/alternatives; mount it so those
+       symlinks resolve inside the sandbox. */
+    struct stat alt_st;
+    if (lstat("/etc/alternatives", &alt_st) == 0 && S_ISDIR(alt_st.st_mode)) {
+        ClayStr alt;
+        clay_str_init(&alt);
+        clay_str_push(&alt, root->data);
+        clay_str_push(&alt, "/etc/alternatives");
+        int alt_ok = make_dir_under(root, "/etc") == 0 && make_dir_under(root, "/etc/alternatives") == 0 &&
+            bind_mount("/etc/alternatives", alt.data, 1) == 0;
+        clay_str_free(&alt);
+        if (!alt_ok) return -1;
+    }
     return 0;
 }
 
@@ -510,13 +523,23 @@ int clay_sandbox_supported(void) {
 
 int clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, ClayStr *output,
                       size_t output_limit, const ClayExecOptions *options, ClayExecResult *result) {
+    return clay_sandbox_exec_input(config, command, output, output_limit, options, result, -1);
+}
+
+int clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *command, ClayStr *output,
+                           size_t output_limit, const ClayExecOptions *options,
+                           ClayExecResult *result, int input_fd) {
     if (config->mode == CLAY_SANDBOX_MODE_UNLEASHED) {
-        return clay_term_shell_exec(command, output, output_limit, options, result);
+        return clay_term_shell_exec_input(command, output, output_limit, options, result, input_fd);
     }
     result->exit_code = -1;
     result->output_truncated = 0;
     result->timed_out = 0;
     result->stopped = 0;
+    if (input_fd >= 0) {
+        int input_flags = fcntl(input_fd, F_GETFL);
+        if (input_flags < 0 || (input_flags & O_ACCMODE) == O_WRONLY) return -1;
+    }
     int timeout_seconds = options && options->timeout_seconds > 0
                               ? options->timeout_seconds
                               : CLAY_SHELL_DEFAULT_TIMEOUT_SECONDS;
@@ -559,6 +582,14 @@ int clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, Clay
         return -1;
     }
     if (pid == 0) {
+        if (input_fd >= 0) {
+            if (input_fd == STDIN_FILENO) {
+                if (fcntl(STDIN_FILENO, F_SETFD, 0) < 0) _exit(126);
+            } else {
+                if (dup2(input_fd, STDIN_FILENO) < 0) _exit(126);
+                if (input_fd > STDERR_FILENO) close(input_fd);
+            }
+        }
         dup2(fds[1], STDOUT_FILENO);
         dup2(fds[1], STDERR_FILENO);
         close(fds[0]);

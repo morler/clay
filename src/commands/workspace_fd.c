@@ -4,14 +4,12 @@
 #include <errno.h>
 #ifdef __linux__
 #include <fcntl.h>
-#include <linux/fs.h>
 #if defined(__has_include)
 #if __has_include(<linux/openat2.h>) && !defined(CLAY_NO_OPENAT2)
 #include <linux/openat2.h>
 #define CLAY_HAVE_OPENAT2 1
 #endif
 #endif
-#include <sys/syscall.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +17,13 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+#ifdef __has_include
+#if __has_include(<linux/fs.h>)
+#include <linux/fs.h>
+#endif
+#endif
 
 #ifdef CLAY_WORKSPACE_FD_TEST
 extern void clay_workspace_fd_test_before_resolve(int stage);

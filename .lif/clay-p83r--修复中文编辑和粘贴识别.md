@@ -1,11 +1,11 @@
 ---
 # clay-p83r
 title: 修复中文编辑和粘贴识别
-status: todo
+status: draft
 type: task
 priority: normal
 created_at: 2026-11-13T15:13:33Z
-updated_at: 2026-11-14T09:31:02Z
+updated_at: 2026-11-14T13:34:42Z
 parent: clay-4lb4
 blocked_by:
     - clay-ogb9
@@ -20,3 +20,7 @@ blocked_by:
 POSIX bracketed paste 已实现并通过 PTY 回归（中文、分片标记、超限、中断、EOF）；make test 通过。超限或中断后持续丢弃直到结束标记，缺失标记会卡住输入，尚需安全恢复；CR 转 LF、NUL 截断、控制序列安全、Windows 和真实输入法仍需验证。
 
 新增含 NUL 粘贴整块拒绝及 PTY 回归，避免静默截断；移除不安全的超时退出方案，异常粘贴仍隔离至结束标记，以免迟到字节进入 shell。无结束标记仍会等待；协议内提前结束标记和控制序列风险待审查。Windows _getch 路径尚未支持 Unicode。
+
+POSIX bracketed paste 将 CRLF 和单独 CR 规范化为 LF；关闭 ICRNL 和 IXON 以保留原始换行并防止软件流控阻塞。新增 PTY 回归，make test 和 make test-pty 通过。缺失结束标记、控制序列与 Windows/真实输入法验证仍待处理。
+
+按用户决定：中文支持暂视为完成，当前工作挂起；既有未验证事项及已知限制保留，恢复时继续处理。

@@ -440,19 +440,16 @@ int clay_grok_list_models(ClayGrok *client, ClayArray *models) {
   clay_openai_destroy(catalog);
   return rc;
 }
+static int refresh_for_run(void *userdata) {
+  return refresh(userdata);
+}
+
 int clay_grok_run(ClayGrok *client, ClayJson *messages, const ClayTool *tools,
                   size_t tool_count, int max_rounds,
                   const ClayOpenAICallbacks *callbacks) {
   if (ensure_access_token(client) != 0) return -1;
-  int rc = clay_openai_run(client->openai, messages, tools, tool_count,
-                           max_rounds, callbacks);
-  /* A token can be revoked before its advertised expiry. One refresh/retry is
-     enough; never turn an authentication failure into a retry loop. */
-  if (rc == -1 && clay_openai_last_status(client->openai) == 401 &&
-      refresh(client) == 0)
-    rc = clay_openai_run(client->openai, messages, tools, tool_count,
-                         max_rounds, callbacks);
-  return rc;
+  return clay_openai_run_with_refresh(client->openai, messages, tools, tool_count,
+                                       max_rounds, callbacks, refresh_for_run, client);
 }
 void clay_grok_copy_credentials(const ClayGrok *client, ClayGrokCredentials *out) {
   if (!client || !out) return;

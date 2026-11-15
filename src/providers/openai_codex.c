@@ -5,9 +5,11 @@
 #include "clay/encoding.h"
 #include "clay/http.h"
 #include "clay/oauth.h"
+#include "clay/providers/retry.h"
 #include "clay/sse.h"
 #include "clay/term.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +62,9 @@ typedef struct {
   int cancelled;
   int malformed;
   int failed_event;
+  char *sse_error;
+  int sse_rate_limit;
+  ClayOpenAIRetryState retry;
   long input_tokens;
   long output_tokens;
 } CodexStream;
@@ -435,9 +440,19 @@ static void process_item(CodexStream *s, ClayJson *item) {
 }
 static void codex_sse_json(const char *text, void *userdata) {
   CodexStream *s = userdata;
-  ClayJson *root = clay_json_parse(text, NULL);
+  if (s->failed_event) return;
+  const char *end = NULL;
+  ClayJson *root = clay_json_parse(text, &end);
   if (!root) {
     s->malformed = 1;
+    return;
+  }
+  while (end && *end && isspace((unsigned char)*end)) end++;
+  if (end && !*end && clay_openai_sse_error_is_429(root)) {
+    s->failed_event = 1;
+    s->sse_rate_limit = 1;
+    s->sse_error = strdup(text);
+    clay_json_free(root);
     return;
   }
   const char *type = string_at(root, "type");
@@ -448,20 +463,26 @@ static void codex_sse_json(const char *text, void *userdata) {
   if (strcmp(type, "response.output_text.delta") == 0) {
     const char *delta = string_at(root, "delta");
     if (delta) {
+      if (*delta) s->retry.visible = 1;
       if (append_limited(&s->content, delta, strlen(delta),
                          CODEX_CONTENT_LIMIT))
         s->malformed = 1;
-      else if (s->callbacks && s->callbacks->on_token)
+      else if (s->callbacks && s->callbacks->on_token) {
+        s->retry.callback_delivered = 1;
         s->callbacks->on_token(delta, s->callbacks->userdata);
+      }
     }
   } else if (strcmp(type, "response.reasoning_summary_text.delta") == 0) {
     const char *delta = string_at(root, "delta");
     if (delta) {
+      if (*delta) s->retry.visible = 1;
       if (append_limited(&s->reasoning, delta, strlen(delta),
                          CODEX_REASONING_LIMIT))
         s->malformed = 1;
-      else if (s->callbacks && s->callbacks->on_reasoning)
+      else if (s->callbacks && s->callbacks->on_reasoning) {
+        s->retry.callback_delivered = 1;
         s->callbacks->on_reasoning(delta, s->callbacks->userdata);
+      }
     }
   } else if (strcmp(type, "response.output_item.added") == 0) {
     process_item(s, clay_json_object_get(root, "item"));
@@ -481,6 +502,7 @@ static void codex_sse_json(const char *text, void *userdata) {
     ClayJson *usage = clay_json_object_get(response, "usage");
     if (clay_json_type(usage) == CLAY_JSON_OBJECT && s->callbacks &&
         (s->callbacks->on_usage || s->callbacks->on_usage_details)) {
+      s->retry.callback_delivered = 1;
       ClayTokenUsage parsed;
       clay_openai_usage_from_json(usage, &parsed);
       s->input_tokens = parsed.input_tokens;
@@ -505,6 +527,7 @@ static void stream_init(CodexStream *s, const ClayOpenAICallbacks *callbacks) {
   s->sse = clay_sse_create(CODEX_SSE_LINE_LIMIT, codex_sse_json, s);
 }
 static void stream_free(CodexStream *s) {
+  free(s->sse_error);
   clay_str_free(&s->raw);
   clay_str_free(&s->content);
   clay_str_free(&s->reasoning);
@@ -659,7 +682,7 @@ static ClayStr request_body(ClayOpenAICodex *client, const ClayJson *messages,
 }
 static void apply_calls(ClayJson *messages, const ClayTool *tools,
                         size_t tool_count, CodexStream *s,
-                        const ClayOpenAICallbacks *callbacks) {
+                        const ClayOpenAICallbacks *callbacks, int execute) {
   ClayJson *assistant = clay_json_object(), *calls = clay_json_array();
   clay_json_object_set(assistant, "role", clay_json_string("assistant"));
   clay_json_object_set(assistant, "content",
@@ -677,6 +700,7 @@ static void apply_calls(ClayJson *messages, const ClayTool *tools,
   }
   clay_json_object_set(assistant, "tool_calls", calls);
   clay_json_array_push(messages, assistant);
+  if (!execute) return;
   for (size_t i = 0; i < s->calls.count; i++) {
     CodexToolCall *c = clay_array_get(&s->calls, i);
     if (callbacks && callbacks->on_tool_call)
@@ -722,6 +746,12 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
     return -1;
   for (int round = 0; round < max_rounds; round++) {
     int auth_retried = 0;
+    CodexStream stream;
+    stream_init(&stream, callbacks);
+    ClayProviderRetryClock clock = {clay_provider_retry_now_ms, clay_provider_retry_sleep_ms,
+                                    stream_abort, &stream};
+    ClayProviderRetry retry;
+    int retry_enabled = clay_provider_retry_init(&retry, &clock);
   retry_request:;
     ClayStr body = request_body(client, messages, tools, tool_count), auth;
     clay_str_init(&auth);
@@ -732,8 +762,6 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
         {"Content-Type", "application/json"},
         {"Accept", "text/event-stream"},
         {"originator", CODEX_ORIGINATOR}};
-    CodexStream stream;
-    stream_init(&stream, callbacks);
     ClayHttpRequest req = {0};
     req.method = "POST";
     req.url = CODEX_BACKEND_URL "/responses";
@@ -750,6 +778,7 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
     req.max_response_bytes = CODEX_RESPONSE_LIMIT;
     ClayHttpResponse response;
     int transport = clay_http_request(&req, &response);
+    client->last_status = response.status;
     clay_str_free(&body);
     clay_str_free(&auth);
     if (stream.cancelled) {
@@ -758,16 +787,46 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       return 1;
     }
     if ((response.status == 401 || response.status == 403) && !auth_retried &&
+        clay_openai_retry_safe(&stream.retry) &&
         !client->refresh_failed && refresh(client) == 0) {
       auth_retried = 1;
       clay_http_response_free(&response);
       stream_free(&stream);
+      stream_init(&stream, callbacks);
       goto retry_request;
+    }
+    ClayHttpResponse decision = response;
+    if (stream.sse_rate_limit && response.status >= 200 && response.status < 300 && stream.sse_error) {
+      decision.status = 429;
+      decision.error_body = stream.sse_error;
+      decision.error_body_len = strlen(stream.sse_error);
+      decision.error_body_truncated = 0;
+    }
+    if (retry_enabled && !transport && !stream.malformed &&
+        !decision.error_body_truncated &&
+        clay_provider_retry_wait(&retry, &clock, &decision, clay_openai_permanent_quota(&decision),
+                                 clay_openai_retry_safe(&stream.retry),
+                                 clay_provider_retry_jitter())) {
+      clay_http_response_free(&response);
+      stream_free(&stream);
+      stream_init(&stream, callbacks);
+      goto retry_request;
+    }
+    if (stream.cancelled) {
+      clay_http_response_free(&response);
+      stream_free(&stream);
+      return 1;
     }
     if (transport || response.status < 200 || response.status >= 300 ||
         stream.malformed || stream.failed_event) {
+      if (stream.content.len)
+        clay_json_array_push(messages, clay_openai_message("assistant", stream.content.data));
+      if (response.status >= 200 && response.status < 300 && stream.sse_rate_limit) {
+        clay_openai_report_sse_error(&response, stream.sse_error ? stream.sse_error : "", callbacks);
+      } else if (transport || response.status < 200 || response.status >= 300)
+        clay_openai_report_http_error(&response, callbacks);
       if (callbacks && callbacks->on_error)
-        callbacks->on_error(response.status, stream.raw.data,
+        callbacks->on_error(response.status, response.status >= 200 && response.status < 300 && stream.sse_error ? stream.sse_error : stream.raw.data,
                             callbacks->userdata);
       clay_http_response_free(&response);
       stream_free(&stream);
@@ -783,7 +842,8 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       stream_free(&stream);
       return 0;
     }
-    apply_calls(messages, tools, tool_count, &stream, callbacks);
+    stream.retry.tool_executed = 1;
+    apply_calls(messages, tools, tool_count, &stream, callbacks, 1);
     stream_free(&stream);
   }
   /* Rounds spent with tool calls still coming: not a failure, just an

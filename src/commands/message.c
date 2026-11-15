@@ -21,6 +21,7 @@ typedef struct {
   int started;
   int response_active;
   long error_status;
+  int sse_rate_limit;
   long input_tokens;
   long output_tokens;
   long cached_input_tokens;
@@ -1332,6 +1333,12 @@ static void on_error(long status, const char *body, void *userdata) {
   ((ClayConversationStream *)userdata)->error_status = status;
 }
 
+static void on_http_error(const ClayOpenAIError *error, void *userdata) {
+  if (error->from_sse && (error->kind == CLAY_OPENAI_ERROR_RATE_LIMIT ||
+                          error->kind == CLAY_OPENAI_ERROR_QUOTA))
+    ((ClayConversationStream *)userdata)->sse_rate_limit = 1;
+}
+
 static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   ClayConversationStream *stream = userdata;
   stream->input_tokens += usage->input_tokens;
@@ -1461,6 +1468,26 @@ static int should_abort(void *userdata) {
   return clay_term_take_escape() || clay_term_take_interrupt();
 }
 
+static void save_unrecorded_response(ClayJson *messages, size_t turn_start,
+                                     const ClayStr *response) {
+  if (!response->len) return;
+  size_t saved = 0;
+  for (size_t i = turn_start + 1; i < clay_json_array_count(messages); i++) {
+    ClayJson *message = clay_json_array_get(messages, i);
+    if (strcmp(clay_json_string_value(clay_json_object_get(message, "role")), "assistant"))
+      continue;
+    const char *text = clay_json_string_value(clay_json_object_get(message, "content"));
+    size_t len = strlen(text);
+    if (len > response->len - saved || memcmp(response->data + saved, text, len)) {
+      saved = 0;
+      break;
+    }
+    saved += len;
+  }
+  if (saved < response->len)
+    clay_json_array_push(messages, clay_openai_message("assistant", response->data + saved));
+}
+
 int clay_commands_run_message(ClayCommands *commands, const char *input) {
   if (!commands->selected_provider || !commands->selected_model) {
     clay_sayc(
@@ -1513,6 +1540,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   callbacks.on_usage_details = on_usage_details;
   callbacks.on_reasoning = on_reasoning;
   callbacks.on_error = on_error;
+  callbacks.on_http_error = on_http_error;
   callbacks.should_abort = should_abort;
   callbacks.userdata = &stream;
   commands->messages_sent++;
@@ -1543,9 +1571,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
     clay_response_end();
   }
   if (rc == 1) {
-    if (stream.response.len > 0)
-      clay_json_array_push(
-          messages, clay_openai_message("assistant", stream.response.data));
+    save_unrecorded_response(messages, turn_start, &stream.response);
     persist_thinking(commands, &stream);
     int save_failed =
         clay_chat_finish_turn(commands->chat, messages, turn_start, "aborted") != 0;
@@ -1598,9 +1624,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
           stream.cached_input_tokens, stream.cached_input_tokens_known);
     }
   } else {
-    if (stream.response.len > 0)
-      clay_json_array_push(
-          messages, clay_openai_message("assistant", stream.response.data));
+    save_unrecorded_response(messages, turn_start, &stream.response);
     persist_thinking(commands, &stream);
     save_failed = clay_chat_finish_turn(commands->chat, messages, turn_start,
                                        stream.error_status > 0 ? "provider_error"
@@ -1624,6 +1648,9 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
                 "open. The work so far is kept - send another message to "
                 "continue.",
                 CLAY_AGENT_MAX_ROUNDS);
+    else if (rc != 0 && stream.sse_rate_limit)
+      clay_sayc(CLAY_RED, "Provider request failed (SSE 429; HTTP %ld).",
+                stream.error_status);
     else if (rc != 0 && stream.error_status > 0)
       clay_sayc(CLAY_RED, "Provider request failed (HTTP %ld).",
                 stream.error_status);

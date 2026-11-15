@@ -3,6 +3,7 @@
 
 #include "clay/array.h"
 #include "clay/json.h"
+#include "clay/http.h"
 
 #include <stddef.h>
 
@@ -59,6 +60,28 @@ typedef struct {
     void *userdata;
 } ClayTool;
 
+typedef enum {
+    CLAY_OPENAI_ERROR_OTHER,
+    CLAY_OPENAI_ERROR_RATE_LIMIT,
+    CLAY_OPENAI_ERROR_QUOTA
+} ClayOpenAIErrorKind;
+
+typedef struct {
+    ClayOpenAIErrorKind kind;
+    long status; /* Actual HTTP status, including for SSE errors. */
+    int from_sse;
+    /* Borrowed until the callback returns; raw body may contain secrets. */
+    const char *body;
+    size_t body_len;
+    int body_truncated;
+    /* Allowlisted headers, borrowed until the callback returns. */
+    const ClayHttpRateHeader *rate_headers;
+    size_t rate_header_count;
+    int rate_headers_dropped;
+    int retry_after_valid;
+    uint64_t retry_after_seconds;
+} ClayOpenAIError;
+
 /* All optional (NULL to ignore). */
 typedef struct {
     long input_tokens;
@@ -81,7 +104,39 @@ typedef struct {
     /* Optional streamed reasoning/summary text. Providers that do not expose
        it simply leave this callback unused. */
     void (*on_reasoning)(const char *text, void *userdata);
+    /* Optional structured HTTP error; invoked in addition to on_error. */
+    void (*on_http_error)(const ClayOpenAIError *error, void *userdata);
 } ClayOpenAICallbacks;
+
+/* Per-request replay boundary. Tool fragments are not committed side effects. */
+typedef struct {
+    int visible;
+    int tool_executed;
+    int callback_delivered;
+} ClayOpenAIRetryState;
+
+static inline int clay_openai_retry_safe(const ClayOpenAIRetryState *state) {
+    return !state->visible && !state->tool_executed && !state->callback_delivered;
+}
+
+/* Adapter-only run: refresh once on a replay-safe 401 before reporting errors. */
+int clay_openai_run_with_refresh(ClayOpenAI *client, ClayJson *messages,
+                                 const ClayTool *tools, size_t tool_count, int max_rounds,
+                                 const ClayOpenAICallbacks *callbacks,
+                                 int (*refresh)(void *), void *refresh_userdata);
+
+/* Whether replaying the entire last run is safe (used by auth adapters). */
+int clay_openai_last_run_replay_safe(const ClayOpenAI *client);
+
+/* For adapter use; event pointers are valid only during the callback. */
+int clay_openai_permanent_quota(const ClayHttpResponse *response);
+void clay_openai_report_http_error(const ClayHttpResponse *response,
+                                   const ClayOpenAICallbacks *callbacks);
+
+/* Adapter helpers for explicit structured SSE errors. */
+int clay_openai_sse_error_is_429(const ClayJson *root);
+void clay_openai_report_sse_error(const ClayHttpResponse *response, const char *body,
+                                  const ClayOpenAICallbacks *callbacks);
 
 /* Parses both Chat Completions and Responses-style usage objects. */
 void clay_openai_usage_from_json(const ClayJson *usage, ClayTokenUsage *out);

@@ -2,6 +2,7 @@
 #define CLAY_HTTP_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct {
     const char *name;
@@ -31,10 +32,29 @@ typedef struct {
     size_t max_response_bytes; /* 0 = unlimited */
 } ClayHttpRequest;
 
+#define CLAY_HTTP_RATE_HEADER_LIMIT 16
+#define CLAY_HTTP_RATE_VALUE_LIMIT 512
+#define CLAY_HTTP_ERROR_BODY_LIMIT (64 * 1024)
+
+typedef struct {
+    const char *name; /* canonical lowercase name; static storage */
+    char value[CLAY_HTTP_RATE_VALUE_LIMIT + 1];
+} ClayHttpRateHeader;
+
 typedef struct {
     long status;
     char *body;      /* malloc'd, NUL-terminated; only populated when on_chunk was NULL. Caller frees. */
     size_t body_len;
+    /* Allowlisted rate-limit headers in received order, including duplicates.
+       Oversized/excess/invalid values are omitted and set rate_headers_dropped. */
+    ClayHttpRateHeader rate_headers[CLAY_HTTP_RATE_HEADER_LIMIT];
+    size_t rate_header_count;
+    int rate_headers_dropped;
+    /* Raw non-2xx body prefix, including for streaming; may contain sensitive data.
+       Owned by the response and released by clay_http_response_free. */
+    char *error_body;
+    size_t error_body_len;
+    int error_body_truncated;
 } ClayHttpResponse;
 
 /* Call once at process startup/shutdown; not safe to call concurrently
@@ -44,8 +64,15 @@ void clay_http_cleanup(void);
 
 /* Synchronous. Returns 0 once the exchange completed - check
    response->status for the HTTP outcome, a 4xx/5xx included - nonzero
-   only on a transport failure. */
+   only on a transport failure. Always free the response, including after
+   failure, before reusing it. */
 int clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *response);
+
+/* Returns 1 and sets seconds only for one unambiguous valid Retry-After.
+   shortcut: obsolete RFC 850 and asctime dates are rejected; support them when needed.
+   Dates accept only IMF-fixdate. Returns 0 for missing, invalid, duplicate or
+   dropped headers; callers must not interpret failure as permission to retry. */
+int clay_http_retry_after(const ClayHttpResponse *response, uint64_t *seconds);
 
 void clay_http_response_free(ClayHttpResponse *response);
 

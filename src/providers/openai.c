@@ -2,9 +2,11 @@
 
 #include "clay/array.h"
 #include "clay/http.h"
+#include "clay/providers/retry.h"
 #include "clay/sse.h"
 #include "clay/str.h"
 
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,7 +30,93 @@ struct ClayOpenAI {
   ClayOpenAIHeader extra_headers[CLAY_OPENAI_EXTRA_HEADERS_LIMIT];
   size_t extra_header_count;
   long last_status;
+  int last_run_replay_safe;
 };
+
+int clay_openai_last_run_replay_safe(const ClayOpenAI *client) {
+  return client && client->last_run_replay_safe;
+}
+
+int clay_openai_permanent_quota(const ClayHttpResponse *response) {
+  int quota = 0;
+  if (response->error_body && !response->error_body_truncated &&
+      strlen(response->error_body) == response->error_body_len) {
+    const char *end = NULL;
+    ClayJson *root = clay_json_parse(response->error_body, &end);
+    while (end && *end && isspace((unsigned char)*end)) end++;
+    const ClayJson *obj = clay_json_object_get(root, "error");
+    if (clay_json_type(obj) != CLAY_JSON_OBJECT)
+      obj = clay_json_object_get(clay_json_object_get(root, "response"), "error");
+    const char *code = clay_json_string_value(clay_json_object_get(obj, "code"));
+    const char *type = clay_json_string_value(clay_json_object_get(obj, "type"));
+    if (root && end && !*end && response->status >= 400 && response->status < 500 &&
+        (!strcmp(code, "insufficient_quota") || !strcmp(type, "insufficient_quota") ||
+         !strcmp(code, "billing_hard_limit_reached") || !strcmp(type, "billing_hard_limit_reached")))
+      quota = 1;
+    clay_json_free(root);
+  }
+  return quota;
+}
+
+void clay_openai_report_http_error(const ClayHttpResponse *response,
+                                   const ClayOpenAICallbacks *callbacks) {
+  if (!callbacks || !callbacks->on_http_error) return;
+  ClayOpenAIError error = {0};
+  error.status = response->status;
+  error.body = response->error_body;
+  error.body_len = response->error_body_len;
+  error.body_truncated = response->error_body_truncated;
+  error.rate_headers = response->rate_headers;
+  error.rate_header_count = response->rate_header_count;
+  error.rate_headers_dropped = response->rate_headers_dropped;
+  error.retry_after_valid = clay_http_retry_after(response, &error.retry_after_seconds);
+  if (response->status == 429) error.kind = CLAY_OPENAI_ERROR_RATE_LIMIT;
+  if (clay_openai_permanent_quota(response)) error.kind = CLAY_OPENAI_ERROR_QUOTA;
+  callbacks->on_http_error(&error, callbacks->userdata);
+}
+
+static int is_429(const ClayJson *value) {
+  return (clay_json_type(value) == CLAY_JSON_NUMBER &&
+          clay_json_number_value(value) == 429) ||
+         (clay_json_type(value) == CLAY_JSON_STRING &&
+          strcmp(clay_json_string_value(value), "429") == 0);
+}
+
+int clay_openai_sse_error_is_429(const ClayJson *root) {
+  const char *type = clay_json_string_value(clay_json_object_get(root, "type"));
+  const ClayJson *error = clay_json_object_get(root, "error");
+  if (!strcmp(type, "response.failed"))
+    error = clay_json_object_get(clay_json_object_get(root, "response"), "error");
+  else if (*type && strcmp(type, "error"))
+    return 0;
+  if (clay_json_type(error) != CLAY_JSON_OBJECT)
+    return 0;
+  return is_429(clay_json_object_get(error, "status")) ||
+         is_429(clay_json_object_get(error, "status_code")) ||
+         is_429(clay_json_object_get(error, "code"));
+}
+
+void clay_openai_report_sse_error(const ClayHttpResponse *response,
+                                  const char *body,
+                                  const ClayOpenAICallbacks *callbacks) {
+  if (!callbacks || !callbacks->on_http_error) return;
+  ClayOpenAIError error = {0};
+  ClayHttpResponse quota_response = *response;
+  quota_response.status = 429;
+  quota_response.error_body = (char *)body;
+  quota_response.error_body_len = strlen(body);
+  quota_response.error_body_truncated = 0;
+  error.kind = clay_openai_permanent_quota(&quota_response) ? CLAY_OPENAI_ERROR_QUOTA : CLAY_OPENAI_ERROR_RATE_LIMIT;
+  error.status = response->status;
+  error.from_sse = 1;
+  error.body = body;
+  error.body_len = strlen(body);
+  error.rate_headers = response->rate_headers;
+  error.rate_header_count = response->rate_header_count;
+  error.rate_headers_dropped = response->rate_headers_dropped;
+  error.retry_after_valid = clay_http_retry_after(response, &error.retry_after_seconds);
+  callbacks->on_http_error(&error, callbacks->userdata);
+}
 
 int clay_openai_url_is_supported(const char *base_url) {
   return base_url &&
@@ -259,6 +347,10 @@ typedef struct {
   const ClayOpenAICallbacks *callbacks;
   int cancelled;
   int limit_exceeded;
+  char *sse_error;
+  int sse_failed;
+  int sse_rate_limit;
+  ClayOpenAIRetryState retry;
 } ClayStreamState;
 
 static void on_sse_data(const char *data, void *userdata);
@@ -272,9 +364,14 @@ static void stream_state_init(ClayStreamState *st,
   st->callbacks = callbacks;
   st->cancelled = 0;
   st->limit_exceeded = 0;
+  st->sse_error = NULL;
+  st->sse_failed = 0;
+  st->sse_rate_limit = 0;
+  st->retry = (ClayOpenAIRetryState){0};
 }
 
 static void stream_state_free(ClayStreamState *st) {
+  free(st->sse_error);
   clay_str_free(&st->raw);
   clay_str_free(&st->content);
   for (size_t i = 0; i < st->tool_calls.count; i++) {
@@ -320,11 +417,27 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
   if (strcmp(json_text, "[DONE]") == 0)
     return 0;
 
-  ClayJson *root = clay_json_parse(json_text, NULL);
+  const char *end = NULL;
+  ClayJson *root = clay_json_parse(json_text, &end);
   if (!root)
     return 0;
+  while (end && *end && isspace((unsigned char)*end)) end++;
+
+  const char *type = clay_json_string_value(clay_json_object_get(root, "type"));
+  if (end && !*end &&
+      ((!*type && clay_json_type(clay_json_object_get(root, "error")) == CLAY_JSON_OBJECT) ||
+       !strcmp(type, "error") || !strcmp(type, "response.failed"))) {
+    st->sse_failed = 1;
+    st->sse_rate_limit = clay_openai_sse_error_is_429(root);
+    st->sse_error = strdup(json_text);
+    clay_json_free(root);
+    return 0;
+  }
 
   ClayJson *usage = clay_json_object_get(root, "usage");
+  if (clay_json_type(usage) == CLAY_JSON_OBJECT && st->callbacks &&
+      (st->callbacks->on_usage || st->callbacks->on_usage_details))
+    st->retry.callback_delivered = 1;
   if (clay_json_type(usage) == CLAY_JSON_OBJECT && st->callbacks &&
       st->callbacks->on_usage) {
     ClayTokenUsage parsed;
@@ -344,7 +457,7 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
       clay_json_array_get(clay_json_object_get(root, "choices"), 0);
   ClayJson *delta = clay_json_object_get(choice0, "delta");
 
-  if (st->callbacks && st->callbacks->on_reasoning) {
+  {
     const char *reasoning = NULL;
     const char *keys[] = {"reasoning_content", "reasoning", "thinking"};
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -354,20 +467,26 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
         break;
       }
     }
-    if (reasoning && *reasoning)
-      st->callbacks->on_reasoning(reasoning, st->callbacks->userdata);
+    if (reasoning && *reasoning) {
+      st->retry.visible = 1;
+      if (st->callbacks && st->callbacks->on_reasoning)
+        st->callbacks->on_reasoning(reasoning, st->callbacks->userdata);
+    }
   }
 
   ClayJson *content = clay_json_object_get(delta, "content");
   if (clay_json_type(content) == CLAY_JSON_STRING) {
     const char *text = clay_json_string_value(content);
+    if (*text) st->retry.visible = 1;
     if (append_limited(&st->content, text, strlen(text),
                        CLAY_OPENAI_CONTENT_LIMIT) != 0) {
       clay_json_free(root);
       return -1;
     }
-    if (st->callbacks && st->callbacks->on_token)
+    if (st->callbacks && st->callbacks->on_token) {
+      st->retry.callback_delivered = 1;
       st->callbacks->on_token(text, st->callbacks->userdata);
+    }
   }
 
   ClayJson *tool_calls = clay_json_object_get(delta, "tool_calls");
@@ -416,7 +535,7 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
 
 static void on_sse_data(const char *data, void *userdata) {
   ClayStreamState *st = userdata;
-  if (process_sse_data(data, st) != 0)
+  if (!st->sse_failed && process_sse_data(data, st) != 0)
     st->limit_exceeded = 1;
 }
 
@@ -497,7 +616,7 @@ static ClayStr build_request_body(ClayOpenAI *client, const ClayJson *messages,
    call against `tools`, and appends the resulting "tool" messages. */
 static void handle_tool_calls(ClayJson *messages, const ClayTool *tools,
                               size_t tool_count, ClayStreamState *st,
-                              const ClayOpenAICallbacks *callbacks) {
+                              const ClayOpenAICallbacks *callbacks, int execute) {
   ClayJson *assistant = clay_json_object();
   clay_json_object_set(assistant, "role", clay_json_string("assistant"));
   clay_json_object_set(assistant, "content",
@@ -520,6 +639,7 @@ static void handle_tool_calls(ClayJson *messages, const ClayTool *tools,
   }
   clay_json_object_set(assistant, "tool_calls", tool_calls_json);
   clay_json_array_push(messages, assistant);
+  if (!execute) return;
 
   for (size_t i = 0; i < st->tool_calls.count; i++) {
     ClayToolCallAccum *tc = clay_array_get(&st->tool_calls, i);
@@ -564,10 +684,20 @@ static void handle_tool_calls(ClayJson *messages, const ClayTool *tools,
   }
 }
 
-int clay_openai_run(ClayOpenAI *client, ClayJson *messages,
-                    const ClayTool *tools, size_t tool_count, int max_rounds,
-                    const ClayOpenAICallbacks *callbacks) {
+int clay_openai_run_with_refresh(ClayOpenAI *client, ClayJson *messages,
+                                 const ClayTool *tools, size_t tool_count, int max_rounds,
+                                 const ClayOpenAICallbacks *callbacks,
+                                 int (*refresh)(void *), void *refresh_userdata) {
+  int refreshed = 0;
+  client->last_run_replay_safe = 1;
   for (int round = 0; round < max_rounds; round++) {
+    ClayStreamState st;
+    stream_state_init(&st, callbacks);
+    ClayProviderRetryClock clock = {clay_provider_retry_now_ms, clay_provider_retry_sleep_ms,
+                                    should_abort_stream, &st};
+    ClayProviderRetry retry;
+    int retry_enabled = clay_provider_retry_init(&retry, &clock);
+retry_request:;
     ClayStr body = build_request_body(client, messages, tools, tool_count);
 
     ClayStr url;
@@ -585,9 +715,6 @@ int clay_openai_run(ClayOpenAI *client, ClayJson *messages,
     for (size_t i = 0; i < client->extra_header_count; i++)
       headers[i + 3] = (ClayHttpHeader){client->extra_headers[i].name,
                                         client->extra_headers[i].value};
-
-    ClayStreamState st;
-    stream_state_init(&st, callbacks);
 
     ClayHttpRequest req = {0};
     req.method = "POST";
@@ -607,6 +734,7 @@ int clay_openai_run(ClayOpenAI *client, ClayJson *messages,
     ClayHttpResponse resp;
     int rc = clay_http_request(&req, &resp);
     client->last_status = resp.status;
+    if (!clay_openai_retry_safe(&st.retry)) client->last_run_replay_safe = 0;
 
     clay_str_free(&url);
     clay_str_free(&auth);
@@ -617,9 +745,56 @@ int clay_openai_run(ClayOpenAI *client, ClayJson *messages,
       stream_state_free(&st);
       return 1;
     }
-    if (rc != 0 || resp.status < 200 || resp.status >= 300) {
+    ClayHttpResponse decision = resp;
+    if (st.sse_rate_limit && resp.status >= 200 && resp.status < 300 && st.sse_error) {
+      decision.status = 429;
+      decision.error_body = st.sse_error;
+      decision.error_body_len = strlen(st.sse_error);
+      decision.error_body_truncated = 0;
+    }
+    if (retry_enabled && rc == 0 && !st.limit_exceeded &&
+        !decision.error_body_truncated &&
+        clay_provider_retry_wait(&retry, &clock, &decision, clay_openai_permanent_quota(&decision),
+                                 clay_openai_retry_safe(&st.retry),
+                                 clay_provider_retry_jitter())) {
+      clay_http_response_free(&resp);
+      stream_state_free(&st);
+      stream_state_init(&st, callbacks);
+      goto retry_request;
+    }
+    if (st.cancelled) {
+      clay_http_response_free(&resp);
+      stream_state_free(&st);
+      return 1;
+    }
+    if (rc == 0 && resp.status == 401 && refresh && !refreshed &&
+        client->last_run_replay_safe) {
+      refreshed = 1;
+      if (refresh(refresh_userdata) == 0) {
+        clay_http_response_free(&resp);
+        stream_state_free(&st);
+        stream_state_init(&st, callbacks);
+        goto retry_request;
+      }
+    }
+    if ((rc != 0 && !st.sse_failed) || resp.status < 200 || resp.status >= 300) {
+      if (st.content.len)
+        clay_json_array_push(messages, clay_openai_message("assistant", st.content.data));
+      clay_openai_report_http_error(&resp, callbacks);
       if (callbacks && callbacks->on_error)
         callbacks->on_error(resp.status, st.raw.data, callbacks->userdata);
+      clay_http_response_free(&resp);
+      stream_state_free(&st);
+      return -1;
+    }
+    if (st.sse_failed) {
+      const char *error = st.sse_error ? st.sse_error : "";
+      if (st.content.len)
+        clay_json_array_push(messages, clay_openai_message("assistant", st.content.data));
+      if (st.sse_rate_limit)
+        clay_openai_report_sse_error(&resp, error, callbacks);
+      if (callbacks && callbacks->on_error)
+        callbacks->on_error(resp.status, error, callbacks->userdata);
       clay_http_response_free(&resp);
       stream_state_free(&st);
       return -1;
@@ -633,11 +808,20 @@ int clay_openai_run(ClayOpenAI *client, ClayJson *messages,
       return 0;
     }
 
-    handle_tool_calls(messages, tools, tool_count, &st, callbacks);
+    st.retry.tool_executed = 1;
+    client->last_run_replay_safe = 0;
+    handle_tool_calls(messages, tools, tool_count, &st, callbacks, 1);
     stream_state_free(&st);
   }
 
   /* Rounds spent with tool calls still coming: not a failure, just an
      unfinished turn the user can continue. */
   return CLAY_RUN_OUT_OF_ROUNDS;
+}
+
+int clay_openai_run(ClayOpenAI *client, ClayJson *messages,
+                    const ClayTool *tools, size_t tool_count, int max_rounds,
+                    const ClayOpenAICallbacks *callbacks) {
+  return clay_openai_run_with_refresh(client, messages, tools, tool_count,
+                                      max_rounds, callbacks, NULL, NULL);
 }

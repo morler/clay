@@ -168,7 +168,7 @@ TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(M
 	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(TEST_OBJ)
 UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
 UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
-TEST_DEP := $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d
+TEST_DEP := $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d $(BUILD_DIR)/tests/test_http.d $(BUILD_DIR)/tests/test_retry_e2e.d $(BUILD_DIR)/tests/test_provider_errors.d $(BUILD_DIR)/tests/test_reasoning.d $(BUILD_DIR)/tests/test_reasoning_codex.d
 
 # Windows cross-build via mingw-w64. With CURL_LINK=dynamic, clay.exe needs
 # libcurl-4.dll and its own dependency DLLs alongside it.
@@ -183,7 +183,7 @@ TARGET_WIN    := $(BIN_DIR_WIN)/clay.exe
 OBJ_WIN := $(patsubst src/%.c,$(BUILD_DIR_WIN)/%.o,$(SRC_WIN))
 DEP_WIN := $(OBJ_WIN:.o=.d)
 
-UNIT_TEST_TARGETS := $(BIN_DIR)/test_reasoning $(BIN_DIR)/test_reasoning_codex $(BIN_DIR)/test_workspace_fd $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(MESSAGE_TEST_TARGET) $(CHAT_TEST_TARGET) \
+UNIT_TEST_TARGETS := $(BIN_DIR)/test_retry_e2e $(BIN_DIR)/test_provider_retry $(BIN_DIR)/test_provider_errors $(BIN_DIR)/test_http $(BIN_DIR)/test_reasoning $(BIN_DIR)/test_reasoning_codex $(BIN_DIR)/test_workspace_fd $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(MESSAGE_TEST_TARGET) $(CHAT_TEST_TARGET) \
 	$(UUID_TEST_TARGET) $(MEMORY_TEST_TARGET) $(SANDBOX_TEST_TARGET) \
 	$(FS_TOOLS_TEST_TARGET) $(CHECKPOINT_TEST_TARGET) $(PERMISSIONS_TEST_TARGET) \
 	$(CONTEXT_COMPACT_TEST_TARGET) $(PROJECT_INSTRUCTIONS_TEST_TARGET) \
@@ -212,6 +212,15 @@ $(TARGET): $(OBJ) | $(BIN_DIR)
 
 test: $(UNIT_TEST_TARGETS)
 	@set -e; for test_binary in $^; do ./$$test_binary; done
+
+$(BIN_DIR)/test_retry_e2e: $(LIB_OBJ) $(BUILD_DIR)/tests/test_retry_e2e.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS) -Wl,--wrap=clay_provider_retry_now_ms -Wl,--wrap=clay_provider_retry_sleep_ms -Wl,--wrap=clay_provider_retry_jitter
+
+$(BIN_DIR)/test_provider_errors: $(LIB_OBJ) $(BUILD_DIR)/tests/test_provider_errors.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS) -Wl,--wrap=clay_http_request -Wl,--wrap=clay_provider_retry_now_ms -Wl,--wrap=clay_provider_retry_sleep_ms -Wl,--wrap=clay_provider_retry_jitter
+
+$(BIN_DIR)/test_http: $(BUILD_DIR)/tests/test_http.o $(BUILD_DIR)/mm/str.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
 
 test-pty: $(BIN_DIR)/test_prompt_pty_driver
 	python3 tests/test_prompt_pty.py $<
@@ -476,4 +485,6 @@ $(BIN_DIR)/test_reasoning: $(filter-out $(BUILD_DIR)/providers/openai.o $(BUILD_
 	$(CC) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_reasoning_codex: $(filter-out $(BUILD_DIR)/providers/openai_codex.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_reasoning_codex.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
+$(BIN_DIR)/test_provider_retry: $(BUILD_DIR)/tests/test_provider_retry.o $(BUILD_DIR)/providers/retry.o $(BUILD_DIR)/http.o $(BUILD_DIR)/mm/str.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS)

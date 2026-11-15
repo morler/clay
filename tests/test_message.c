@@ -13,11 +13,24 @@
 
 static int completion_result;
 static int fail_save;
+static int sse_error;
+static const char *partial_saved;
 
 int test_run_completion(ClayCommands *commands, ClayJson *messages,
                         const ClayToolSet *tools, int max_rounds,
                         const char *cache_key, const ClayOpenAICallbacks *callbacks) {
   (void)messages; (void)tools; (void)max_rounds; (void)cache_key; (void)callbacks;
+  if (sse_error) {
+    ClayOpenAIError error = {.status = 200, .from_sse = 1,
+                             .kind = CLAY_OPENAI_ERROR_RATE_LIMIT,
+                             .body = "secret-credential"};
+    callbacks->on_http_error(&error, callbacks->userdata);
+    callbacks->on_error(200, error.body, callbacks->userdata);
+  }
+  if (partial_saved) {
+    callbacks->on_token("before", callbacks->userdata);
+    clay_json_array_push(messages, clay_openai_message("assistant", partial_saved));
+  }
   if (fail_save) {
     ClayStr path;
     clay_str_init(&path);
@@ -31,6 +44,19 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
 }
 
 int main(void) {
+  ClayJson *saved_messages = clay_json_array();
+  clay_json_array_push(saved_messages, clay_openai_message("user", "hi"));
+  clay_json_array_push(saved_messages, clay_openai_message("assistant", "one"));
+  clay_json_array_push(saved_messages, clay_openai_message("tool", "result"));
+  clay_json_array_push(saved_messages, clay_openai_message("assistant", "two"));
+  ClayStr saved_response; clay_str_init(&saved_response);
+  clay_str_push(&saved_response, "onetwothree");
+  save_unrecorded_response(saved_messages, 0, &saved_response);
+  assert(clay_json_array_count(saved_messages) == 5);
+  assert(!strcmp(clay_json_string_value(clay_json_object_get(clay_json_array_get(saved_messages, 4), "content")), "three"));
+  save_unrecorded_response(saved_messages, 0, &saved_response);
+  assert(clay_json_array_count(saved_messages) == 5);
+  clay_str_free(&saved_response); clay_json_free(saved_messages);
   char home[] = "/tmp/clay-message-XXXXXX";
   assert(mkdtemp(home));
   assert(setenv("HOME", home, 1) == 0);
@@ -54,6 +80,7 @@ int main(void) {
       commands->chat = clay_chat_create("test");
       assert(commands->chat);
       completion_result = results[i];
+      sse_error = results[i] == -1;
       off_t start = lseek(STDOUT_FILENO, 0, SEEK_CUR);
       clay_commands_run_message(commands, "hello");
       fflush(stdout);
@@ -63,6 +90,10 @@ int main(void) {
       assert(text);
       assert(pread(fileno(output), text, (size_t)(end - start), start) == end - start);
       assert((strstr(text, "Could not save the chat journal.") != NULL) == fail_save);
+      if (sse_error) {
+        assert(strstr(text, "SSE 429; HTTP 200"));
+        assert(!strstr(text, "secret-credential"));
+      }
       free(text);
       ClayStr path;
       clay_str_init(&path);
@@ -78,6 +109,44 @@ int main(void) {
       commands->chat = NULL;
     }
   }
+  sse_error = 0;
+  const char *partials[] = {"before", "fore"};
+  for (size_t i = 0; i < 2; i++) {
+    fail_save = 0;
+    completion_result = -1;
+    partial_saved = partials[i];
+    commands->chat = clay_chat_create("test");
+    assert(commands->chat);
+    clay_commands_run_message(commands, "hello");
+    ClayStr path;
+    clay_str_init(&path);
+    clay_str_printf(&path, "%s/.clay/chats/%s/chat.json", home, clay_chat_id(commands->chat));
+    FILE *f = fopen(path.data, "rb");
+    assert(f);
+    assert(fseek(f, 0, SEEK_END) == 0);
+    long len = ftell(f);
+    assert(len > 0 && fseek(f, 0, SEEK_SET) == 0);
+    char *json = calloc((size_t)len + 1, 1);
+    assert(json && fread(json, 1, (size_t)len, f) == (size_t)len);
+    fclose(f);
+    ClayJson *root = clay_json_parse(json, NULL);
+    free(json);
+    ClayJson *turns = clay_json_object_get(root, "turns");
+    ClayJson *turn = clay_json_array_get(turns, clay_json_array_count(turns) - 1);
+    ClayJson *records = clay_json_object_get(turn, "messages");
+    assert(clay_json_array_count(records) == (i == 0 ? 2 : 3));
+    ClayJson *last = clay_json_array_get(records, clay_json_array_count(records) - 1);
+    assert(!strcmp(clay_json_string_value(clay_json_object_get(last, "text")), "before"));
+    clay_json_free(root);
+    assert(remove(path.data) == 0);
+    clay_str_clear(&path);
+    clay_str_printf(&path, "%s/.clay/chats/%s", home, clay_chat_id(commands->chat));
+    assert(rmdir(path.data) == 0);
+    clay_str_free(&path);
+    clay_chat_destroy(commands->chat);
+    commands->chat = NULL;
+  }
+  partial_saved = NULL;
   fflush(stdout);
   assert(dup2(original_stdout, STDOUT_FILENO) >= 0);
   close(original_stdout);

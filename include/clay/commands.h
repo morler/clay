@@ -4,6 +4,9 @@
 typedef struct ClayApp ClayApp;
 typedef struct ClayCommands ClayCommands;
 
+/* The owner must serialize public calls and wait for each to return before
+   destroying the session once; internal subagent workers finish before return.
+   Neither concurrent reconfiguration nor concurrent destruction is supported. */
 ClayCommands *clay_commands_create(ClayApp *app);
 void clay_commands_destroy(ClayCommands *commands);
 void clay_commands_register(ClayCommands *commands);

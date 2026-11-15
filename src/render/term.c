@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #ifdef _WIN32
 /* MinGW exposes the CRT's secure rand_s declaration behind this switch. */
@@ -56,7 +57,9 @@ struct ClayTermHttpServer {
   unsigned short port;
 };
 
-static volatile sig_atomic_t g_interrupted = 0;
+/* C permits lock-free atomic operations in signal handlers. */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "signal flag requires lock-free int atomics");
+static _Atomic int g_interrupted = 0;
 static volatile sig_atomic_t g_resized = 0;
 static int g_pending_escape = 0;
 static int g_pending_escape_action = 0;
@@ -66,7 +69,7 @@ static int g_noninteractive = 0;
 #ifndef _WIN32
 static void handle_sigint(int signal_number) {
   (void)signal_number;
-  g_interrupted = 1;
+  atomic_store_explicit(&g_interrupted, 1, memory_order_relaxed);
 }
 
 static void handle_sigwinch(int signal_number) {
@@ -1512,9 +1515,8 @@ ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out) {
     /* Keep draining until the terminator after a failed paste; input cannot be resynchronized by time. */
     if (result == CLAY_PASTE_COMPLETE && out->len + pending_len >= 16 * 1024 * 1024)
       result = CLAY_PASTE_LIMIT;
-    if (g_interrupted) {
+    if (clay_term_take_interrupt()) {
       if (result == CLAY_PASTE_COMPLETE) result = CLAY_PASTE_INTERRUPTED;
-      clay_term_take_interrupt();
     }
     struct pollfd fd = {STDIN_FILENO, POLLIN, 0};
     int ready = poll(&fd, 1, -1);
@@ -1575,10 +1577,7 @@ void clay_term_raw_disable(void) {
 }
 
 int clay_term_take_interrupt(void) {
-  if (!g_interrupted)
-    return 0;
-  g_interrupted = 0;
-  return 1;
+  return atomic_exchange_explicit(&g_interrupted, 0, memory_order_relaxed);
 }
 
 ClayKey clay_term_read_key(char *ch_out) {
@@ -1627,7 +1626,7 @@ ClayKey clay_term_read_key(char *ch_out) {
 #else
   unsigned char c;
   ssize_t n = read(STDIN_FILENO, &c, 1);
-  if (n < 0 && errno == EINTR && g_interrupted)
+  if (n < 0 && errno == EINTR && atomic_load_explicit(&g_interrupted, memory_order_relaxed))
     return CLAY_KEY_INTERRUPT;
   if (n < 0 && errno == EINTR && g_resized) {
     g_resized = 0;
@@ -1715,7 +1714,7 @@ ClayKey clay_term_read_key_timeout(char *ch_out, int timeout_ms) {
   int ready = select(STDIN_FILENO + 1, &fds, NULL, NULL, &timeout);
   if (ready == 0)
     return CLAY_KEY_NONE;
-  if (ready < 0 && errno == EINTR && g_interrupted)
+  if (ready < 0 && errno == EINTR && atomic_load_explicit(&g_interrupted, memory_order_relaxed))
     return CLAY_KEY_INTERRUPT;
   if (ready < 0 && errno == EINTR && g_resized) {
     g_resized = 0;
@@ -1727,6 +1726,12 @@ ClayKey clay_term_read_key_timeout(char *ch_out, int timeout_ms) {
   return clay_term_read_key(ch_out);
 }
 
+int clay_term_take_pending_escape(void) {
+  int pending = g_pending_escape;
+  g_pending_escape = 0;
+  return pending;
+}
+
 int clay_term_take_escape(void) {
   if (g_pending_escape_action) {
     g_pending_escape_action = 0;
@@ -1734,6 +1739,10 @@ int clay_term_take_escape(void) {
   }
   if (g_pending_think_toggle)
     return 0;
+  if (g_pending_escape) {
+    g_pending_escape = 0;
+    return 1;
+  }
   if (!clay_term_input_pending())
     return 0;
   ClayKey key = clay_term_read_key(NULL);
@@ -1745,7 +1754,7 @@ int clay_term_take_escape(void) {
     return 1;
   }
   if (key == CLAY_KEY_INTERRUPT)
-    g_interrupted = 1;
+    atomic_store_explicit(&g_interrupted, 1, memory_order_relaxed);
   return 0;
 }
 
@@ -1764,7 +1773,7 @@ int clay_term_take_think_toggle(void) {
     return 0;
   }
   if (key == CLAY_KEY_INTERRUPT)
-    g_interrupted = 1;
+    atomic_store_explicit(&g_interrupted, 1, memory_order_relaxed);
   return 0;
 }
 

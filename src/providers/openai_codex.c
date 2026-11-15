@@ -1,3 +1,4 @@
+#include "scope.h"
 /* OpenAI Codex uses the ChatGPT subscription backend, not api.openai.com.
    Its undocumented compatibility details deliberately live in this file. */
 #include "clay/providers/openai_codex.h"
@@ -36,6 +37,7 @@
 #define CODEX_FIELD_LIMIT (1024 * 1024)
 
 struct ClayOpenAICodex {
+  ClayScope *scope; /* borrowed from the owning session */
   ClayCodexCredentials credentials;
   char *model;
   char *reasoning_effort;
@@ -44,6 +46,10 @@ struct ClayOpenAICodex {
   int authentication_invalid;
   long last_status;
 };
+
+void clay_openai_codex_set_scope(ClayOpenAICodex *client, ClayScope *scope) { client->scope = scope; }
+ClayScope *clay_openai_codex_scope(const ClayOpenAICodex *client) { return client->scope; }
+
 
 typedef struct {
   ClayStr id;
@@ -335,12 +341,19 @@ ClayOpenAICodex *clay_openai_codex_create(const ClayCodexCredentials *c,
   if (!c || !c->access_token || !c->refresh_token || !c->account_id)
     return NULL;
   ClayOpenAICodex *client = calloc(1, sizeof(*client));
+  if (!client) return NULL;
   client->credentials.access_token = strdup(c->access_token);
   client->credentials.refresh_token = strdup(c->refresh_token);
   client->credentials.id_token = c->id_token ? strdup(c->id_token) : NULL;
   client->credentials.account_id = strdup(c->account_id);
   client->credentials.expires_at = c->expires_at;
   client->model = strdup(model ? model : "");
+  if (!client->credentials.access_token || !client->credentials.refresh_token ||
+      (c->id_token && !client->credentials.id_token) ||
+      !client->credentials.account_id || !client->model) {
+    clay_openai_codex_destroy(client);
+    return NULL;
+  }
   return client;
 }
 void clay_openai_codex_destroy(ClayOpenAICodex *client) {
@@ -367,10 +380,10 @@ void clay_openai_codex_set_prompt_cache_key(ClayOpenAICodex *client,
   free(client->prompt_cache_key);
   client->prompt_cache_key = copy;
 }
-void clay_openai_codex_copy_credentials(const ClayOpenAICodex *client,
+int clay_openai_codex_copy_credentials(const ClayOpenAICodex *client,
                                         ClayCodexCredentials *out) {
   if (!client || !out)
-    return;
+    return -1;
   clay_openai_codex_credentials_free(out);
   out->access_token = strdup(client->credentials.access_token);
   out->refresh_token = strdup(client->credentials.refresh_token);
@@ -379,6 +392,12 @@ void clay_openai_codex_copy_credentials(const ClayOpenAICodex *client,
                       : NULL;
   out->account_id = strdup(client->credentials.account_id);
   out->expires_at = client->credentials.expires_at;
+  if (!out->access_token || !out->refresh_token || !out->account_id ||
+      (client->credentials.id_token && !out->id_token)) {
+    clay_openai_codex_credentials_free(out);
+    return -1;
+  }
+  return 0;
 }
 int clay_openai_codex_authentication_invalid(const ClayOpenAICodex *client) {
   return client && client->authentication_invalid;

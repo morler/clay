@@ -1,11 +1,11 @@
 ---
 # clay-j7un
 title: 细化：共享 scope 身份与对象生命周期
-status: in-progress
+status: completed
 type: task
 priority: normal
 created_at: 2026-11-15T03:55:04Z
-updated_at: 2026-11-15T04:55:49Z
+updated_at: 2026-11-15T07:21:35Z
 parent: clay-c8lo
 blocking:
     - clay-s4rb
@@ -30,3 +30,22 @@ Codex account_id 可用于稳定身份，但 Grok 凭据结构没有稳定账号
 ## 本轮实例身份安全核查（未实施）已核查全部 ClayConnectedProvider 直接构造/复制：生产代码只在 clay_commands_load_provider 中以局部值经 clay_array_push_val 的 memcpy 写入数组；clay_array_grow 使用 realloc，clay_array_remove 使用 memmove；tests/test_message.c 另有直接按值构造和赋值。重连在现有槽位原位替换，登出释放后移动数组。commands_create 在 tool_lock 初始化之前加载 provider，因此不能直接复用该锁做初始化同步。全局原子计数可避免并发生成重复值，但不能使数组访问、重连与删除时的身份读取安全，也不能延长旧槽位或 session 的寿命；在原位字段上使用原子类型仍会遭遇数组 memcpy/memmove/realloc 与并发访问问题。完成要求需先确定并实施覆盖 provider 数组查找、移动、重连、删除及 session 销毁的同步和引用/快照协议，并处理初始化、分配失败与身份耗尽；不能把线程安全 ID 生成误认为线程安全 provider 实例。为避免提交无法满足并发及生命周期要求的伪身份，本轮未修改代码或添加误导性测试，也未实现 registry 或改变认证。make test 退出 0；输出仍有 LEAK function 1 /outside/secret.c，不代表该风险已解决。未运行新增并发测试、TSAN 或真实认证；任务继续 in-progress。
 
 ## 本轮 worker 寿命核查（未实现）实际 CLI 在 src/main.c 同步执行消息后销毁会话；src/commands/subagent.c:259-284 启动并 join 每个成功启动的 worker，但 subagent_tool 在 join 后仍使用 commands 汇总 usage，不能以单个 worker 退出作为整个调用结束。公开 include/clay/commands.h:8 的 destroy 接受原始指针并释放对象；对于未持有外部所有权且与最终释放并发开始的调用，无法安全访问内嵌锁或增加引用，也无法只靠内嵌标志保证两个销毁调用安全（等待者可能访问已释放锁，地址还可能被重用）。需要明确外部所有者保证：销毁只能一次，关闭前停止新入口，已进入的批次持有引用直至全部结果处理完成；不可声称支持任意悬空指针和任意重复 destroy。重配还需覆盖 src/commands/context.c:490-496 原位替换配置、:615-629 删除移动 provider、:1229-1256 重置 chat 和模型、src/commands/resume.c:46-48 替换 chat；worker 在 src/commands/subagent.c:130-179 及 src/commands/context.c:1021-1043 借用这些字段。仅在 destroy 等待 worker 无法保护这些路径，等待时也不得持有 worker 需要的 tool_lock 或锁住网络请求。并行 worker 之间共享 OAuth 凭据的竞态另需解决；单纯寿命引用不解决数据竞争。可在明确单所有者关闭协议下继续实现受保护批次引用、关闭屏障与重配规则，但本轮没有完成覆盖所有入口的安全实现，不应假称架构不可能实现。专项检查：make bin/test_subagent && ./bin/test_subagent 成功；现有测试只覆盖输入校验及工具集合，没有启动 worker 或覆盖并发销毁、重配、认证，不能作为这些场景通过的证据。未改源码，任务仍 in-progress。
+
+## 本轮所有者契约及未完成项
+
+在 include/clay/commands.h 明确外部所有者须串行化公开调用、等待调用及其内部 subagent worker 返回后只销毁一次；不承诺并发重配或裸指针并发销毁。该注释不新增运行时同步。未实现共享限流状态：在 src/commands/context.c 中 provider 数组重配可替换/移动元素，而 Codex/Grok worker 并行刷新仍会改写共享凭据；未确定可靠 scope 分配及在途引用时，按地址、provider 类型或单个全会话 deadline 建模会错误合并配置或给出错误隔离保证。下一步是在此所有者契约下为每个配置世代引入稳定的独立 scope，明确模型及端点归属，并在 worker 入口取得可活至 join 的引用；认证并发单独协调，不持锁网络。未新增并发测试、未接入 provider，任务仍 in-progress。验证 make bin/test_subagent && ./bin/test_subagent、git diff --check 通过；现有测试不启动 worker，不能证明生命周期安全。
+
+## 本轮配置世代身份小步（未完成整个任务）ClayCommands 为每次有效 provider 加载分配非零、会话内单调递增的 uint64_t 世代；重配和登出后重建均换代，数组扩容、移动和 Codex token 更新保持世代。计数耗尽时拒绝加载且保留原配置；新增数组项分配失败时释放资源。subagent 在创建线程前复制所选 provider 世代，尚未用于共享限流或 scope registry，世代仅在同一 ClayCommands 内有意义，不包含模型；0 表示未找到。离线测试覆盖扩容、删除搬移、重建、原位重配、Codex 凭据轮换和耗尽。make bin/test_subagent && ./bin/test_subagent、make test、git diff --check 均通过；make test 仍输出既有 LEAK function 1 /outside/secret.c。未解决并发 OAuth 凭据竞态，未实现 scope registry、模型隔离、并发刷新协调或真实认证测试；item 保持 in-progress。
+
+## 本轮 session registry 进展（未完成验收）
+新增 src/commands/scope.c，会话持有 registry；completion 按 session-local generation、endpoint、model 查找共享对象，互斥仅用于链表查找和插入，网络调用不持锁。endpoint 和 model 以 session 随机密钥前缀的 SHA-256 存储，临时输入擦除，不存凭据明文；会话销毁按 include/clay/commands.h 的外部串行及 worker join 契约释放 registry。src/main.c 处理初始化失败。并发测试覆盖 8 线程相同 scope、代次/endpoint/model/会话隔离、真实 provider 重配后旧 scope 可用，检查 registry/scope 内无测试敏感字符串；测试 join 后销毁。make test、git diff --check、ASan+LSan 的 test_subagent 通过；make test 仍打印既有 grep race baseline 和 LEAK function 1 /outside/secret.c。
+尚未验证真实 subagent completion 到 registry 的端到端 worker 生命周期，也未以故障注入验证全部分配失败；因此本任务保持 in-progress。现有 Codex/Grok 并发凭据刷新竞态仍未解决。registry 只建立身份和生命周期，尚无 RPM/TPM 限流，不代表第二阶段完成；未做真实认证或 TSAN。
+
+## 本轮接入核查（未完成）已核实 src/commands/context.c 的 clay_commands_run_completion 在创建 provider 客户端之前调用 clay_scope_get；message.c、subagent.c、compact.c 均通过该入口，但返回指针只用于判空，未传给任何 provider，不能称作 provider 共享状态或限流已接入。当前 registry 整体在 session destroy 时释放，依赖外部串行与 subagent join 契约；已有测试只直接调用 registry，不验证真实主会话和 worker completion。make test-subagent、make test、git diff --check 通过，完整测试仍输出既有 LEAK function 1 /outside/secret.c。未完成 worker 端到端、分配失败注入和清理验证，未运行真实认证；任务保持 in-progress。Codex/Grok 并发凭据刷新竞态仍未解决。
+
+## 本轮离线 completion 路径测试
+为 OpenAI、Codex、Grok 请求客户端保存借用的 session scope；scope 不实现调度。测试专用 completion hook 在客户端绑定 scope 后拦截网络，并用真实 subagent worker、条件变量和主线程 completion 验证同代次同模型共享，worker 阻塞期间 scope 可查；join 后验证模型切换和 provider 重配隔离。scope 分配的三个位置分别注入失败，断言 completion 失败且未进入 provider hook；ASan/LSan 覆盖清理。既有 registry 测试覆盖跨 session、endpoint 和代次隔离。验证 make test-subagent、make test、ASan/LSan test_subagent、git diff --check 通过。未验证真实网络认证或 TSAN；Codex/Grok 共享凭据刷新竞态和限流调度仍未解决，item 保持 in-progress。
+
+## Summary of Changes
+
+完成 session-owned scope 基础验收：按配置 generation、endpoint 和 model 区分并在完成请求客户端关联共享 scope；真实 subagent worker 离线同步测试覆盖生命周期及共享，测试覆盖 scope 三处请求分配失败、重配和隔离。修复 Grok subscription 未向实际 OpenAI 请求客户端传递 scope，增加 Codex、Grok subscription 与 API-key 离线入口测试。make test、make test-subagent、lif check、git diff --check 通过。scope 不包含 RPM/TPM 限流或调度；Codex/Grok 既有共享 OAuth 凭据刷新竞态仍未解决，未验证真实认证或 TSAN。make test 仍报告 grep race baseline: outside content exposed 和 LEAK function 1 /outside/secret.c。

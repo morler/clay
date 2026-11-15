@@ -1,3 +1,4 @@
+#include "scope.h"
 #include "clay/providers/openai.h"
 
 #include "clay/array.h"
@@ -21,6 +22,7 @@
 #define CLAY_OPENAI_EXTRA_HEADERS_LIMIT 8
 
 struct ClayOpenAI {
+  ClayScope *scope; /* borrowed from the owning session */
   char *base_url;
   char *api_key;
   char *model;
@@ -32,6 +34,10 @@ struct ClayOpenAI {
   long last_status;
   int last_run_replay_safe;
 };
+
+void clay_openai_set_scope(ClayOpenAI *client, ClayScope *scope) { client->scope = scope; }
+ClayScope *clay_openai_scope(const ClayOpenAI *client) { return client->scope; }
+
 
 int clay_openai_last_run_replay_safe(const ClayOpenAI *client) {
   return client && client->last_run_replay_safe;

@@ -1,3 +1,4 @@
+#include "scope.h"
 /* Grok account authentication and its Build-compatible proxy details live
    here. Normal xAI API-key traffic remains the generic OpenAI client. */
 #include "clay/providers/grok.h"
@@ -36,6 +37,14 @@ struct ClayGrok {
   int refresh_failed;
   int authentication_invalid;
 };
+
+void clay_grok_set_scope(ClayGrok *client, ClayScope *scope) {
+  clay_openai_set_scope(client->openai, scope);
+}
+ClayScope *clay_grok_scope(const ClayGrok *client) {
+  return clay_openai_scope(client->openai);
+}
+
 
 const char *clay_grok_subscription_token_auth_header(void) {
   return GROK_TOKEN_AUTH;
@@ -404,7 +413,7 @@ ClayGrok *clay_grok_create(const ClayGrokCredentials *credentials,
       CLAY_GROK_SUBSCRIPTION_URL, client->credentials.access_token,
       model_override, headers, 3);
   if (!client->credentials.access_token || !client->credentials.refresh_token ||
-      !client->openai) {
+      (credentials->id_token && !client->credentials.id_token) || !client->openai) {
     clay_grok_destroy(client);
     return NULL;
   }
@@ -451,13 +460,19 @@ int clay_grok_run(ClayGrok *client, ClayJson *messages, const ClayTool *tools,
   return clay_openai_run_with_refresh(client->openai, messages, tools, tool_count,
                                        max_rounds, callbacks, refresh_for_run, client);
 }
-void clay_grok_copy_credentials(const ClayGrok *client, ClayGrokCredentials *out) {
-  if (!client || !out) return;
+int clay_grok_copy_credentials(const ClayGrok *client, ClayGrokCredentials *out) {
+  if (!client || !out) return -1;
   clay_grok_credentials_free(out);
   out->access_token = strdup(client->credentials.access_token);
   out->refresh_token = strdup(client->credentials.refresh_token);
   out->id_token = client->credentials.id_token ? strdup(client->credentials.id_token) : NULL;
   out->expires_at = client->credentials.expires_at;
+  if (!out->access_token || !out->refresh_token ||
+      (client->credentials.id_token && !out->id_token)) {
+    clay_grok_credentials_free(out);
+    return -1;
+  }
+  return 0;
 }
 int clay_grok_authentication_invalid(const ClayGrok *client) {
   return client && client->authentication_invalid;

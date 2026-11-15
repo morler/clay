@@ -8,6 +8,7 @@
 #include "clay/sandbox.h"
 
 #include <pthread.h>
+#include <stdint.h>
 
 typedef struct {
   const char *id;
@@ -17,6 +18,9 @@ typedef struct {
 
 typedef struct {
   const ClayProviderType *type;
+  uint64_t generation; /* session-local configuration identity */
+  uint64_t codex_version; /* protected by the credential mutex */
+  uint64_t grok_version; /* protected by the credential mutex */
   ClayProviderConfig *config;
   ClayOpenAI *client;
   ClayOpenAICodex *codex_client;
@@ -88,6 +92,22 @@ typedef enum {
   CLAY_AUTO_TEST_DENIED,
 } ClayAutoTestChoice;
 
+typedef struct ClayScope ClayScope;
+typedef struct ClayScopeRegistry ClayScopeRegistry;
+
+ClayScopeRegistry *clay_scope_registry_create(void);
+void clay_scope_registry_destroy(ClayScopeRegistry *registry);
+/* Borrowed until registry destruction; owner must join workers first. */
+ClayScope *clay_scope_get(ClayScopeRegistry *registry, uint64_t generation,
+                          const char *endpoint, const char *model);
+
+/* One permit per scope; each successful acquire requires one release. */
+int clay_scope_acquire(ClayScope *scope, int (*should_abort)(void *), void *userdata);
+void clay_scope_release(ClayScope *scope);
+
+typedef int (*ClayCompletionTestHook)(ClayScope *, const ClayOpenAICallbacks *, void *);
+void clay_scope_test_fail_allocation(ClayScopeRegistry *registry, int nth);
+
 struct ClayCommands {
   ClayApp *app;
   int running;
@@ -103,6 +123,10 @@ struct ClayCommands {
   long messages_sent;
   ClayChat *chat;
   ClayArray providers;
+  uint64_t provider_generation; /* last issued; not reset on logout */
+  ClayScopeRegistry *scopes;
+  ClayCompletionTestHook completion_test_hook;
+  void *completion_test_userdata;
   char *selected_provider;
   char *selected_model;
   int reasoning_effort_index;
@@ -146,6 +170,7 @@ struct ClayCommands {
 
 ClayConnectedProvider *clay_commands_find_provider(ClayCommands *commands,
                                                    const char *id);
+uint64_t clay_commands_provider_generation(ClayCommands *commands, const char *id);
 const ClayProviderType *clay_commands_find_provider_type(const char *id);
 const ClayProviderType *clay_commands_provider_types(size_t *count);
 int clay_commands_fetch_models(void *ctx, ClayArray *out);
@@ -210,10 +235,13 @@ void clay_commands_load_provider(ClayCommands *commands,
 int clay_commands_logout_provider(ClayCommands *commands, const char *id);
 /* Copies potentially refreshed Codex OAuth credentials into the existing
    owner-only provider config and saves them. */
+ClayOpenAICodex *clay_commands_codex_snapshot(ClayConnectedProvider *provider,
+                                               const char *model, uint64_t *version);
 int clay_commands_save_codex_credentials(ClayConnectedProvider *provider,
-                                         const ClayOpenAICodex *client);
+                                         const ClayOpenAICodex *client, uint64_t version);
+ClayGrok *clay_commands_grok_snapshot(ClayConnectedProvider *provider, const char *model, uint64_t *version);
 int clay_commands_save_grok_credentials(ClayConnectedProvider *provider,
-                                        const ClayGrok *client);
+                                        const ClayGrok *client, uint64_t version);
 void clay_commands_print_history(ClayCommands *commands, size_t count);
 
 /* Approval gate (src/commands/permissions.c). `action` is a short present-

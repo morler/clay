@@ -42,7 +42,7 @@ int clay_openai_codex_list_models(ClayOpenAICodex *client, ClayArray *models);
 long clay_openai_codex_last_status(const ClayOpenAICodex *client);
 /* Caller saves a copied result to its existing credential store after this
    call, which persists refresh-token rotation. */
-void clay_openai_codex_copy_credentials(const ClayOpenAICodex *client,
+int clay_openai_codex_copy_credentials(const ClayOpenAICodex *client,
                                         ClayCodexCredentials *out);
 int clay_openai_codex_authentication_invalid(const ClayOpenAICodex *client);
 int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,

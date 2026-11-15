@@ -160,6 +160,8 @@ typedef enum {
 ClayPasteResult clay_term_read_bracketed_paste(ClayStr *out);
 ClayKey clay_term_read_key_timeout(char *ch_out, int timeout_ms);
 int clay_term_take_escape(void);
+/* Consumes only an Escape already decoded while reading an earlier key. */
+int clay_term_take_pending_escape(void);
 
 /* True if another byte is already sitting in stdin's input buffer, i.e.
    a follow-up read won't block. A paste lands in that buffer all at

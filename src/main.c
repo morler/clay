@@ -40,6 +40,11 @@ int main(int argc, char **argv) {
 
     ClayApp *app = clay_app_create();
     ClayCommands *commands = clay_commands_create(app);
+    if (!commands) {
+        fprintf(stderr, "Error: could not create command session.\n");
+        clay_app_destroy(app);
+        return 1;
+    }
     clay_commands_register(commands);
     if (!clay_commands_has_provider(commands) &&
         (one_shot_prompt || require_provider(commands) != 0)) {

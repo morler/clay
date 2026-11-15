@@ -51,6 +51,7 @@ struct ClaySubagentBatch {
   ClayCommands *commands;
   pthread_mutex_t lock; /* guards what the waiting thread reads mid-flight */
   size_t count;
+  int cancelled;
   ClaySubagentRun runs[CLAY_SUBAGENT_MAX_PARALLEL];
 };
 
@@ -79,9 +80,24 @@ static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   run->output_tokens += usage->output_tokens;
 }
 
+static void poll_cancel(ClaySubagentBatch *batch) {
+  if (clay_term_take_think_toggle())
+    clay_thinking_toggle();
+  int escape = clay_term_take_escape();
+  clay_term_take_pending_escape();
+  int interrupt = clay_term_take_interrupt();
+  if (escape || interrupt)
+    batch->cancelled = 1;
+}
+
 static int should_abort(void *userdata) {
-  (void)userdata;
-  return clay_term_take_escape() || clay_term_take_interrupt();
+  ClaySubagentRun *run = userdata;
+  ClaySubagentBatch *batch = run->batch;
+  pthread_mutex_lock(&batch->lock);
+  poll_cancel(batch);
+  int cancelled = batch->cancelled;
+  pthread_mutex_unlock(&batch->lock);
+  return cancelled;
 }
 
 static ClayJson *subagent_error(const char *message) {
@@ -275,6 +291,9 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
     for (size_t i = 0; i < count; i++)
       if (batch->runs[i].finished)
         done++;
+    /* Stop polling at the first observation that all workers finished. */
+    if (done < count)
+      poll_cancel(batch);
     pthread_mutex_unlock(&batch->lock);
     if (done == count)
       break;

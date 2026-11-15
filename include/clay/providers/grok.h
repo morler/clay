@@ -59,7 +59,7 @@ int clay_grok_list_models(ClayGrok *client, ClayArray *models);
 int clay_grok_run(ClayGrok *client, ClayJson *messages, const ClayTool *tools,
                   size_t tool_count, int max_rounds,
                   const ClayOpenAICallbacks *callbacks);
-void clay_grok_copy_credentials(const ClayGrok *client,
+int clay_grok_copy_credentials(const ClayGrok *client,
                                 ClayGrokCredentials *out);
 int clay_grok_authentication_invalid(const ClayGrok *client);
 long clay_grok_last_status(const ClayGrok *client);

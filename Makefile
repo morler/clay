@@ -168,7 +168,7 @@ TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(M
 	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(TEST_OBJ)
 UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
 UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
-TEST_DEP := $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d $(BUILD_DIR)/tests/test_http.d $(BUILD_DIR)/tests/test_retry_e2e.d $(BUILD_DIR)/tests/test_provider_errors.d $(BUILD_DIR)/tests/test_reasoning.d $(BUILD_DIR)/tests/test_reasoning_codex.d
+TEST_DEP := $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d $(BUILD_DIR)/tests/test_subagent_pty_driver.d $(BUILD_DIR)/tests/test_http.d $(BUILD_DIR)/tests/test_retry_e2e.d $(BUILD_DIR)/tests/test_provider_errors.d $(BUILD_DIR)/tests/test_reasoning.d $(BUILD_DIR)/tests/test_reasoning_codex.d
 
 # Windows cross-build via mingw-w64. With CURL_LINK=dynamic, clay.exe needs
 # libcurl-4.dll and its own dependency DLLs alongside it.
@@ -222,8 +222,12 @@ $(BIN_DIR)/test_provider_errors: $(LIB_OBJ) $(BUILD_DIR)/tests/test_provider_err
 $(BIN_DIR)/test_http: $(BUILD_DIR)/tests/test_http.o $(BUILD_DIR)/mm/str.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
-test-pty: $(BIN_DIR)/test_prompt_pty_driver
-	python3 tests/test_prompt_pty.py $<
+test-pty: $(BIN_DIR)/test_prompt_pty_driver $(BIN_DIR)/test_subagent_pty_driver
+	python3 tests/test_prompt_pty.py $(BIN_DIR)/test_prompt_pty_driver
+	python3 tests/test_subagent_pty.py $(BIN_DIR)/test_subagent_pty_driver
+
+$(BIN_DIR)/test_subagent_pty_driver: $(LIB_OBJ) $(BUILD_DIR)/tests/test_subagent_pty_driver.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
 
 $(BIN_DIR)/test_prompt_pty_driver: $(LIB_OBJ) $(BUILD_DIR)/tests/test_prompt_pty_driver.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS)

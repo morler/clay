@@ -275,6 +275,7 @@ void clay_commands_undo_destroy(ClayCommands *commands);
 
 /* Dedicated filesystem tools (src/commands/fs_tools.c), each scoped to the
    current workspace directory. userdata is a ClayCommands*. */
+int clay_fs_resolve_windows_path(const char *workspace, const char *path, ClayStr *out);
 int clay_fs_resolve_workspace_path(const char *workspace_dir, const char *path,
                                    ClayStr *abs_out);
 ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata);

@@ -213,6 +213,7 @@ char *clay_term_resolve_path(const char *path);
 /* Creates one directory level (not recursive). 0 on success or if it
    already exists, nonzero on failure. */
 int clay_term_mkdir(const char *path);
+void clay_term_windows_parent_dir(const char *path, ClayStr *out);
 
 /* Writes a file through a sibling temporary file and atomically replaces the
    destination. The temporary file is removed on failure. */

@@ -36,7 +36,56 @@ static int ok(ClayJson *result) {
     return clay_json_bool_value(clay_json_object_get(result, "ok"));
 }
 
+static void test_windows_paths(void) {
+    static const struct { const char *base, *path, *expected; } cases[] = {
+        {"C:\\Work\\Repo", "dir\\..\\file", "C:/Work/Repo/file"},
+        {"C:/Work/Repo/", "c:\\work\\repo\\file", NULL},
+        {"C:/", "x/../a", "C:/a"},
+        {"\\\\Server\\Share\\Repo", "sub/file", "//Server/Share/Repo/sub/file"},
+        {"//server/share", "//SERVER/SHARE/file", NULL},
+        {"C:/work/repo", "../outside", NULL},
+        {"C:/work/repo", "C:/work/repository/file", NULL},
+        {"C:/work/repo", "D:/work/repo/file", NULL},
+        {"C:/work/repo", "C:relative", NULL},
+        {"C:/work/repo", "/rooted", NULL},
+        {"C:/work/repo", "../REPO/secret", NULL},
+        {"C:/work/repo", "NUL.txt", NULL},
+        {"C:/work/repo", "dir/CoM1.log", NULL},
+        {"C:/work/repo", "LPT².txt", NULL},
+        {"C:/work/repo", "con .txt", NULL},
+        {"C:/work/repo", "conin$", NULL},
+        {"C:/work/repo", "CLOCK$", NULL},
+        {"C:/work/repo", "com0.txt", "C:/work/repo/com0.txt"},
+        {"C:/work/repo", "file.", NULL},
+        {"C:/work/repo", "file ", NULL},
+        {"C:/work/repo", "file:stream", NULL},
+        {"C:/work/repo", "dir. /file", NULL},
+        {"C:/work/repo", "//?/C:/work/repo/file", NULL},
+        {"//server/share/repo", "//server/share2/repo/file", NULL},
+        {"//server/share/repo", "../../other", NULL},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        ClayStr out;
+        int rc = clay_fs_resolve_windows_path(cases[i].base, cases[i].path, &out);
+        assert((rc == 0) == (cases[i].expected != NULL));
+        if (cases[i].expected) assert(strcmp(out.data, cases[i].expected) == 0);
+        clay_str_free(&out);
+    }
+}
+
 int main(void) {
+    test_windows_paths();
+    static const struct { const char *path, *parent; } parents[] = {
+        {"C:/file", "C:/"}, {"C:\\file", "C:\\"},
+        {"C:/dir/file", "C:/dir"}, {"//server/share/file", "//server/share"},
+        {"file", "."}, {"/file", "/"},
+    };
+    for (size_t i = 0; i < sizeof(parents) / sizeof(parents[0]); i++) {
+        ClayStr parent;
+        clay_term_windows_parent_dir(parents[i].path, &parent);
+        assert(strcmp(parent.data, parents[i].parent) == 0);
+        clay_str_free(&parent);
+    }
     char template[] = "/tmp/clay_test_fs_XXXXXX";
     char *workspace = mkdtemp(template);
     assert(workspace);

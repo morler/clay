@@ -36,10 +36,109 @@
 #define CLAY_FS_GLOB_MAX_MATCHES 500
 #define CLAY_FS_READ_SUGGESTION_LIMIT 5
 
+static int win_sep(char c) { return c == '/' || c == '\\'; }
+static int win_alpha(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
+static char win_lower(char c) { return c >= 'A' && c <= 'Z' ? (char)(c + 'a' - 'A') : c; }
+
+static int win_reserved(const char *s, size_t n) {
+    size_t stem = 0;
+    while (stem < n && s[stem] != '.') stem++;
+    while (stem && s[stem - 1] == ' ') stem--;
+    char name[8];
+    if (stem >= sizeof(name)) return 0;
+    for (size_t i = 0; i < stem; i++) name[i] = win_lower(s[i]);
+    name[stem] = 0;
+    if (!strcmp(name, "con") || !strcmp(name, "prn") || !strcmp(name, "aux") ||
+        !strcmp(name, "nul") || !strcmp(name, "clock$") || !strcmp(name, "conin$") || !strcmp(name, "conout$")) return 1;
+    if (stem >= 4 && (!strncmp(name, "com", 3) || !strncmp(name, "lpt", 3))) {
+        if (stem == 4 && name[3] >= '1' && name[3] <= '9') return 1;
+        if (stem == 5 && (unsigned char)name[3] == 0xc2 &&
+            ((unsigned char)name[4] == 0xb9 || (unsigned char)name[4] == 0xb2 ||
+             (unsigned char)name[4] == 0xb3)) return 1;
+    }
+    return 0;
+}
+
+static int win_normalize(const char *path, ClayStr *out) {
+    clay_str_init(out);
+    const char *p = path;
+    if (win_alpha(p[0]) && p[1] == ':' && win_sep(p[2])) {
+        clay_str_push_n(out, p, 2); clay_str_push_char(out, '/'); p += 3;
+    } else if (win_sep(p[0]) && win_sep(p[1]) && p[2] && p[2] != '?' && p[2] != '.') {
+        clay_str_push(out, "//"); p += 2;
+        for (int i = 0; i < 2; i++) {
+            const char *start = p;
+            while (*p && !win_sep(*p)) {
+                if ((unsigned char)*p < 32 || strchr(":*?\"<>|", *p)) return -1;
+                p++;
+            }
+            if (p == start || p[-1] == '.' || p[-1] == ' ' || win_reserved(start, (size_t)(p - start))) return -1;
+            if (i) clay_str_push_char(out, '/');
+            clay_str_push_n(out, start, (size_t)(p - start));
+            if (!i) { if (!*p) return -1; p++; }
+        }
+    } else return -1;
+    size_t root = out->len;
+    while (*p) {
+        while (win_sep(*p)) p++;
+        const char *start = p;
+        while (*p && !win_sep(*p)) {
+            if ((unsigned char)*p < 32 || strchr(":*?\"<>|", *p)) return -1;
+            p++;
+        }
+        size_t n = (size_t)(p - start);
+        if (!n || (n == 1 && *start == '.')) continue;
+        if (n == 2 && start[0] == '.' && start[1] == '.') {
+            if (out->len > root) {
+                while (out->len > root && out->data[out->len - 1] != '/') out->len--;
+                if (out->len > root) out->len--;
+                out->data[out->len] = 0;
+            }
+        } else {
+            if (start[n - 1] == '.' || start[n - 1] == ' ' || win_reserved(start, n)) return -1;
+            if (out->data[out->len - 1] != '/') clay_str_push_char(out, '/');
+            clay_str_push_n(out, start, n);
+        }
+    }
+    return 0;
+}
+
+int clay_fs_resolve_windows_path(const char *workspace, const char *path, ClayStr *out) {
+    ClayStr base, joined;
+    int rc = -1;
+    clay_str_init(out);
+    if (win_normalize(workspace, &base) != 0) { clay_str_free(&base); return -1; }
+    clay_str_init(&joined);
+    if (win_alpha(path[0]) && path[1] == ':') {
+        if (!win_sep(path[2])) goto done;
+        clay_str_push(&joined, path);
+    } else if (win_sep(path[0])) {
+        if (!win_sep(path[1])) goto done;
+        clay_str_push(&joined, path);
+    } else {
+        clay_str_push(&joined, base.data); clay_str_push_char(&joined, '/'); clay_str_push(&joined, path);
+    }
+    clay_str_free(out);
+    if (win_normalize(joined.data, out) != 0) goto done;
+    size_t n = base.len, i = 0;
+    while (i < n && out->data[i] && base.data[i] == out->data[i]) i++;
+    if (i == n && (base.data[n - 1] == '/' || out->data[n] == '/' || out->data[n] == 0)) rc = 0;
+done:
+    clay_str_free(&joined); clay_str_free(&base);
+    return rc;
+}
+
 /* Resolves `path` (relative to the workspace, or absolute) to a normalized
    absolute path in `abs_out`. Returns 0 if the result stays inside
    `workspace_dir`, -1 if it would escape it. */
 int clay_fs_resolve_workspace_path(const char *workspace_dir, const char *path, ClayStr *abs_out) {
+#ifdef _WIN32
+    ClayStr base;
+    if (clay_fs_resolve_windows_path(workspace_dir, path, abs_out) != 0) return -1;
+    if (win_normalize(workspace_dir, &base) != 0) { clay_str_free(&base); return -1; }
+    size_t wlen = base.len;
+    clay_str_free(&base);
+#else
     ClayStr joined;
     clay_str_init(&joined);
     if (path[0] == '/') clay_str_push(&joined, path);
@@ -83,6 +182,7 @@ int clay_fs_resolve_workspace_path(const char *workspace_dir, const char *path, 
                     ((wlen == 1 && workspace_dir[0] == '/') ||
                      abs_out->data[wlen] == '/' || abs_out->data[wlen] == '\0');
     if (!contained) return -1;
+#endif
     char *component = abs_out->data + wlen;
     if (wlen == 1) component = abs_out->data + 1;
     while (*component) {
@@ -178,6 +278,16 @@ static int make_parent_dirs(const char *abs_path) {
     ClayStr partial;
     clay_str_init(&partial);
     const char *p = abs_path;
+#ifdef _WIN32
+    if (win_alpha(p[0]) && p[1] == ':' && p[2] == '/') {
+        clay_str_push_n(&partial, p, 3); p += 3;
+    } else if (p[0] == '/' && p[1] == '/') {
+        const char *server_end = strchr(p + 2, '/');
+        const char *share_end = server_end ? strchr(server_end + 1, '/') : NULL;
+        if (!share_end || share_end >= slash) { clay_str_free(&partial); return 1; }
+        clay_str_push_n(&partial, p, (size_t)(share_end + 1 - p)); p = share_end + 1;
+    } else
+#endif
     if (*p == '/') {
         clay_str_push_char(&partial, '/');
         p++;
@@ -884,6 +994,13 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
     const char *include = clay_json_string_value(clay_json_object_get(arguments, "glob"));
     if (!path || !*path) path = ".";
     ClayJson *result = clay_json_object();
+#ifdef _WIN32
+    /* shortcut: cmd.exe quoting is unsafe; use an argv-based executor to enable grep. */
+    (void)commands; (void)pattern; (void)include;
+    clay_json_object_set(result, "ok", clay_json_bool(0));
+    clay_json_object_set(result, "error", clay_json_string("grep is unavailable on Windows"));
+    return result;
+#endif
     if (!pattern || !*pattern) {
         clay_json_object_set(result, "ok", clay_json_bool(0));
         clay_json_object_set(result, "error", clay_json_string("pattern is required"));
@@ -909,7 +1026,14 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
         clay_term_shell_quote(&invocation, include);
     }
     clay_str_push(&invocation, " -- ");
+#ifdef _WIN32
+    ClayStr normalized_workspace;
+    win_normalize(workspace_dir, &normalized_workspace);
+    const char *relative = target.data + normalized_workspace.len;
+    clay_str_free(&normalized_workspace);
+#else
     const char *relative = target.data + strlen(workspace_dir);
+#endif
     while (*relative == '/') relative++;
     clay_term_shell_quote(&invocation, *relative ? relative : ".");
     clay_str_free(&target);

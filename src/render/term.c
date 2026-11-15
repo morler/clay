@@ -1843,7 +1843,7 @@ char *clay_term_resolve_path(const char *path) {
 
 int clay_term_mkdir(const char *path) {
 #ifdef _WIN32
-  if (_mkdir(path) != 0 && errno != EEXIST) return -1;
+  if (_mkdir(path) != 0) return errno == EEXIST ? 0 : -1;
   clay_term_restrict_file(path);
   return 0;
 #else
@@ -1851,21 +1851,30 @@ int clay_term_mkdir(const char *path) {
 #endif
 }
 
+void clay_term_windows_parent_dir(const char *path, ClayStr *out) {
+  clay_str_init(out);
+  const char *slash = strrchr(path, '/');
+  const char *backslash = strrchr(path, '\\');
+  if (backslash && (!slash || backslash > slash)) slash = backslash;
+  if (!slash) clay_str_push(out, ".");
+  else {
+    size_t n = (size_t)(slash - path);
+    if (n == 2 && path[1] == ':') n++;
+    else if (!n) n++;
+    clay_str_push_n(out, path, n);
+  }
+}
+
 static int write_file_atomic(const char *path, const void *data, size_t len,
                              int preserve_mode) {
   if (!path || (!data && len > 0)) return -1;
 #ifdef _WIN32
+  ClayStr parent;
+  clay_term_windows_parent_dir(path, &parent);
+  if (parent.len >= MAX_PATH) { clay_str_free(&parent); return -1; }
   char directory[MAX_PATH];
-  strncpy(directory, path, sizeof(directory) - 1);
-  directory[sizeof(directory) - 1] = '\0';
-  char *slash = strrchr(directory, '/');
-  char *backslash = strrchr(directory, '\\');
-  if (backslash && (!slash || backslash > slash)) slash = backslash;
-  if (slash) {
-    *slash = '\0';
-  } else {
-    strcpy(directory, ".");
-  }
+  memcpy(directory, parent.data, parent.len + 1);
+  clay_str_free(&parent);
   char temporary[MAX_PATH];
   if (GetTempFileNameA(directory, "clay", 0, temporary) == 0) return -1;
   FILE *file = fopen(temporary, "wb");

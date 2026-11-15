@@ -9,6 +9,30 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <fcntl.h>
+#include <sys/syscall.h>
+
+static int inject_restore, inject_delete;
+static void concurrent_change(int dir, const char *name) {
+    int fd = openat(dir, name, O_WRONLY | O_TRUNC);
+    assert(fd >= 0 && write(fd, "external", 8) == 8 && close(fd) == 0);
+}
+int renameat(int olddir, const char *old, int newdir, const char *new) {
+    if (inject_restore && !strcmp(new, "restore-race")) {
+        inject_restore = 0;
+        concurrent_change(newdir, new);
+    }
+    return (int)syscall(SYS_renameat, olddir, old, newdir, new);
+}
+int unlinkat(int dir, const char *name, int flags) {
+    if (inject_delete && !strcmp(name, "delete-race")) {
+        inject_delete = 0;
+        concurrent_change(dir, name);
+    }
+    return (int)syscall(SYS_unlinkat, dir, name, flags);
+}
+#endif
 
 extern char *mkdtemp(char *template);
 
@@ -60,6 +84,33 @@ int main(void) {
     assert_file("changed.txt", "external");
     assert(commands.undo_history.count == 1);
 
+    /* In-place changes, replacement, and removal after capture conflict. */
+    FILE *changed = fopen("changed.txt", "w");
+    assert(changed && fputs("in-place", changed) >= 0 && fclose(changed) == 0);
+    clay_cmd_undo("", &commands);
+    assert_file("changed.txt", "in-place");
+    assert(commands.undo_history.count == 1);
+
+    write_file("replacement.tmp", "replacement");
+    assert(rename("replacement.tmp", "changed.txt") == 0);
+    clay_cmd_undo("", &commands);
+    assert_file("changed.txt", "replacement");
+    assert(commands.undo_history.count == 1);
+
+    assert(remove("changed.txt") == 0);
+    clay_cmd_undo("", &commands);
+    assert(access("changed.txt", F_OK) != 0);
+    assert(commands.undo_history.count == 1);
+
+    /* A successful write with a missing after-state must not be recorded. */
+    write_file("vanished.txt", "before");
+    assert(clay_commands_undo_prepare(&commands, "vanished.txt"));
+    write_file("vanished.txt", "after");
+    assert(remove("vanished.txt") == 0);
+    clay_commands_undo_commit(&commands);
+    assert(commands.undo_history.count == 1);
+    clay_cmd_undo("", &commands);
+    assert(access("vanished.txt", F_OK) != 0);
     assert(mkdir("dir", 0700) == 0);
     write_file("dir/file", "before");
     assert(clay_commands_undo_prepare(&commands, "dir/file"));
@@ -74,6 +125,28 @@ int main(void) {
     assert(!clay_commands_undo_prepare(&commands, "dir/file"));
     unlink("dir"); remove("saved/file"); rmdir("saved");
 
+#ifdef __linux__
+    /* Demonstrate the documented window after undo's snapshot comparison. */
+    write_file("restore-race", "before");
+    assert(clay_commands_undo_prepare(&commands, "restore-race"));
+    write_file("restore-race", "after");
+    clay_commands_undo_commit(&commands);
+    count = commands.undo_history.count;
+    inject_restore = 1;
+    clay_cmd_undo("", &commands);
+    assert(!inject_restore && commands.undo_history.count == count - 1);
+    assert_file("restore-race", "before");
+    assert(unlink("restore-race") == 0);
+
+    assert(clay_commands_undo_prepare(&commands, "delete-race"));
+    write_file("delete-race", "after");
+    clay_commands_undo_commit(&commands);
+    count = commands.undo_history.count;
+    inject_delete = 1;
+    clay_cmd_undo("", &commands);
+    assert(!inject_delete && commands.undo_history.count == count - 1);
+    assert(access("delete-race", F_OK) != 0);
+#endif
     clay_commands_undo_destroy(&commands);
     remove("existing.txt");
     remove("changed.txt");

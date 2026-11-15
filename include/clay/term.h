@@ -35,6 +35,7 @@ typedef struct {
     /* Called with each chunk as it arrives, on the calling thread. */
     void (*on_output)(const char *data, size_t len, void *user_data);
     void *user_data;
+    int preserve_output_nul; /* preserve NUL in capture and on_output */
 } ClayExecOptions;
 
 typedef struct {

@@ -21,6 +21,54 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+
+static int walk_swap;
+static const char *walk_outside;
+struct dirent *__real_readdir(DIR *dir);
+struct dirent *__wrap_readdir(DIR *dir) {
+    struct dirent *entry = __real_readdir(dir);
+    if (walk_swap && entry && !strcmp(entry->d_name, "probe.c")) {
+        int mode = walk_swap;
+        walk_swap = 0;
+        if (mode == 3) assert(chmod("walk-parent", 0) == 0);
+        else {
+            assert(rename("walk-parent", "walk-saved") == 0);
+            if (mode == 1) assert(symlink(walk_outside, "walk-parent") == 0);
+            if (mode == 4) {
+                assert(mkdir("walk-parent", 0700) == 0);
+                int fd = open("walk-parent/probe.c", O_CREAT | O_WRONLY | O_EXCL, 0600);
+                assert(fd >= 0 && close(fd) == 0);
+            }
+        }
+    }
+    return entry;
+}
+static int inject_commit_change;
+static int inject_create_change;
+int renameat2(int olddir, const char *old, int newdir, const char *new, unsigned int flags) {
+    if (inject_create_change && !strcmp(new, "create-race")) {
+        inject_create_change = 0;
+        int fd = openat(newdir, new, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        assert(fd >= 0 && write(fd, "external", 8) == 8 && close(fd) == 0);
+    }
+    return (int)syscall(SYS_renameat2, olddir, old, newdir, new, flags);
+}
+int linkat(int olddir, const char *old, int newdir, const char *new, int flags) {
+    if (inject_create_change && !strcmp(new, "create-race")) {
+        inject_create_change = 0;
+        int fd = openat(newdir, new, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        assert(fd >= 0 && write(fd, "external", 8) == 8 && close(fd) == 0);
+    }
+    return (int)syscall(SYS_linkat, olddir, old, newdir, new, flags);
+}
+int renameat(int olddir, const char *old, int newdir, const char *new) {
+    if (inject_commit_change && !strcmp(new, "commit-race")) {
+        inject_commit_change = 0;
+        int fd = openat(newdir, new, O_WRONLY | O_TRUNC);
+        assert(fd >= 0 && write(fd, "external", 8) == 8 && close(fd) == 0);
+    }
+    return (int)syscall(SYS_renameat, olddir, old, newdir, new);
+}
 #endif
 
 typedef ClayJson *(*ClayFsTool)(const ClayJson *arguments, void *userdata);
@@ -103,6 +151,35 @@ int main(void) {
     clay_json_free(result);
 
 #ifdef __linux__
+    char walk_template[] = "/tmp/clay_glob_outside_XXXXXX";
+    walk_outside = mkdtemp(walk_template); assert(walk_outside);
+    char decoy[512];
+    snprintf(decoy, sizeof(decoy), "%s/probe.c", walk_outside);
+    FILE *walk_file = fopen(decoy, "w"); assert(walk_file);
+    assert(fputs("outside", walk_file) >= 0 && fclose(walk_file) == 0);
+    for (int mode = 1; mode <= 4; mode++) {
+        if (mode == 3 && geteuid() == 0) {
+            fprintf(stderr, "glob permission test skipped: root may bypass permissions\n");
+            continue;
+        }
+        assert(mkdir("walk-parent", 0700) == 0);
+        walk_file = fopen("walk-parent/probe.c", "w"); assert(walk_file);
+        assert(fputs("inside", walk_file) >= 0 && fclose(walk_file) == 0);
+        walk_swap = mode;
+        result = call(clay_fs_tool_glob, "{\"pattern\":\"*.c\"}");
+        assert(walk_swap == 0 && ok(result));
+        assert(!!strstr(clay_json_string_value(clay_json_object_get(result, "output")), "walk-parent/probe.c") == (mode == 4));
+        clay_json_free(result);
+        if (mode == 3) {
+            assert(chmod("walk-parent", 0700) == 0);
+            assert(unlink("walk-parent/probe.c") == 0 && rmdir("walk-parent") == 0);
+        } else {
+            if (mode == 1) assert(unlink("walk-parent") == 0);
+            if (mode == 4) assert(unlink("walk-parent/probe.c") == 0 && rmdir("walk-parent") == 0);
+            assert(unlink("walk-saved/probe.c") == 0 && rmdir("walk-saved") == 0);
+        }
+    }
+    assert(unlink(decoy) == 0 && rmdir(walk_outside) == 0);
     assert(mkfifo("read-fifo", 0600) == 0);
     alarm(3);
     result = call(clay_fs_tool_read, "{\"path\":\"read-fifo\"}");
@@ -115,36 +192,49 @@ int main(void) {
     clay_json_free(result);
 
     assert(symlink("a.txt", "a.tx-link") == 0);
-#if defined(SYS_openat2)
-    pid_t filtered = fork();
-    assert(filtered >= 0);
-    if (filtered == 0) {
-        struct sock_filter filter[] = {
-            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat2, 0, 1),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-        };
-        struct sock_fprog prog = { .len = sizeof(filter) / sizeof(filter[0]), .filter = filter };
-        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) || prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) _exit(77);
-        ClayJson *r = call(clay_fs_tool_read, "{\"path\":\"a.txt\"}");
-        int success = ok(r);
-        clay_json_free(r);
-        r = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
-        const char *message = clay_json_string_value(clay_json_object_get(r, "error"));
-        success = success && !ok(r) && message && strstr(message, "a.txt") && !strstr(message, "a.tx-link");
-        clay_json_free(r);
-        r = call(clay_fs_tool_glob, "{\"pattern\":\"*\"}");
-        const char *listing = clay_json_string_value(clay_json_object_get(r, "output"));
-        success = success && ok(r) && listing && strstr(listing, "a.txt") && !strstr(listing, "a.tx-link");
-        clay_json_free(r);
-        _exit(success ? 0 : 1);
+#if defined(SYS_openat2) && defined(__has_include)
+#if __has_include(<linux/openat2.h>) && !defined(CLAY_NO_OPENAT2)
+    const struct { int error; int fallback; } cases[] = {
+        { ENOSYS, 1 }, { EINVAL, 1 }, { E2BIG, 1 },
+        { EPERM, 0 }, { EACCES, 0 }, { ELOOP, 0 }, { EXDEV, 0 },
+        { EAGAIN, 0 }, { EIO, 0 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        pid_t filtered = fork();
+        assert(filtered >= 0);
+        if (filtered == 0) {
+            struct sock_filter filter[] = {
+                BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+                BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat2, 0, 1),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | cases[i].error),
+                BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+            };
+            struct sock_fprog prog = { .len = sizeof(filter) / sizeof(filter[0]), .filter = filter };
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) || prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)) _exit(77);
+            ClayJson *r = call(clay_fs_tool_read, "{\"path\":\"a.txt\"}");
+            int success = ok(r) == cases[i].fallback;
+            if (!cases[i].fallback) {
+                const char *error = clay_json_string_value(clay_json_object_get(r, "error"));
+                success = success && error && strstr(error, strerror(cases[i].error));
+            }
+            clay_json_free(r);
+            r = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
+            const char *message = clay_json_string_value(clay_json_object_get(r, "error"));
+            success = success && !ok(r) && message && (!!strstr(message, "a.txt") == cases[i].fallback) && !strstr(message, "a.tx-link");
+            clay_json_free(r);
+            r = call(clay_fs_tool_glob, "{\"pattern\":\"*\"}");
+            const char *listing = clay_json_string_value(clay_json_object_get(r, "output"));
+            success = success && ok(r) && listing && (!!strstr(listing, "a.txt") == cases[i].fallback) && !strstr(listing, "a.tx-link");
+            clay_json_free(r);
+            _exit(success ? 0 : 1);
+        }
+        int filtered_status;
+        assert(waitpid(filtered, &filtered_status, 0) == filtered);
+        assert(WIFEXITED(filtered_status));
+        if (WEXITSTATUS(filtered_status) == 77) printf("seccomp unavailable; skipped\n");
+        else assert(WEXITSTATUS(filtered_status) == 0);
     }
-    int filtered_status;
-    assert(waitpid(filtered, &filtered_status, 0) == filtered);
-    assert(WIFEXITED(filtered_status));
-    if (WEXITSTATUS(filtered_status) == 77) printf("seccomp unavailable; skipped\n");
-    else assert(WEXITSTATUS(filtered_status) == 0);
+#endif
 #endif
     result = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
     assert(!ok(result));
@@ -158,12 +248,16 @@ int main(void) {
         assert(mkdir("deep", 0700) == 0);
         assert(chdir("deep") == 0);
     }
+    FILE *deep_file = fopen("deep-leaf.txt", "w"); assert(deep_file && fclose(deep_file) == 0);
     assert(fchdir(cwd) == 0);
     struct rlimit old_limit, low_limit;
     assert(getrlimit(RLIMIT_NOFILE, &old_limit) == 0);
     low_limit = old_limit;
     if (low_limit.rlim_cur > 32) low_limit.rlim_cur = 32;
     assert(setrlimit(RLIMIT_NOFILE, &low_limit) == 0);
+    result = call(clay_fs_tool_glob, "{\"pattern\":\"*.txt\"}");
+    assert(ok(result) && strstr(clay_json_string_value(clay_json_object_get(result, "output")), "deep-leaf.txt"));
+    clay_json_free(result);
     result = call(clay_fs_tool_read, "{\"path\":\"a.tx\"}");
     assert(!ok(result));
     assert(strstr(clay_json_string_value(clay_json_object_get(result, "error")), "a.txt"));
@@ -175,6 +269,7 @@ int main(void) {
     clay_json_free(result);
     assert(setrlimit(RLIMIT_NOFILE, &old_limit) == 0);
     for (int i = 0; i < 40; i++) assert(chdir("deep") == 0);
+    assert(unlink("deep-leaf.txt") == 0);
     for (int i = 0; i < 40; i++) {
         assert(chdir("..") == 0);
         assert(rmdir("deep") == 0);
@@ -402,6 +497,74 @@ int main(void) {
     assert(strstr(output, "2:line2"));
     clay_json_free(result);
     clay_json_free(regex_args);
+    /* Characterize grep without depending on traversal order. */
+    const char *grep_cases[][3] = {
+        {"{\"pattern\":\"line[12]\",\"path\":\"a.txt\"}", "1:line1\n2:line2\n", "1"},
+        {"{\"pattern\":\"not-present\",\"path\":\"a.txt\"}", "", "1"},
+        {"{\"pattern\":\"[\",\"path\":\"a.txt\"}", NULL, "0"},
+        {"{\"pattern\":\"x\",\"path\":\"missing-grep-file\"}", NULL, "0"},
+        {"{\"pattern\":\"\",\"path\":\"a.txt\"}", NULL, "0"},
+        {"{\"pattern\":\"line1\",\"path\":\"a.txt\",\"glob\":\"*.c\"}", "", "1"},
+        {"{\"pattern\":\"line1\",\"path\":\"a.txt\",\"glob\":\"*.txt\"}", "1:line1\n", "1"},
+        {"{\"pattern\":\"line1' ; echo INJECTED; #\",\"path\":\"a.txt\"}", "", "1"},
+    };
+    for (size_t i = 0; i < sizeof(grep_cases) / sizeof(grep_cases[0]); i++) {
+        ClayJson *args = clay_json_parse(grep_cases[i][0], NULL);
+        result = clay_fs_tool_grep(args, &commands);
+        assert(ok(result) == (grep_cases[i][2][0] == '1'));
+        output = clay_json_string_value(clay_json_object_get(result, "output"));
+        if (grep_cases[i][1] && (!output || strcmp(output, grep_cases[i][1]) != 0)) fprintf(stderr, "case %zu output=[%s] expected=[%s]\n", i, output ? output : "NULL", grep_cases[i][1]);
+        if (grep_cases[i][1]) assert(output && strcmp(output, grep_cases[i][1]) == 0);
+        if (!ok(result)) assert(clay_json_string_value(clay_json_object_get(result, "error")));
+        clay_json_free(result); clay_json_free(args);
+    }
+    FILE *grep_file = fopen("grep-binary", "wb"); assert(grep_file);
+    assert(fwrite("line1\0binary\n", 1, 13, grep_file) == 13); assert(fclose(grep_file) == 0);
+    ClayJson *binary_args = clay_json_parse("{\"pattern\":\"line1\",\"path\":\"grep-binary\"}", NULL);
+    result = clay_fs_tool_grep(binary_args, &commands);
+    assert(ok(result)); assert(strcmp(clay_json_string_value(clay_json_object_get(result, "output")), "") == 0);
+    clay_json_free(result); clay_json_free(binary_args); assert(unlink("grep-binary") == 0);
+    grep_file = fopen("grep-large", "w"); assert(grep_file);
+    for (int i = 0; i < 10000; i++) assert(fputs("line1 long output\n", grep_file) >= 0);
+    assert(fclose(grep_file) == 0);
+    ClayJson *large_args = clay_json_parse("{\"pattern\":\"line1\",\"path\":\"grep-large\"}", NULL);
+    result = clay_fs_tool_grep(large_args, &commands);
+    assert(ok(result)); assert(clay_json_bool_value(clay_json_object_get(result, "output_truncated")));
+    assert(clay_json_string_value(clay_json_object_get(result, "scratch_path")));
+    clay_json_free(result); clay_json_free(large_args); assert(unlink("grep-large") == 0);
+#ifdef __linux__
+    /* Swap the checked start directory immediately before grep opens it. */
+    if (access("/usr/bin/grep", X_OK) == 0) {
+    char outside_template[] = "/tmp/clay_grep_outside_XXXXXX";
+    char *race_outside = mkdtemp(outside_template); assert(race_outside);
+    char outside_file[512]; snprintf(outside_file, sizeof(outside_file), "%s/secret", race_outside);
+    FILE *file = fopen(outside_file, "w"); assert(file); assert(fputs("race-secret\n", file) >= 0); assert(fclose(file) == 0);
+    assert(mkdir("grep-race", 0700) == 0); assert(mkdir("grep-bin", 0700) == 0);
+    file = fopen("grep-bin/grep", "w"); assert(file);
+    assert(fputs("#!/bin/sh\n/bin/mv grep-race grep-race-saved\n/bin/ln -s \"$CLAY_GREP_OUTSIDE\" grep-race\nexec /usr/bin/grep \"$@\"\n", file) >= 0);
+    assert(fclose(file) == 0); assert(chmod("grep-bin/grep", 0700) == 0);
+    const char *old_path_env = getenv("PATH"); char *old_path = old_path_env ? strdup(old_path_env) : NULL;
+    ClayStr race_path; clay_str_init(&race_path); clay_str_printf(&race_path, "%s/grep-bin:%s", workspace, old_path ? old_path : "");
+    assert(setenv("PATH", race_path.data, 1) == 0); assert(setenv("CLAY_GREP_OUTSIDE", race_outside, 1) == 0);
+    ClayJson *race_args = clay_json_parse("{\"pattern\":\"race-secret\",\"path\":\"grep-race\"}", NULL);
+    result = clay_fs_tool_grep(race_args, &commands);
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    printf("grep race baseline: %s\n", output && strstr(output, "race-secret") ? "outside content exposed" : "outside content not observed");
+    if (getenv("CLAY_ASSERT_GREP_RACE_SAFETY")) {
+        struct stat swapped;
+        assert(lstat("grep-race", &swapped) == 0 && S_ISLNK(swapped.st_mode));
+        assert(!output || !strstr(output, "race-secret"));
+    }
+    clay_json_free(result); clay_json_free(race_args);
+    if (old_path) { assert(setenv("PATH", old_path, 1) == 0); free(old_path); } else assert(unsetenv("PATH") == 0);
+    assert(unsetenv("CLAY_GREP_OUTSIDE") == 0); clay_str_free(&race_path);
+    struct stat race_stat; assert(lstat("grep-race", &race_stat) == 0);
+    if (S_ISLNK(race_stat.st_mode)) { assert(unlink("grep-race") == 0); assert(rmdir("grep-race-saved") == 0); }
+    else assert(rmdir("grep-race") == 0);
+    assert(unlink("grep-bin/grep") == 0); assert(rmdir("grep-bin") == 0);
+    assert(unlink(outside_file) == 0); assert(rmdir(race_outside) == 0);
+    } else printf("grep race baseline: /usr/bin/grep unavailable; skipped\n");
+#endif
     char *scratch = clay_chat_scratch_dir(commands.chat);
     ClaySandboxConfig probe = {.mode = CLAY_SANDBOX_MODE_SANDBOX, .workspace_dir = workspace, .scratch_dir = scratch};
     ClayStr probe_output; clay_str_init(&probe_output);
@@ -452,6 +615,38 @@ int main(void) {
     output = clay_json_string_value(clay_json_object_get(result, "output"));
     assert(strstr(output, "sub/dir/b.c"));
     clay_json_free(result);
+
+#ifdef __linux__
+    inject_create_change = 1;
+    result = call(clay_fs_tool_write, "{\"path\":\"create-race\",\"content\":\"written\"}");
+    assert(!ok(result) && !inject_create_change); clay_json_free(result);
+    char create_content[9] = {0};
+    int create_fd = open("create-race", O_RDONLY);
+    assert(create_fd >= 0 && read(create_fd, create_content, 8) == 8);
+    assert(!strcmp(create_content, "external") && close(create_fd) == 0);
+    assert(unlink("create-race") == 0);
+    DIR *create_dir = opendir("."); assert(create_dir);
+    struct dirent *create_entry;
+    while ((create_entry = readdir(create_dir))) assert(strncmp(create_entry->d_name, ".clay-", 6));
+    assert(closedir(create_dir) == 0);
+    result = call(clay_fs_tool_write, "{\"path\":\"commit-race\",\"content\":\"before\"}");
+    assert(ok(result)); clay_json_free(result);
+    inject_commit_change = 1;
+    result = call(clay_fs_tool_edit, "{\"path\":\"commit-race\",\"oldString\":\"before\",\"newString\":\"edited\"}");
+    assert(ok(result) && !inject_commit_change); clay_json_free(result);
+    char race_content[16] = {0};
+    int race_fd = open("commit-race", O_RDONLY);
+    assert(race_fd >= 0 && read(race_fd, race_content, sizeof(race_content)) == 6);
+    assert(!strcmp(race_content, "edited") && close(race_fd) == 0);
+    inject_commit_change = 1;
+    result = call(clay_fs_tool_write, "{\"path\":\"commit-race\",\"content\":\"written\"}");
+    assert(ok(result) && !inject_commit_change); clay_json_free(result);
+    memset(race_content, 0, sizeof(race_content));
+    race_fd = open("commit-race", O_RDONLY);
+    assert(race_fd >= 0 && read(race_fd, race_content, sizeof(race_content)) == 7);
+    assert(!strcmp(race_content, "written") && close(race_fd) == 0);
+    assert(unlink("commit-race") == 0);
+#endif
 
     /* oldString absent from the file. */
     result = call(clay_fs_tool_edit, "{\"path\":\"a.txt\",\"oldString\":\"nope\",\"newString\":\"x\"}");

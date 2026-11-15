@@ -17,6 +17,37 @@ static int run(ClaySandboxMode mode, const char *workspace, const char *scratch,
     return rc;
 }
 
+static void collect(const char *data, size_t len, void *userdata) {
+    clay_str_push_n(userdata, data, len);
+}
+
+static void test_binary_capture(ClaySandboxMode mode, const char *workspace, const char *scratch) {
+    ClaySandboxConfig config = {.mode = mode, .workspace_dir = workspace, .scratch_dir = scratch};
+    ClayStr output, streamed;
+    clay_str_init(&output);
+    clay_str_init(&streamed);
+    ClayExecResult result = {0};
+    ClayExecOptions options = {.on_output = collect, .user_data = &streamed, .preserve_output_nul = 1};
+    assert(clay_sandbox_exec(&config, "printf 'a\\000b'", &output, 2, &options, &result) == 0);
+    assert(result.exit_code == 0 && result.output_truncated);
+    assert(output.len == 2 && memcmp(output.data, "a\0", 2) == 0);
+    assert(streamed.len == 3 && memcmp(streamed.data, "a\0b", 3) == 0);
+    clay_str_clear(&output);
+    clay_str_clear(&streamed);
+    assert(clay_sandbox_exec(&config, "printf 'a\\000b'", &output, 10, &options, &result) == 0);
+    assert(result.exit_code == 0 && !result.output_truncated);
+    assert(output.len == 3 && memcmp(output.data, "a\0b", 3) == 0);
+    assert(streamed.len == 3 && memcmp(streamed.data, "a\0b", 3) == 0);
+    clay_str_clear(&output);
+    clay_str_clear(&streamed);
+    options.preserve_output_nul = 0;
+    assert(clay_sandbox_exec(&config, "printf 'a\\000b'", &output, 10, &options, &result) == 0);
+    assert(result.exit_code == 0 && !result.output_truncated);
+    assert(output.len == 3 && memcmp(output.data, "a?b", 3) == 0);
+    assert(streamed.len == 3 && memcmp(streamed.data, "a?b", 3) == 0);
+    clay_str_free(&output);
+    clay_str_free(&streamed);
+}
 int main(void) {
     if (!clay_sandbox_supported()) {
         printf("sandbox not supported on this platform, skipping\n");
@@ -28,6 +59,7 @@ int main(void) {
     char *workspace = mkdtemp(workspace_template);
     char *scratch = mkdtemp(scratch_template);
     assert(workspace && scratch);
+    test_binary_capture(CLAY_SANDBOX_MODE_UNLEASHED, workspace, scratch);
 
     ClayStr output;
     clay_str_init(&output);
@@ -43,6 +75,7 @@ int main(void) {
     assert(rc == 0);
     assert(exit_code == 0);
     assert(strstr(output.data, "hi") != NULL);
+    test_binary_capture(CLAY_SANDBOX_MODE_SANDBOX, workspace, scratch);
 
     ClayStr marker_path;
     clay_str_init(&marker_path);

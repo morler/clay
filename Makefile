@@ -168,7 +168,7 @@ TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(M
 	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(TEST_OBJ)
 UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
 UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
-TEST_DEP := $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d
+TEST_DEP := $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d
 
 # Windows cross-build via mingw-w64. With CURL_LINK=dynamic, clay.exe needs
 # libcurl-4.dll and its own dependency DLLs alongside it.
@@ -192,7 +192,7 @@ UNIT_TEST_TARGETS := $(BIN_DIR)/test_workspace_fd $(CLI_TEST_TARGET) $(COMMAND_T
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
 	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
-.PHONY: test-pty test-workspace-fd all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
+.PHONY: test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
 
 all: build
 
@@ -231,8 +231,15 @@ $(BIN_DIR)/test_wrap_utf8: $(LIB_OBJ) $(BUILD_DIR)/tests/test_wrap_utf8.o | $(BI
 test-workspace-fd: $(BIN_DIR)/test_workspace_fd
 	@./$<
 
-$(BIN_DIR)/test_workspace_fd: $(BUILD_DIR)/commands/workspace_fd.o $(WORKSPACE_FD_TEST_OBJ) | $(BIN_DIR)
+$(BUILD_DIR)/tests/workspace_fd_test_impl.o: src/commands/workspace_fd.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DCLAY_WORKSPACE_FD_TEST -c $< -o $@
+
+$(BIN_DIR)/test_workspace_fd: $(BUILD_DIR)/tests/workspace_fd_test_impl.o $(WORKSPACE_FD_TEST_OBJ) | $(BIN_DIR)
 	$(CC) $^ -o $@
+
+test-fs-fallback:
+	$(MAKE) BUILD_DIR=build-fs-fallback BIN_DIR=bin-fs-fallback CFLAGS="$(CFLAGS) -DCLAY_NO_OPENAT2" test-workspace-fd test-fs-tools test-undo test-repo-map
 
 test-openai: $(TEST_TARGET)
 	@./$<
@@ -316,7 +323,7 @@ test-fs-tools: $(FS_TOOLS_TEST_TARGET)
 	@./$<
 
 $(FS_TOOLS_TEST_TARGET): $(LIB_OBJ) $(FS_TOOLS_TEST_OBJ) | $(BIN_DIR)
-	$(CC) $(LIB_OBJ) $(FS_TOOLS_TEST_OBJ) -o $@ $(LDFLAGS)
+	$(CC) $(LIB_OBJ) $(FS_TOOLS_TEST_OBJ) -o $@ $(LDFLAGS) $(if $(filter Linux,$(shell uname -s)),-Xlinker --wrap=readdir)
 
 test-checkpoint: $(CHECKPOINT_TEST_TARGET)
 	@./$<
@@ -388,7 +395,7 @@ test-repo-map: $(REPO_MAP_TEST_TARGET)
 	@./$<
 
 $(REPO_MAP_TEST_TARGET): $(LIB_OBJ) $(REPO_MAP_TEST_OBJ) | $(BIN_DIR)
-	$(CC) $(LIB_OBJ) $(REPO_MAP_TEST_OBJ) -o $@ $(LDFLAGS)
+	$(CC) $(LIB_OBJ) $(REPO_MAP_TEST_OBJ) -o $@ $(LDFLAGS) $(if $(filter Linux,$(shell uname -s)),-Xlinker --wrap=clay_workspace_fd_read -Xlinker --wrap=clay_workspace_fd_open)
 
 test-environment-block: $(ENV_BLOCK_TEST_TARGET)
 	@./$<
@@ -458,7 +465,7 @@ debug: CFLAGS += -g -O0 -DDEBUG
 debug: clean build
 
 clean:
-	rm -rf $(BUILD_DIR) $(BIN_DIR) $(BUILD_DIR_WIN) $(BIN_DIR_WIN) $(BUILD_DIR_RELEASE) $(BIN_DIR_RELEASE)
+	rm -rf $(BUILD_DIR) $(BIN_DIR) $(BUILD_DIR_WIN) $(BIN_DIR_WIN) $(BUILD_DIR_RELEASE) $(BIN_DIR_RELEASE) build-fs-fallback bin-fs-fallback
 
 -include $(DEP)
 -include $(DEP_WIN)

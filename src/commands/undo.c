@@ -107,7 +107,8 @@ void clay_commands_undo_commit(ClayCommands *commands) {
     ClayUndoEntry *pending = &commands->undo_pending;
     if (!undo_path_safe(pending->path) ||
         read_snapshot(pending->path, &pending->after, &pending->after_len,
-                      &pending->after_exists) != 0) {
+                      &pending->after_exists) != 0 ||
+        !pending->after_exists) {
         clay_commands_undo_discard(commands);
         return;
     }

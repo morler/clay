@@ -340,7 +340,7 @@ static int read_open_beneath(int root, const char *path, int flags) {
     struct open_how how = { .flags = flags | O_CLOEXEC,
         .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS };
     int fd = (int)syscall(SYS_openat2, root, *path ? path : ".", &how, sizeof(how));
-    if (fd >= 0 || (errno != ENOSYS && errno != EINVAL && errno != E2BIG && errno != EPERM)) return fd;
+    if (fd >= 0 || (errno != ENOSYS && errno != EINVAL && errno != E2BIG)) return fd;
 #endif
     char *copy = strdup(*path ? path : ".");
     if (!copy) return -1;
@@ -806,7 +806,13 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
     clay_str_free(&abs);
     free(workspace);
     if (root < 0) return;
+    clay_fs_walk_files_fd(root, rel_prefix, pattern, matches, truncated);
+    close(root);
+}
 
+void clay_fs_walk_files_fd(int root, const char *rel_prefix, const char *pattern, ClayArray *matches,
+                           int *truncated) {
+    if (*truncated || matches->count >= CLAY_FS_GLOB_MAX_MATCHES) { *truncated = 1; return; }
     ClayArray pending;
     clay_array_init(&pending, sizeof(char *));
     char *initial = strdup("");
@@ -858,7 +864,6 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char
     }
     for (size_t i = 0; i < pending.count; i++) free(*(char **)clay_array_get(&pending, i));
     clay_array_free(&pending);
-    close(root);
 }
 #else
 void clay_fs_walk_files(const char *base_dir, const char *rel_prefix, const char *pattern, ClayArray *matches,

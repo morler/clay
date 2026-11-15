@@ -4,6 +4,14 @@
 #include <errno.h>
 #ifdef __linux__
 #include <fcntl.h>
+#include <linux/fs.h>
+#if defined(__has_include)
+#if __has_include(<linux/openat2.h>) && !defined(CLAY_NO_OPENAT2)
+#include <linux/openat2.h>
+#define CLAY_HAVE_OPENAT2 1
+#endif
+#endif
+#include <sys/syscall.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +21,14 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 
-static int parent_fd(int root, const char *path, int create, char **name) {
+#ifdef CLAY_WORKSPACE_FD_TEST
+extern void clay_workspace_fd_test_before_resolve(int stage);
+#define TEST_BEFORE_RESOLVE(stage) clay_workspace_fd_test_before_resolve(stage)
+#else
+#define TEST_BEFORE_RESOLVE(stage) ((void)0)
+#endif
+
+static int valid_path(const char *path) {
     if (!path || !*path || *path == '/') { errno = EINVAL; return -1; }
     const char *component = path;
     for (const char *p = path;; ++p) {
@@ -26,6 +41,12 @@ static int parent_fd(int root, const char *path, int create, char **name) {
         if (!*p) break;
         component = p + 1;
     }
+    return 0;
+}
+
+static int parent_fd(int root, const char *path, int create, char **name) {
+    if (valid_path(path) < 0) return -1;
+    TEST_BEFORE_RESOLVE(1);
     char *copy = strdup(path);
     if (!copy) return -1;
     int dir = fcntl(root, F_DUPFD_CLOEXEC, 0);
@@ -39,6 +60,7 @@ static int parent_fd(int root, const char *path, int create, char **name) {
             *name = strdup(part);
             if (!*name) goto fail;
             free(copy);
+            TEST_BEFORE_RESOLVE(2);
             return dir;
         }
         int next = openat(dir, part, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -64,18 +86,31 @@ int clay_workspace_fd_open(void) {
 }
 
 int clay_workspace_fd_read(int root, const char *path) {
-    char *name;
-    int dir = parent_fd(root, path, 0, &name);
-    if (dir < 0) return -1;
-    int fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (valid_path(path) < 0) return -1;
+    TEST_BEFORE_RESOLVE(1);
+    int fd;
+#if defined(CLAY_HAVE_OPENAT2) && defined(SYS_openat2)
+    struct open_how how = { .flags = O_RDONLY | O_CLOEXEC | O_NONBLOCK,
+        .resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS };
+    fd = (int)syscall(SYS_openat2, root, path, &how, sizeof(how));
+    if (fd < 0 && (errno == ENOSYS || errno == EINVAL || errno == E2BIG))
+#endif
+    {
+        char *name;
+        int dir = parent_fd(root, path, 0, &name);
+        if (dir < 0) return -1;
+        fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        int error = errno;
+        close(dir);
+        free(name);
+        errno = error;
+    }
     int error = errno;
     if (fd >= 0) {
         struct stat st;
         if (fstat(fd, &st) < 0) { error = errno; close(fd); fd = -1; }
         else if (!S_ISREG(st.st_mode)) { error = EINVAL; close(fd); fd = -1; }
     }
-    close(dir);
-    free(name);
     errno = error;
     return fd;
 }
@@ -92,6 +127,12 @@ int clay_workspace_fd_unlink(int root, const char *path) {
     close(dir);
     free(name);
     errno = error;
+    return rc;
+}
+
+static int unlink_temp(int dir, const char *name) {
+    int rc;
+    do { rc = unlinkat(dir, name, 0); } while (rc < 0 && errno == EINTR);
     return rc;
 }
 
@@ -141,14 +182,16 @@ int clay_workspace_fd_write(int root, const char *path, const void *data, size_t
     if (fsync(tmp) < 0) goto done;
     if (close(tmp) < 0) { tmp = -1; goto done; }
     tmp = -1;
-    if (renameat(dir, temp, dir, name) < 0) goto done;
+    if (old < 0) {
+        if (renameat2(dir, temp, dir, name, RENAME_NOREPLACE) < 0) goto done;
+    } else if (renameat(dir, temp, dir, name) < 0) goto done;
     created = 0;
     /* The rename commits the change; directory durability is not guaranteed. */
     rc = 0;
 done: {
     int error = errno;
     if (tmp >= 0) close(tmp);
-    if (created) unlinkat(dir, temp, 0);
+    if (created) unlink_temp(dir, temp);
     if (old >= 0) close(old);
     close(dir);
     free(name);

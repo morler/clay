@@ -422,7 +422,11 @@ ClayJson *clay_fs_tool_repo_map(const ClayJson *arguments, void *userdata) {
         source = "heuristic";
         ClayArray files;
         clay_array_init(&files, sizeof(char *));
+#ifdef __linux__
+        clay_fs_walk_files_fd(root, "", "*", &files, &scan_truncated);
+#else
         clay_fs_walk_files(workspace_dir, "", "*", &files, &scan_truncated);
+#endif
         heuristic_scan(workspace_dir, root, &files, &symbols);
         for (size_t i = 0; i < files.count; i++) free(*(char **)clay_array_get(&files, i));
         clay_array_free(&files);
@@ -447,7 +451,11 @@ ClayJson *clay_fs_tool_repo_map(const ClayJson *arguments, void *userdata) {
     ClayArray rank_files;
     clay_array_init(&rank_files, sizeof(char *));
     int rank_truncated = 0;
+#ifdef __linux__
+    clay_fs_walk_files_fd(root, "", "*", &rank_files, &rank_truncated);
+#else
     clay_fs_walk_files(workspace_dir, "", "*", &rank_files, &rank_truncated);
+#endif
     rank_symbols(workspace_dir, root, &rank_files, &symbols);
     for (size_t i = 0; i < rank_files.count; i++) free(*(char **)clay_array_get(&rank_files, i));
     clay_array_free(&rank_files);

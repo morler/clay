@@ -296,6 +296,11 @@ void clay_fs_walk_files(const char *base_dir, const char *rel_prefix,
                         const char *pattern, ClayArray *matches,
                         int *truncated);
 
+#ifdef __linux__
+/* Walk relative to an already opened workspace root; does not own root. */
+void clay_fs_walk_files_fd(int root, const char *rel_prefix, const char *pattern,
+                           ClayArray *matches, int *truncated);
+#endif
 /* Heuristic repo map (src/commands/repo_map.c): ranked top-level symbol
    definitions across the workspace, via ctags if installed, else a
    per-language line-heuristic fallback. Not gated by clay_permissions_check

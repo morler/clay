@@ -316,9 +316,10 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
       DWORD count = 0;
       if (!ReadFile(read_handle, buffer, requested, &count, NULL) || count == 0)
         break;
-      for (DWORD i = 0; i < count; i++) {
-        if (buffer[i] == '\0') buffer[i] = '?';
-      }
+      if (!options || !options->preserve_output_nul)
+        for (DWORD i = 0; i < count; i++) {
+          if (buffer[i] == '\0') buffer[i] = '?';
+        }
       exec_stream(options, buffer, (size_t)count);
       size_t kept = output->len < output_limit ? output_limit - output->len : 0;
       if ((size_t)count > kept) truncated = 1;
@@ -366,7 +367,8 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
     DWORD count = 0;
     if (!ReadFile(read_handle, buffer, requested, &count, NULL) || count == 0)
       break;
-    for (DWORD i = 0; i < count; i++) if (buffer[i] == '\0') buffer[i] = '?';
+    if (!options || !options->preserve_output_nul)
+      for (DWORD i = 0; i < count; i++) if (buffer[i] == '\0') buffer[i] = '?';
     exec_stream(options, buffer, (size_t)count);
     size_t kept = output->len < output_limit ? output_limit - output->len : 0;
     if ((size_t)count > kept) truncated = 1;
@@ -484,7 +486,8 @@ int clay_term_shell_exec(const char *command, ClayStr *output,
         char buffer[4096];
         ssize_t count = read(pipe_fds[0], buffer, sizeof(buffer));
         if (count > 0) {
-          for (ssize_t i = 0; i < count; i++) if (buffer[i] == '\0') buffer[i] = '?';
+          if (!options || !options->preserve_output_nul)
+            for (ssize_t i = 0; i < count; i++) if (buffer[i] == '\0') buffer[i] = '?';
           exec_stream(options, buffer, (size_t)count);
           size_t kept = output->len < output_limit ? output_limit - output->len : 0;
           if ((size_t)count > kept) truncated = 1;

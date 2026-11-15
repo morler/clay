@@ -664,9 +664,8 @@ int clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, Clay
             char buffer[4096];
             ssize_t read_count = read(fds[0], buffer, sizeof(buffer));
             if (read_count > 0) {
-                for (ssize_t i = 0; i < read_count; i++) {
-                    if (buffer[i] == '\0') buffer[i] = '?';
-                }
+                if (!options || !options->preserve_output_nul)
+                    for (ssize_t i = 0; i < read_count; i++) if (buffer[i] == '\0') buffer[i] = '?';
                 if (options && options->on_output)
                     options->on_output(buffer, (size_t)read_count, options->user_data);
                 append_output(output, output_limit, buffer, (size_t)read_count, &truncated);

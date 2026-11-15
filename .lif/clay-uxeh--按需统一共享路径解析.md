@@ -1,0 +1,18 @@
+---
+# clay-uxeh
+title: 按需统一共享路径解析
+status: completed
+type: task
+priority: normal
+created_at: 2026-11-15T01:38:37Z
+updated_at: 2026-11-15T01:50:38Z
+parent: clay-1m1e
+blocked_by:
+    - clay-wnop
+---
+
+检查 src/commands/workspace_fd.c、include/clay/workspace_fd.h、src/commands/fs_tools.c、src/commands/repo_map.c、src/commands/undo.c 的重复逻辑；仅在语义一致且确有必要时统一。验收：相关测试通过且非 Linux 行为不变；无需统一则记录理由。
+
+## Summary of Changes
+
+统一 fs_tools 的 openat2 错误策略：仅 ENOSYS、EINVAL、E2BIG 降级，EPERM 等错误失败关闭；seccomp 注入覆盖 read、建议和 glob，更新兼容性文档。保留独立解析器：遍历需要根目录、O_PATH 和目录句柄，workspace_fd_read 只接受非空普通文件路径；undo 和 repo_map 已复用文件接口，非 Linux 代码未变。相关测试、CLAY_NO_OPENAT2 测试及 git diff --check 通过；逐组件回退不等价于 openat2，目录移出等竞态仍存在。

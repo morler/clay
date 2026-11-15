@@ -44,7 +44,7 @@ int clay_grok_authenticate(ClayGrokCredentials *out, ClayStr *error);
 void clay_grok_credentials_free(ClayGrokCredentials *credentials);
 /* Applies a successful standard OAuth token response. `preserve_refresh`
    permits a refresh response to omit refresh_token; a returned one replaces
-   the saved token (rotation). */
+   the saved token (rotation). On success, token strings are taken from response. */
 int clay_grok_credentials_apply_token_response(ClayJson *response,
                                                ClayGrokCredentials *out,
                                                int preserve_refresh);
@@ -52,6 +52,12 @@ int clay_grok_credentials_apply_token_response(ClayJson *response,
 ClayGrok *clay_grok_create(const ClayGrokCredentials *credentials,
                            const char *model);
 void clay_grok_destroy(ClayGrok *client);
+void clay_grok_set_refresh_observer(ClayGrok *client,
+    int (*observer)(void *, ClayGrok *), void *userdata);
+void clay_grok_set_refresh_coordination(ClayGrok *client,
+    int (*begin)(void *, ClayGrok *, int (*)(void *), void *),
+    void (*end)(void *, int), void *userdata);
+void clay_grok_swap_credentials(ClayGrok *client, ClayGrokCredentials *credentials);
 void clay_grok_set_reasoning_effort(ClayGrok *client, const char *effort);
 /* Stable per-chat routing key for xAI's automatic prompt cache. */
 void clay_grok_set_conversation_id(ClayGrok *client, const char *id);

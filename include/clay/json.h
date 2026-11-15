@@ -41,6 +41,8 @@ ClayJsonType clay_json_type(const ClayJson *value);
 int clay_json_bool_value(const ClayJson *value);
 double clay_json_number_value(const ClayJson *value);
 const char *clay_json_string_value(const ClayJson *value);
+/* Transfers a string value to the caller; the JSON value becomes null. */
+char *clay_json_take_string(ClayJson *value);
 size_t clay_json_array_count(const ClayJson *value);
 ClayJson *clay_json_array_get(const ClayJson *value, size_t index); /* NULL out of range */
 ClayJson *clay_json_object_get(const ClayJson *value, const char *key); /* NULL if missing */

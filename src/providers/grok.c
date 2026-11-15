@@ -36,6 +36,13 @@ struct ClayGrok {
   ClayOpenAI *openai;
   int refresh_failed;
   int authentication_invalid;
+  int (*refresh_observer)(void *, ClayGrok *);
+  void *refresh_observer_userdata;
+  int (*refresh_begin)(void *, ClayGrok *, int (*)(void *), void *);
+  void (*refresh_end)(void *, int);
+  void *refresh_coordination_userdata;
+  int (*refresh_should_abort)(void *);
+  void *refresh_abort_userdata;
 };
 
 void clay_grok_set_scope(ClayGrok *client, ClayScope *scope) {
@@ -236,8 +243,15 @@ static int token_request(const char *body, ClayJson **json_out) {
   ClayHttpResponse response;
   int rc = clay_http_request(&request, &response);
   if (rc || response.status < 200 || response.status >= 300) {
+    int invalid = 0;
+    if (!rc && response.status == 400 && response.body) {
+      ClayJson *error = clay_json_parse(response.body, NULL);
+      const char *code = clay_json_string_value(clay_json_object_get(error, "error"));
+      invalid = code && strcmp(code, "invalid_grant") == 0;
+      clay_json_free(error);
+    }
     clay_http_response_free(&response);
-    return -1;
+    return invalid ? -2 : -1;
   }
   *json_out = clay_json_parse(response.body, NULL);
   clay_http_response_free(&response);
@@ -259,14 +273,9 @@ int clay_grok_credentials_apply_token_response(ClayJson *root,
   if (!access || !*access || expires <= 0 ||
       ((!refresh || !*refresh) && !preserve_refresh))
     return -1;
-  char *access_copy = strdup(access);
-  char *refresh_copy = refresh && *refresh ? strdup(refresh) : NULL;
-  char *id_copy = id && *id ? strdup(id) : NULL;
-  if (!access_copy || (refresh && *refresh && !refresh_copy) ||
-      (id && *id && !id_copy)) {
-    free(access_copy); free(refresh_copy); free(id_copy);
-    return -1;
-  }
+  char *access_copy = clay_json_take_string(clay_json_object_get(root, "access_token"));
+  char *refresh_copy = refresh && *refresh ? clay_json_take_string(clay_json_object_get(root, "refresh_token")) : NULL;
+  char *id_copy = id && *id ? clay_json_take_string(clay_json_object_get(root, "id_token")) : NULL;
   free(out->access_token);
   out->access_token = access_copy;
   if (refresh_copy) {
@@ -362,7 +371,7 @@ void clay_grok_credentials_free(ClayGrokCredentials *credentials) {
   memset(credentials, 0, sizeof(*credentials));
 }
 
-static int refresh(ClayGrok *client) {
+static int refresh_request(ClayGrok *client) {
   if (!client || client->refresh_failed || !client->credentials.refresh_token)
     return -1;
   char *token = clay_url_encode(client->credentials.refresh_token);
@@ -378,13 +387,31 @@ static int refresh(ClayGrok *client) {
   if (rc || clay_grok_credentials_apply_token_response(
                 response, &client->credentials, 1) != 0) {
     client->refresh_failed = 1;
-    client->authentication_invalid = 1;
+    client->authentication_invalid = rc == -2;
     clay_json_free(response);
     return -1;
   }
-  clay_openai_set_api_key(client->openai, client->credentials.access_token);
   clay_json_free(response);
+  if (client->refresh_observer &&
+      client->refresh_observer(client->refresh_observer_userdata, client) != 0) {
+    client->refresh_failed = 1;
+    return -1;
+  }
   return 0;
+}
+
+static int refresh(ClayGrok *client) {
+  if (!client) return -1;
+  int rc = client->refresh_begin ? client->refresh_begin(
+      client->refresh_coordination_userdata, client, client->refresh_should_abort,
+      client->refresh_abort_userdata) : 0;
+  if (rc != 0 && rc != 1) return rc;
+  int owner = rc == 0;
+  if (owner) rc = refresh_request(client);
+  else rc = 0;
+  if (!rc) rc = clay_openai_set_api_key(client->openai, client->credentials.access_token);
+  if (owner && client->refresh_end) client->refresh_end(client->refresh_coordination_userdata, rc);
+  return rc;
 }
 
 static int ensure_access_token(ClayGrok *client) {
@@ -426,6 +453,25 @@ void clay_grok_destroy(ClayGrok *client) {
   clay_grok_credentials_free(&client->credentials);
   free(client);
 }
+void clay_grok_set_refresh_observer(ClayGrok *client,
+    int (*observer)(void *, ClayGrok *), void *userdata) {
+  if (!client) return;
+  client->refresh_observer = observer;
+  client->refresh_observer_userdata = userdata;
+}
+void clay_grok_set_refresh_coordination(ClayGrok *client,
+    int (*begin)(void *, ClayGrok *, int (*)(void *), void *),
+    void (*end)(void *, int), void *userdata) {
+  if (!client) return;
+  client->refresh_begin = begin;
+  client->refresh_end = end;
+  client->refresh_coordination_userdata = userdata;
+}
+void clay_grok_swap_credentials(ClayGrok *client, ClayGrokCredentials *credentials) {
+  ClayGrokCredentials old = client->credentials;
+  client->credentials = *credentials;
+  *credentials = old;
+}
 void clay_grok_set_reasoning_effort(ClayGrok *client, const char *effort) {
   if (client) clay_openai_set_reasoning_effort(client->openai, effort);
 }
@@ -456,9 +502,17 @@ static int refresh_for_run(void *userdata) {
 int clay_grok_run(ClayGrok *client, ClayJson *messages, const ClayTool *tools,
                   size_t tool_count, int max_rounds,
                   const ClayOpenAICallbacks *callbacks) {
-  if (ensure_access_token(client) != 0) return -1;
-  return clay_openai_run_with_refresh(client->openai, messages, tools, tool_count,
-                                       max_rounds, callbacks, refresh_for_run, client);
+  if (!client) return -1;
+  client->refresh_should_abort = callbacks ? callbacks->should_abort : NULL;
+  client->refresh_abort_userdata = callbacks ? callbacks->userdata : NULL;
+  int rc = ensure_access_token(client);
+  if (rc == 0)
+    rc = clay_openai_run_with_refresh(client->openai, messages, tools, tool_count,
+                                      max_rounds, callbacks, refresh_for_run, client);
+  else if (rc == 2) rc = 1;
+  client->refresh_should_abort = NULL;
+  client->refresh_abort_userdata = NULL;
+  return rc;
 }
 int clay_grok_copy_credentials(const ClayGrok *client, ClayGrokCredentials *out) {
   if (!client || !out) return -1;

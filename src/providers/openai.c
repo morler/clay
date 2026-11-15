@@ -179,14 +179,13 @@ void clay_openai_destroy(ClayOpenAI *client) {
   free(client);
 }
 
-void clay_openai_set_api_key(ClayOpenAI *client, const char *api_key) {
-  if (!client)
-    return;
+int clay_openai_set_api_key(ClayOpenAI *client, const char *api_key) {
+  if (!client) return -1;
   char *copy = strdup(api_key ? api_key : "");
-  if (!copy)
-    return;
+  if (!copy) return -1;
   free(client->api_key);
   client->api_key = copy;
+  return 0;
 }
 
 void clay_openai_set_prompt_cache_key(ClayOpenAI *client, const char *key) {
@@ -776,7 +775,13 @@ retry_request:;
     if (rc == 0 && resp.status == 401 && refresh && !refreshed &&
         client->last_run_replay_safe) {
       refreshed = 1;
-      if (refresh(refresh_userdata) == 0) {
+      int refresh_result = refresh(refresh_userdata);
+      if (refresh_result == 2) {
+        clay_http_response_free(&resp);
+        stream_state_free(&st);
+        return 1;
+      }
+      if (refresh_result == 0) {
         clay_http_response_free(&resp);
         stream_state_free(&st);
         stream_state_init(&st, callbacks);

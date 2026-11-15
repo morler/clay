@@ -20,7 +20,14 @@ typedef struct {
   const ClayProviderType *type;
   uint64_t generation; /* session-local configuration identity */
   uint64_t codex_version; /* protected by the credential mutex */
+  uint64_t codex_refresh_epoch;
+  uint64_t codex_refresh_failure_epoch;
+  uint64_t codex_refresh_start_version;
+  int codex_refresh_unpersisted;
+  int codex_refresh_active;
   uint64_t grok_version; /* protected by the credential mutex */
+  uint64_t grok_refresh_epoch, grok_refresh_failure_epoch, grok_refresh_start_version;
+  int grok_refresh_unpersisted, grok_refresh_active;
   ClayProviderConfig *config;
   ClayOpenAI *client;
   ClayOpenAICodex *codex_client;
@@ -233,6 +240,11 @@ const ClayReasoningEffort *clay_commands_reasoning_efforts(void);
 void clay_commands_load_provider(ClayCommands *commands,
                                  const ClayProviderType *type);
 int clay_commands_logout_provider(ClayCommands *commands, const char *id);
+/* Begin: 0 owner, 1 newer version, -1 failed flight, 2 cancelled.
+   Each owner must call end with 0 only after publication and persistence succeed. */
+int clay_commands_codex_refresh_begin(ClayConnectedProvider *provider,
+    uint64_t version, int (*should_abort)(void *), void *userdata);
+void clay_commands_codex_refresh_end(ClayConnectedProvider *provider, int result);
 /* Copies potentially refreshed Codex OAuth credentials into the existing
    owner-only provider config and saves them. */
 ClayOpenAICodex *clay_commands_codex_snapshot(ClayConnectedProvider *provider,

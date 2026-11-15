@@ -42,6 +42,14 @@ struct ClayOpenAICodex {
   char *model;
   char *reasoning_effort;
   char *prompt_cache_key;
+  int (*refresh_observer)(void *, ClayOpenAICodex *);
+  void *refresh_observer_userdata;
+  int (*refresh_begin)(void *, ClayOpenAICodex *, int (*)(void *), void *);
+  void (*refresh_end)(void *, int);
+  void *refresh_coordination_userdata;
+  int (*refresh_should_abort)(void *);
+  void *refresh_abort_userdata;
+  int refresh_cancelled;
   int refresh_failed;
   int authentication_invalid;
   long last_status;
@@ -187,8 +195,15 @@ static int token_request(const char *body, const char *content_type,
   ClayHttpResponse resp;
   int rc = clay_http_request(&req, &resp);
   if (rc || resp.status < 200 || resp.status >= 300) {
+    int invalid = 0;
+    if (!rc && resp.status == 400 && resp.body) {
+      ClayJson *error = clay_json_parse(resp.body, NULL);
+      const char *code = clay_json_string_value(clay_json_object_get(error, "error"));
+      invalid = code && strcmp(code, "invalid_grant") == 0;
+      clay_json_free(error);
+    }
     clay_http_response_free(&resp);
-    return -1;
+    return invalid ? -2 : -1;
   }
   *json_out = clay_json_parse(resp.body, NULL);
   clay_http_response_free(&resp);
@@ -207,15 +222,18 @@ static int credentials_from_token(ClayJson *root, ClayCodexCredentials *out,
   if (!access || !*access || (require_id && (!id || !*id)) ||
       ((!refresh || !*refresh) && !preserve_refresh))
     return -1;
+  char *access_copy = clay_json_take_string(clay_json_object_get(root, "access_token"));
+  char *refresh_copy = refresh && *refresh ? clay_json_take_string(clay_json_object_get(root, "refresh_token")) : NULL;
+  char *id_copy = id && *id ? clay_json_take_string(clay_json_object_get(root, "id_token")) : NULL;
   free(out->access_token);
-  out->access_token = strdup(access);
-  if (refresh && *refresh) {
+  out->access_token = access_copy;
+  if (refresh_copy) {
     free(out->refresh_token);
-    out->refresh_token = strdup(refresh);
+    out->refresh_token = refresh_copy;
   }
-  if (id && *id) {
+  if (id_copy) {
     free(out->id_token);
-    out->id_token = strdup(id);
+    out->id_token = id_copy;
   }
   long expires =
       (long)clay_json_number_value(clay_json_object_get(root, "expires_in"));
@@ -303,7 +321,7 @@ void clay_openai_codex_credentials_free(ClayCodexCredentials *c) {
   memset(c, 0, sizeof(*c));
 }
 
-static int refresh(ClayOpenAICodex *client) {
+static int refresh_request(ClayOpenAICodex *client) {
   if (client->refresh_failed || !client->credentials.refresh_token)
     return -1;
   ClayJson *root = clay_json_object();
@@ -318,23 +336,40 @@ static int refresh(ClayOpenAICodex *client) {
   ClayJson *response = NULL;
   int rc = token_request(body.data, "application/json", &response);
   clay_str_free(&body);
+  const char *id = clay_json_string_value(clay_json_object_get(response, "id_token"));
+  char *account = NULL;
+  if (id && *id) clay_openai_codex_extract_account_id(id, &account);
   if (rc || credentials_from_token(response, &client->credentials, 0, 1) != 0) {
     client->refresh_failed = 1;
-    client->authentication_invalid = 1;
+    client->authentication_invalid = rc == -2;
+    free(account);
     clay_json_free(response);
     return -1;
   }
-  const char *id =
-      clay_json_string_value(clay_json_object_get(response, "id_token"));
-  if (id && *id) {
-    char *account = NULL;
-    if (clay_openai_codex_extract_account_id(id, &account) == 0) {
-      free(client->credentials.account_id);
-      client->credentials.account_id = account;
-    }
+  if (account) {
+    free(client->credentials.account_id);
+    client->credentials.account_id = account;
   }
   clay_json_free(response);
+  if (client->refresh_observer &&
+      client->refresh_observer(client->refresh_observer_userdata, client) != 0) {
+    client->refresh_failed = 1;
+    return -1;
+  }
   return 0;
+}
+static int refresh(ClayOpenAICodex *client) {
+  if (!client->refresh_begin) return refresh_request(client);
+  int rc = client->refresh_begin(client->refresh_coordination_userdata, client,
+      client->refresh_should_abort, client->refresh_abort_userdata);
+  if (rc == 1) return 0;
+  if (rc == 2) client->refresh_cancelled = 1;
+  if (rc != 0) return -1;
+  /* Once sent, receive and publish rotation even if the caller cancels. */
+  rc = refresh_request(client);
+  if (rc) client->authentication_invalid = 0;
+  client->refresh_end(client->refresh_coordination_userdata, rc);
+  return rc;
 }
 ClayOpenAICodex *clay_openai_codex_create(const ClayCodexCredentials *c,
                                           const char *model) {
@@ -364,6 +399,26 @@ void clay_openai_codex_destroy(ClayOpenAICodex *client) {
   free(client->reasoning_effort);
   free(client->prompt_cache_key);
   free(client);
+}
+void clay_openai_codex_set_refresh_observer(ClayOpenAICodex *client,
+    int (*observer)(void *, ClayOpenAICodex *), void *userdata) {
+  if (!client) return;
+  client->refresh_observer = observer;
+  client->refresh_observer_userdata = userdata;
+}
+void clay_openai_codex_set_refresh_coordination(ClayOpenAICodex *client,
+    int (*begin)(void *, ClayOpenAICodex *, int (*)(void *), void *),
+    void (*end)(void *, int), void *userdata) {
+  if (!client) return;
+  client->refresh_begin = begin;
+  client->refresh_end = end;
+  client->refresh_coordination_userdata = userdata;
+}
+void clay_openai_codex_swap_credentials(ClayOpenAICodex *client,
+                                         ClayCodexCredentials *credentials) {
+  ClayCodexCredentials old = client->credentials;
+  client->credentials = *credentials;
+  *credentials = old;
 }
 void clay_openai_codex_set_reasoning_effort(ClayOpenAICodex *client,
                                             const char *effort) {
@@ -761,8 +816,11 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
                           const ClayTool *tools, size_t tool_count,
                           int max_rounds,
                           const ClayOpenAICallbacks *callbacks) {
-  if (!client || ensure_token(client) != 0)
-    return -1;
+  if (!client) return -1;
+  client->refresh_should_abort = callbacks ? callbacks->should_abort : NULL;
+  client->refresh_abort_userdata = callbacks ? callbacks->userdata : NULL;
+  if (ensure_token(client) != 0)
+    return client->refresh_cancelled ? 1 : -1;
   for (int round = 0; round < max_rounds; round++) {
     int auth_retried = 0;
     CodexStream stream;
@@ -813,6 +871,11 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       stream_free(&stream);
       stream_init(&stream, callbacks);
       goto retry_request;
+    }
+    if (client->refresh_cancelled) {
+      clay_http_response_free(&response);
+      stream_free(&stream);
+      return 1;
     }
     ClayHttpResponse decision = response;
     if (stream.sse_rate_limit && response.status >= 200 && response.status < 300 && stream.sse_error) {
@@ -895,8 +958,10 @@ static void append_model(ClayArray *models, ClayJson *item) {
 }
 
 int clay_openai_codex_list_models(ClayOpenAICodex *client, ClayArray *models) {
-  if (!client || !models || ensure_token(client) != 0)
-    return -1;
+  if (!client || !models) return -1;
+  client->refresh_should_abort = NULL;
+  client->refresh_abort_userdata = NULL;
+  if (ensure_token(client) != 0) return -1;
   int retried_auth = 0;
 retry_models:;
   ClayStr auth;

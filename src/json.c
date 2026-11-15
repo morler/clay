@@ -47,6 +47,14 @@ ClayJson *clay_json_string(const char *value) {
     return v;
 }
 
+char *clay_json_take_string(ClayJson *value) {
+    if (!value || value->type != CLAY_JSON_STRING) return NULL;
+    char *string = value->string;
+    value->string = NULL;
+    value->type = CLAY_JSON_NULL;
+    return string;
+}
+
 ClayJson *clay_json_array(void) {
     ClayJson *v = json_new(CLAY_JSON_ARRAY);
     clay_array_init(&v->items, sizeof(ClayJson *));

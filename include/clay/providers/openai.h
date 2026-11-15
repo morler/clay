@@ -26,7 +26,7 @@ ClayOpenAI *clay_openai_create_with_headers(const char *base_url,
                                              const ClayOpenAIHeader *headers,
                                              size_t header_count);
 void clay_openai_destroy(ClayOpenAI *client);
-void clay_openai_set_api_key(ClayOpenAI *client, const char *api_key);
+int clay_openai_set_api_key(ClayOpenAI *client, const char *api_key);
 /* Enables the provider's optional prompt-cache key. Generic OpenAI-compatible
    endpoints leave this unset unless their adapter explicitly supports it. */
 void clay_openai_set_prompt_cache_key(ClayOpenAI *client, const char *key);

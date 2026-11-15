@@ -15,6 +15,568 @@ extern char *mkdtemp(char *template);
 
 typedef struct {
     ClayConnectedProvider *provider;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int entered, release, cancel, result;
+} CodexFlightTest;
+
+static int flight_abort(void *arg) {
+    CodexFlightTest *test = arg;
+    pthread_mutex_lock(&test->lock);
+    test->entered = 1;
+    pthread_cond_signal(&test->cond);
+    while (!test->release) pthread_cond_wait(&test->cond, &test->lock);
+    int cancel = test->cancel;
+    pthread_mutex_unlock(&test->lock);
+    return cancel;
+}
+
+static void *flight_waiter(void *arg) {
+    CodexFlightTest *test = arg;
+    test->result = clay_commands_codex_refresh_begin(test->provider, 0, flight_abort, test);
+    if (test->result == 0) clay_commands_codex_refresh_end(test->provider, -1);
+    return NULL;
+}
+
+static int already_cancelled(void *arg) {
+    (void)arg;
+    return 1;
+}
+static void test_codex_flight_foundation(void) {
+    for (int scenario = 0; scenario < 4; scenario++) {
+        ClayProviderConfig config = {0};
+        config.access_token = strdup("old");
+        config.refresh_token = strdup("refresh");
+        config.account_id = strdup("account");
+        ClayConnectedProvider provider = {0};
+        provider.config = &config;
+        provider.environment_override = scenario == 1 || scenario == 2;
+        if (scenario == 0) config.id = "flight-test";
+        CodexFlightTest test = {.provider = &provider, .cancel = scenario == 2};
+        assert(!pthread_mutex_init(&test.lock, NULL));
+        assert(!pthread_cond_init(&test.cond, NULL));
+        assert(clay_commands_codex_refresh_begin(&provider, 0, NULL, NULL) == 0);
+        pthread_t worker;
+        assert(!pthread_create(&worker, NULL, flight_waiter, &test));
+        pthread_mutex_lock(&test.lock);
+        while (!test.entered) pthread_cond_wait(&test.cond, &test.lock);
+        pthread_mutex_unlock(&test.lock);
+        if (scenario == 0 || scenario == 3) {
+            ClayCodexCredentials rotated = {"new", "rotated", NULL, "account", 123};
+            ClayOpenAICodex *client = clay_openai_codex_create(&rotated, "other-model");
+            assert(client);
+            assert(clay_commands_save_codex_credentials(&provider, client, 0) == (scenario == 3 ? -1 : 0));
+            clay_openai_codex_destroy(client);
+        }
+        if (scenario != 2) clay_commands_codex_refresh_end(&provider, scenario == 0 ? 0 : -1);
+        if (scenario == 1) {
+            assert(clay_commands_codex_refresh_begin(&provider, 0, NULL, NULL) == 0);
+            clay_commands_codex_refresh_end(&provider, 0);
+        }
+        pthread_mutex_lock(&test.lock);
+        test.release = 1;
+        pthread_cond_signal(&test.cond);
+        pthread_mutex_unlock(&test.lock);
+        assert(!pthread_join(worker, NULL));
+        assert(test.result == (scenario == 0 ? 1 : scenario == 2 ? 2 : -1));
+        if (scenario == 2) clay_commands_codex_refresh_end(&provider, 0);
+        if (scenario == 0) {
+            ClayProviderConfig *saved = clay_config_load("flight-test");
+            assert(saved && !strcmp(saved->refresh_token, "rotated"));
+            clay_config_free(saved);
+            uint64_t version;
+            ClayOpenAICodex *client = clay_commands_codex_snapshot(&provider, "model", &version);
+            ClayCodexCredentials copy = {0};
+            assert(client && version == 1 && !clay_openai_codex_copy_credentials(client, &copy));
+            assert(!strcmp(copy.refresh_token, "rotated"));
+            clay_openai_codex_credentials_free(&copy);
+            clay_openai_codex_destroy(client);
+        }
+        if (scenario == 3) {
+            assert(!strcmp(config.refresh_token, "rotated"));
+            assert(clay_commands_codex_refresh_begin(&provider, 0, NULL, NULL) == -1);
+            assert(clay_commands_codex_refresh_begin(&provider, 1, NULL, NULL) == -1);
+        } else {
+            assert(clay_commands_codex_refresh_begin(&provider, provider.codex_version, NULL, NULL) == 0);
+            clay_commands_codex_refresh_end(&provider, 0);
+        }
+        pthread_cond_destroy(&test.cond);
+        pthread_mutex_destroy(&test.lock);
+        free(config.access_token); free(config.refresh_token); free(config.account_id);
+    }
+}
+static int cancel_after_two_polls(void *arg) {
+    int *polls = arg;
+    return ++*polls == 2;
+}
+typedef struct { ClayConnectedProvider *provider; int result, polls; } PublishedFlight;
+static void *published_flight_waiter(void *arg) {
+    PublishedFlight *test = arg;
+    test->result = clay_commands_codex_refresh_begin(test->provider, 0,
+                                                     cancel_after_two_polls, &test->polls);
+    if (test->result == 0) clay_commands_codex_refresh_end(test->provider, -1);
+    return NULL;
+}
+static void test_codex_publication_waits_for_end(void) {
+    ClayProviderConfig config = {0};
+    config.access_token = strdup("old"); config.refresh_token = strdup("refresh");
+    config.account_id = strdup("account");
+    ClayConnectedProvider provider = {.config = &config, .environment_override = 1};
+    assert(clay_commands_codex_refresh_begin(&provider, 0, NULL, NULL) == 0);
+    ClayCodexCredentials rotated = {"new", "rotated", NULL, "account", 123};
+    ClayOpenAICodex *client = clay_openai_codex_create(&rotated, NULL);
+    assert(client && clay_commands_save_codex_credentials(&provider, client, 0) == 0);
+    clay_openai_codex_destroy(client);
+    PublishedFlight test = {.provider = &provider};
+    pthread_t worker;
+    assert(!pthread_create(&worker, NULL, published_flight_waiter, &test));
+    assert(!pthread_join(worker, NULL));
+    assert(test.result == 2 && test.polls == 2);
+    clay_commands_codex_refresh_end(&provider, 0);
+    assert(clay_commands_codex_refresh_begin(&provider, 0, NULL, NULL) == 1);
+    free(config.access_token); free(config.refresh_token); free(config.account_id);
+}
+#include "clay/http.h"
+static int review_mock;
+static ClayProviderConfig *grok_published;
+static int fail_codex_create;
+ClayOpenAICodex *__real_clay_openai_codex_create(const ClayCodexCredentials *, const char *);
+ClayOpenAICodex *__wrap_clay_openai_codex_create(const ClayCodexCredentials *c, const char *model) {
+    if (fail_codex_create) { fail_codex_create = 0; return NULL; }
+    return __real_clay_openai_codex_create(c, model);
+}
+static pthread_mutex_t network_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t network_cond = PTHREAD_COND_INITIALIZER;
+static int network_entered, network_release, network_waiting, network_cancel, network_requests;
+static pthread_barrier_t review_barrier;
+static int stale_status, stale_old, stale_new, stale_release;
+int __real_clay_http_request(const ClayHttpRequest *, ClayHttpResponse *);
+int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp) {
+    if (!review_mock) return __real_clay_http_request(req, resp);
+    memset(resp, 0, sizeof(*resp));
+    if (review_mock >= 13 && review_mock <= 17) {
+        if (strstr(req->url, "/oauth2/token")) {
+            pthread_mutex_lock(&network_lock);
+            network_requests++;
+            network_entered = 1;
+            pthread_cond_broadcast(&network_cond);
+            while (review_mock != 16 && !network_release)
+                pthread_cond_wait(&network_cond, &network_lock);
+            pthread_mutex_unlock(&network_lock);
+            assert(!req->should_abort);
+            resp->status = review_mock == 15 ? 400 : 200;
+            resp->body = strdup(review_mock == 15 ? "{\"error\":\"invalid_grant\"}" :
+                "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}");
+        } else if (review_mock == 16 && !strcmp(req->headers[0].value, "Bearer old")) {
+            pthread_mutex_lock(&network_lock);
+            int order = ++stale_old;
+            pthread_cond_broadcast(&network_cond);
+            while (stale_old < 2 || (order == 2 && !stale_release))
+                pthread_cond_wait(&network_cond, &network_lock);
+            pthread_mutex_unlock(&network_lock);
+            resp->status = 401;
+        } else {
+            assert(!strcmp(req->headers[0].value, "Bearer new-access"));
+            pthread_mutex_lock(&network_lock);
+            stale_new++;
+            pthread_cond_broadcast(&network_cond);
+            pthread_mutex_unlock(&network_lock);
+            resp->status = 200;
+            resp->body = strdup("{\"data\":[{\"id\":\"grok-test\"}]}");
+        }
+        return 0;
+    }
+    if (review_mock == 12) {
+        assert(strstr(req->url, "/oauth2/token"));
+        resp->status = 400;
+        resp->body = strdup("{\"error\":\"invalid_grant\"}");
+        return 0;
+    }
+    if (review_mock == 11) {
+        if (strstr(req->url, "/oauth/token")) {
+            pthread_mutex_lock(&network_lock);
+            network_requests++;
+            pthread_mutex_unlock(&network_lock);
+            resp->status = 200;
+            resp->body = strdup("{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}");
+        } else if (!strcmp(req->headers[0].value, "Bearer old")) {
+            pthread_mutex_lock(&network_lock);
+            int order = ++stale_old;
+            pthread_cond_broadcast(&network_cond);
+            while (stale_old < 2 || (order == 2 && !stale_release))
+                pthread_cond_wait(&network_cond, &network_lock);
+            pthread_mutex_unlock(&network_lock);
+            resp->status = stale_status;
+        } else {
+            assert(!strcmp(req->headers[0].value, "Bearer new-access"));
+            pthread_mutex_lock(&network_lock);
+            stale_new++;
+            pthread_cond_broadcast(&network_cond);
+            pthread_mutex_unlock(&network_lock);
+            resp->status = 200;
+            resp->body = strdup("{\"data\":[{\"id\":\"codex-test\"}]}");
+        }
+        return 0;
+    }
+    if (review_mock == 9 || review_mock == 10) {
+        if (strstr(req->url, "/oauth/token")) {
+            pthread_mutex_lock(&network_lock);
+            network_requests++;
+            network_entered = 1;
+            pthread_cond_broadcast(&network_cond);
+            while (!network_release) pthread_cond_wait(&network_cond, &network_lock);
+            pthread_mutex_unlock(&network_lock);
+            assert(!req->should_abort);
+            resp->status = review_mock == 10 ? 400 : 200;
+            resp->body = strdup(review_mock == 10 ? "{\"error\":\"invalid_grant\"}" : "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}");
+        } else {
+            assert(req->header_count && !strcmp(req->headers[0].value, "Bearer new-access"));
+            resp->status = 200;
+            resp->body = strdup("{\"data\":[{\"id\":\"codex-test\"}]}");
+        }
+        return 0;
+    }
+    if (review_mock <= 2) {
+        pthread_barrier_wait(&review_barrier);
+        pthread_barrier_wait(&review_barrier);
+        resp->status = 200;
+        if (review_mock == 2) {
+            assert(req->should_abort);
+            req->should_abort(req->abort_userdata);
+            return -1;
+        }
+        return 0;
+    }
+    if (review_mock >= 6 && strstr(req->url, "/oauth/token")) {
+        if (review_mock == 8) fail_codex_create = 1;
+        resp->status = 200;
+        resp->body = strdup("{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}");
+    } else if (review_mock >= 6) {
+        assert(req->header_count && !strcmp(req->headers[0].value, "Bearer new-access"));
+        resp->status = 200;
+        resp->body = strdup("{\"data\":[{\"id\":\"codex-test\"}]}");
+    } else if (strstr(req->url, "/oauth2/token")) {
+        resp->status = 200;
+        resp->body = strdup("{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}");
+    } else {
+        assert(grok_published && !strcmp(grok_published->refresh_token, "new-refresh"));
+        assert(req->header_count && !strcmp(req->headers[0].value, "Bearer new-access"));
+        if (review_mock == 3) {
+            ClayProviderConfig *saved = clay_config_load("grok-review");
+            assert(saved && !strcmp(saved->refresh_token, "new-refresh"));
+            clay_config_free(saved);
+        }
+        resp->status = review_mock == 3 ? 503 : 200;
+        resp->body = strdup(review_mock == 3 ? "error" : "{\"data\":[{\"id\":\"grok-test\"}]}");
+    }
+    return 0;
+}
+typedef struct { ClayCommands *commands; int result; } ReviewRun;
+static void *review_run(void *arg) {
+    ReviewRun *run = arg;
+    ClayJson *messages = clay_json_array();
+    ClayOpenAICallbacks callbacks = {0};
+    callbacks.should_abort = already_cancelled;
+    run->result = clay_commands_run_completion(run->commands, messages, NULL, 1, NULL,
+                                               review_mock == 2 ? &callbacks : NULL);
+    clay_json_free(messages);
+    return NULL;
+}
+static void test_stale_completion_results(void) {
+    for (int scenario = 1; scenario <= 2; scenario++) {
+        ClayCommands c = {0};
+        clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+        c.scopes = clay_scope_registry_create();
+        c.selected_provider = "openai-codex"; c.selected_model = "model";
+        ClayProviderConfig config = {0};
+        config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+        config.account_id = strdup("account"); config.expires_at = 4102444800LL;
+        ClayConnectedProvider provider = {0};
+        provider.config = &config; provider.environment_override = 1; provider.generation = 1;
+        provider.type = clay_commands_find_provider_type("openai-codex");
+        clay_array_push_val(&c.providers, &provider);
+        ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+        review_mock = scenario;
+        assert(!pthread_barrier_init(&review_barrier, NULL, 2));
+        ReviewRun run = {&c, -99}; pthread_t thread;
+        assert(!pthread_create(&thread, NULL, review_run, &run));
+        pthread_barrier_wait(&review_barrier);
+        ClayCodexCredentials rotated = {"new", "new-refresh", NULL, "account", 4102444800LL};
+        ClayOpenAICodex *client = clay_openai_codex_create(&rotated, NULL);
+        assert(client && clay_commands_save_codex_credentials(shared, client, 0) == 0);
+        clay_openai_codex_destroy(client);
+        pthread_barrier_wait(&review_barrier);
+        assert(!pthread_join(thread, NULL));
+        assert(run.result == (scenario == 1 ? 0 : 1));
+        assert(!strcmp(config.refresh_token, "new-refresh"));
+        pthread_barrier_destroy(&review_barrier);
+        clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+        free(config.access_token); free(config.refresh_token); free(config.account_id);
+    }
+    review_mock = 0;
+}
+static int network_abort(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&network_lock);
+    network_waiting = 1;
+    pthread_cond_broadcast(&network_cond);
+    int cancel = network_cancel;
+    pthread_mutex_unlock(&network_lock);
+    return cancel;
+}
+typedef struct { ClayConnectedProvider *provider; int result; } NetworkModels;
+static void *network_models(void *arg) {
+    NetworkModels *run = arg;
+    ClayArray out; clay_array_init(&out, sizeof(ClayModelItem));
+    run->result = clay_commands_fetch_models(run->provider, &out);
+    clay_array_free(&out);
+    return NULL;
+}
+static void *network_completion(void *arg) {
+    ReviewRun *run = arg;
+    ClayJson *messages = clay_json_array();
+    ClayOpenAICallbacks callbacks = {0};
+    callbacks.should_abort = network_abort;
+    run->result = clay_commands_run_completion(run->commands, messages, NULL, 1, NULL, &callbacks);
+    clay_json_free(messages);
+    return NULL;
+}
+static void test_codex_network_singleflight(void) {
+    for (int scenario = 0; scenario < 4; scenario++) {
+        int cancel = scenario == 1;
+        ClayCommands c = {0};
+        clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+        c.scopes = clay_scope_registry_create();
+        c.selected_provider = "openai-codex"; c.selected_model = "model";
+        ClayProviderConfig config = {0};
+        config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+        config.account_id = strdup("account"); config.expires_at = 1;
+        ClayConnectedProvider provider = {0};
+        provider.config = &config; provider.environment_override = scenario != 3; provider.generation = 1;
+        provider.type = clay_commands_find_provider_type("openai-codex");
+        clay_array_init(&provider.models, sizeof(char *));
+        clay_array_push_val(&c.providers, &provider);
+        ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+        network_entered = network_release = network_waiting = network_requests = 0;
+        network_cancel = cancel; review_mock = scenario == 2 ? 10 : 9;
+        NetworkModels models = {shared, -99}; ReviewRun run = {&c, -99};
+        pthread_t leader, waiter;
+        assert(!pthread_create(&leader, NULL, network_models, &models));
+        pthread_mutex_lock(&network_lock);
+        while (!network_entered) pthread_cond_wait(&network_cond, &network_lock);
+        pthread_mutex_unlock(&network_lock);
+        assert(!pthread_create(&waiter, NULL, network_completion, &run));
+        pthread_mutex_lock(&network_lock);
+        while (!network_waiting) pthread_cond_wait(&network_cond, &network_lock);
+        if (cancel) {
+            pthread_mutex_unlock(&network_lock);
+            assert(!pthread_join(waiter, NULL));
+            assert(run.result == 1);
+            pthread_mutex_lock(&network_lock);
+        }
+        network_release = 1;
+        pthread_cond_broadcast(&network_cond);
+        pthread_mutex_unlock(&network_lock);
+        assert(!pthread_join(leader, NULL));
+        if (!cancel) assert(!pthread_join(waiter, NULL));
+        assert(models.result == (scenario >= 2 ? -1 : 0) && run.result == (scenario >= 2 ? -1 : cancel ? 1 : 0));
+        assert(network_requests == 1 && !strcmp(config.refresh_token, scenario == 2 ? "old-refresh" : "new-refresh"));
+        for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
+        clay_array_free(&shared->models); clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+        free(config.access_token); free(config.refresh_token); free(config.account_id);
+    }
+    review_mock = 0;
+}
+static void test_grok_network_singleflight(void) {
+    for (int scenario = 0; scenario < 5; scenario++) {
+        ClayCommands c = {0};
+        clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+        c.scopes = clay_scope_registry_create();
+        c.selected_provider = "grok"; c.selected_model = "model";
+        ClayProviderConfig config = {0};
+        config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+        config.expires_at = scenario == 3 ? 4102444800LL : 1;
+        ClayGrokCredentials credentials = {config.access_token, config.refresh_token, NULL, config.expires_at};
+        ClayConnectedProvider provider = {0};
+        provider.config = &config; provider.environment_override = scenario != 4; provider.generation = 1;
+        provider.type = clay_commands_find_provider_type("grok");
+        provider.grok_client = clay_grok_create(&credentials, NULL);
+        assert(provider.grok_client);
+        clay_array_init(&provider.models, sizeof(char *));
+        clay_array_push_val(&c.providers, &provider);
+        ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+        network_entered = network_release = network_waiting = network_requests = 0;
+        stale_old = stale_new = stale_release = 0;
+        network_cancel = scenario == 1; review_mock = 13 + scenario;
+        ReviewRun a = {&c, -99}, b = {&c, -99};
+        NetworkModels models = {shared, -99};
+        pthread_t leader, waiter;
+        assert(!pthread_create(&leader, NULL, scenario == 3 ? network_completion : network_models,
+                               scenario == 3 ? (void *)&a : (void *)&models));
+        if (scenario != 3) {
+            pthread_mutex_lock(&network_lock);
+            while (!network_entered) pthread_cond_wait(&network_cond, &network_lock);
+            pthread_mutex_unlock(&network_lock);
+        }
+        assert(!pthread_create(&waiter, NULL, network_completion, &b));
+        pthread_mutex_lock(&network_lock);
+        if (scenario == 3) {
+            while (!stale_new) pthread_cond_wait(&network_cond, &network_lock);
+            stale_release = 1;
+        } else {
+            while (!network_waiting) pthread_cond_wait(&network_cond, &network_lock);
+            if (scenario == 1) {
+                pthread_mutex_unlock(&network_lock);
+                assert(!pthread_join(waiter, NULL));
+                assert(b.result == 1);
+                pthread_mutex_lock(&network_lock);
+            }
+            network_release = 1;
+        }
+        pthread_cond_broadcast(&network_cond);
+        pthread_mutex_unlock(&network_lock);
+        assert(!pthread_join(leader, NULL));
+        if (scenario != 1) assert(!pthread_join(waiter, NULL));
+        assert((scenario == 3 ? a.result : models.result) == (scenario == 2 || scenario == 4 ? -1 : 0));
+        assert(b.result == (scenario == 1 ? 1 : scenario == 2 || scenario == 4 ? -1 : 0));
+        assert(network_requests == 1);
+        assert(!strcmp(config.refresh_token, scenario == 2 ? "old-refresh" : "new-refresh"));
+        if (scenario == 3) assert(stale_old == 2 && stale_new == 2);
+        for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
+        clay_array_free(&shared->models); clay_grok_destroy(shared->grok_client);
+        clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+        free(config.access_token); free(config.refresh_token);
+    }
+    review_mock = 0;
+}
+static void test_codex_stale_http(void) {
+    for (int status = 401; status <= 403; status += 2) {
+        for (int use_models = 0; use_models < 2; use_models++) {
+            ClayCommands c = {0};
+            clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+            c.scopes = clay_scope_registry_create();
+            c.selected_provider = "openai-codex"; c.selected_model = "model";
+            ClayProviderConfig config = {0};
+            config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+            config.account_id = strdup("account"); config.expires_at = 4102444800LL;
+            ClayConnectedProvider provider = {0};
+            provider.config = &config; provider.environment_override = 1; provider.generation = 1;
+            provider.type = clay_commands_find_provider_type("openai-codex");
+            clay_array_init(&provider.models, sizeof(char *));
+            clay_array_push_val(&c.providers, &provider);
+            ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+            review_mock = 11; stale_status = status;
+            stale_old = stale_new = stale_release = network_requests = 0;
+            ReviewRun a = {&c, -99}, b = {&c, -99};
+            NetworkModels models = {shared, -99};
+            pthread_t first, second;
+            assert(!pthread_create(&first, NULL, network_completion, &a));
+            assert(!pthread_create(&second, NULL, use_models ? network_models : network_completion,
+                                   use_models ? (void *)&models : (void *)&b));
+            pthread_mutex_lock(&network_lock);
+            while (!stale_new) pthread_cond_wait(&network_cond, &network_lock);
+            stale_release = 1;
+            pthread_cond_broadcast(&network_cond);
+            pthread_mutex_unlock(&network_lock);
+            assert(!pthread_join(first, NULL)); assert(!pthread_join(second, NULL));
+            assert(a.result == 0 && (use_models ? models.result : b.result) == 0);
+            assert(stale_old == 2 && stale_new == 2 && network_requests == 1);
+            assert(!strcmp(config.refresh_token, "new-refresh"));
+            for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
+            clay_array_free(&shared->models); clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+            free(config.access_token); free(config.refresh_token); free(config.account_id);
+        }
+    }
+    review_mock = 0;
+}
+static void test_codex_refresh_ownership(void) {
+    for (int scenario = 6; scenario <= 8; scenario++) {
+        ClayProviderConfig config = {0};
+        config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+        config.account_id = strdup("account"); config.expires_at = 1;
+        ClayConnectedProvider provider = {0};
+        provider.config = &config;
+        provider.type = clay_commands_find_provider_type("openai-codex");
+        provider.environment_override = scenario != 7;
+        clay_array_init(&provider.models, sizeof(char *));
+        ClayArray out; clay_array_init(&out, sizeof(ClayModelItem));
+        review_mock = scenario;
+        int rc = clay_commands_fetch_models(&provider, &out);
+        assert(rc == (scenario == 6 ? 0 : -1));
+        assert(provider.codex_version == 1);
+        assert(!strcmp(config.access_token, "new-access"));
+        assert(!strcmp(config.refresh_token, "new-refresh"));
+        for (size_t i = 0; i < provider.models.count; i++)
+            free(*(char **)clay_array_get(&provider.models, i));
+        clay_array_free(&provider.models); clay_array_free(&out);
+        free(config.access_token); free(config.refresh_token); free(config.account_id);
+    }
+    review_mock = 0;
+}
+static void test_grok_catalog_refresh_failure(void) {
+    for (int scenario = 3; scenario <= 5; scenario++) {
+        ClayProviderConfig config = {0};
+        config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+        config.expires_at = 1;
+        ClayGrokCredentials initial = {config.access_token, config.refresh_token, NULL, 1};
+        ClayConnectedProvider provider = {0};
+        provider.config = &config; provider.type = clay_commands_find_provider_type("grok");
+        config.id = scenario == 5 ? NULL : "grok-review";
+        provider.environment_override = scenario == 4;
+        provider.grok_client = clay_grok_create(&initial, NULL);
+        assert(provider.grok_client);
+        clay_array_init(&provider.models, sizeof(char *));
+        ClayArray out; clay_array_init(&out, sizeof(ClayModelItem));
+        review_mock = scenario;
+        grok_published = &config;
+        int rc = clay_commands_fetch_models(&provider, &out);
+        grok_published = NULL;
+        assert(rc == (scenario == 4 ? 0 : -1));
+        assert(provider.grok_version == 1);
+        assert(!strcmp(config.refresh_token, "new-refresh"));
+        if (scenario == 3) {
+            ClayProviderConfig *saved = clay_config_load("grok-review");
+            assert(saved && !strcmp(saved->refresh_token, "new-refresh"));
+            clay_config_free(saved);
+        }
+        for (size_t i = 0; i < provider.models.count; i++) free(*(char **)clay_array_get(&provider.models, i));
+        clay_array_free(&provider.models); clay_array_free(&out);
+        clay_grok_destroy(provider.grok_client);
+        free(config.access_token); free(config.refresh_token);
+    }
+    review_mock = 0;
+}
+
+static void test_grok_invalid_grant_preserves_config(void) {
+    ClayProviderConfig config = {0};
+    config.id = "grok-invalid-review";
+    config.access_token = strdup("old");
+    config.refresh_token = strdup("old-refresh");
+    config.expires_at = 1;
+    assert(clay_config_save(&config) == 0);
+    ClayGrokCredentials initial = {config.access_token, config.refresh_token, NULL, 1};
+    ClayConnectedProvider provider = {0};
+    provider.config = &config;
+    provider.type = clay_commands_find_provider_type("grok");
+    provider.grok_client = clay_grok_create(&initial, NULL);
+    assert(provider.grok_client);
+    clay_array_init(&provider.models, sizeof(char *));
+    ClayArray out;
+    clay_array_init(&out, sizeof(ClayModelItem));
+    review_mock = 12;
+    assert(clay_commands_fetch_models(&provider, &out) == -1);
+    ClayProviderConfig *saved = clay_config_load(config.id);
+    assert(saved && !strcmp(saved->refresh_token, "old-refresh"));
+    clay_config_free(saved);
+    clay_array_free(&provider.models);
+    clay_array_free(&out);
+    clay_grok_destroy(provider.grok_client);
+    free(config.access_token);
+    free(config.refresh_token);
+    review_mock = 0;
+}
+typedef struct {
+    ClayConnectedProvider *provider;
     pthread_barrier_t barrier;
     int result[2];
 } CodexRace;
@@ -616,13 +1178,22 @@ static void test_completion_scopes(void) {
 }
 
 int main(void) {
+    test_codex_network_singleflight();
+    test_grok_network_singleflight();
+    test_codex_stale_http();
+    test_codex_publication_waits_for_end();
     test_codex_concurrent_snapshot();
     test_grok_concurrent_snapshot();
+    test_stale_completion_results();
     test_interrupt_consumed_once();
     char template[] = "/tmp/clay_test_subagent_XXXXXX";
     char *home = mkdtemp(template);
     assert(home);
     assert(setenv("HOME", home, 1) == 0);
+    test_codex_flight_foundation();
+    test_codex_refresh_ownership();
+    test_grok_catalog_refresh_failure();
+    test_grok_invalid_grant_preserves_config();
 
     test_scope_wait();
     test_scopes();

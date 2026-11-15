@@ -8,6 +8,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define CLAY_SYSTEM_PROMPT_BASE                                                \
   "You are Clay, a coding agent working in the user's terminal. You " \
@@ -562,6 +563,134 @@ void clay_commands_load_provider(ClayCommands *commands,
 
 /* Provider replacement/logout remains owner-serialized with all workers joined. */
 static pthread_mutex_t codex_credentials_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t codex_refresh_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t grok_refresh_cond = PTHREAD_COND_INITIALIZER;
+
+int clay_commands_codex_refresh_begin(ClayConnectedProvider *provider,
+    uint64_t version, int (*should_abort)(void *), void *userdata) {
+  if (!provider) return -1;
+  pthread_mutex_lock(&codex_credentials_lock);
+  uint64_t epoch = provider->codex_refresh_epoch;
+  for (;;) {
+    if (provider->codex_refresh_failure_epoch > epoch ||
+        provider->codex_refresh_unpersisted) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return -1;
+    }
+    if (!provider->codex_refresh_active) {
+      if (provider->codex_version != version) {
+        pthread_mutex_unlock(&codex_credentials_lock);
+        return 1;
+      }
+      if (provider->codex_refresh_epoch != epoch) {
+        pthread_mutex_unlock(&codex_credentials_lock);
+        return -1;
+      }
+      provider->codex_refresh_active = 1;
+      provider->codex_refresh_start_version = version;
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return 0;
+    }
+    pthread_mutex_unlock(&codex_credentials_lock);
+    int cancelled = should_abort && should_abort(userdata);
+    pthread_mutex_lock(&codex_credentials_lock);
+    if (cancelled) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return 2;
+    }
+    if (provider->codex_refresh_epoch != epoch || !provider->codex_refresh_active)
+      continue;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return -1;
+    }
+    deadline.tv_nsec += 50000000;
+    if (deadline.tv_nsec >= 1000000000) {
+      deadline.tv_sec++;
+      deadline.tv_nsec -= 1000000000;
+    }
+    pthread_cond_timedwait(&codex_refresh_cond, &codex_credentials_lock, &deadline);
+  }
+}
+
+void clay_commands_codex_refresh_end(ClayConnectedProvider *provider, int result) {
+  pthread_mutex_lock(&codex_credentials_lock);
+  provider->codex_refresh_active = 0;
+  provider->codex_refresh_epoch++;
+  if (result != 0) {
+    provider->codex_refresh_failure_epoch = provider->codex_refresh_epoch;
+    if (provider->codex_version != provider->codex_refresh_start_version)
+      provider->codex_refresh_unpersisted = 1;
+  }
+  pthread_cond_broadcast(&codex_refresh_cond);
+  pthread_mutex_unlock(&codex_credentials_lock);
+}
+
+static int grok_refresh_begin(ClayConnectedProvider *provider,
+    uint64_t version, int (*should_abort)(void *), void *userdata) {
+  if (!provider) return -1;
+  pthread_mutex_lock(&codex_credentials_lock);
+  uint64_t epoch = provider->grok_refresh_epoch;
+  for (;;) {
+    if (provider->grok_refresh_failure_epoch > epoch ||
+        provider->grok_refresh_unpersisted) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return -1;
+    }
+    if (!provider->grok_refresh_active) {
+      if (provider->grok_version != version) {
+        pthread_mutex_unlock(&codex_credentials_lock);
+        return 1;
+      }
+      if (provider->grok_refresh_epoch != epoch) {
+        pthread_mutex_unlock(&codex_credentials_lock);
+        return -1;
+      }
+      if (provider->grok_version == UINT64_MAX || provider->grok_refresh_epoch == UINT64_MAX) {
+        pthread_mutex_unlock(&codex_credentials_lock);
+        return -1;
+      }
+      provider->grok_refresh_active = 1;
+      provider->grok_refresh_start_version = version;
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return 0;
+    }
+    pthread_mutex_unlock(&codex_credentials_lock);
+    int cancelled = should_abort && should_abort(userdata);
+    pthread_mutex_lock(&codex_credentials_lock);
+    if (cancelled) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return 2;
+    }
+    if (provider->grok_refresh_epoch != epoch || !provider->grok_refresh_active)
+      continue;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return -1;
+    }
+    deadline.tv_nsec += 50000000;
+    if (deadline.tv_nsec >= 1000000000) {
+      deadline.tv_sec++;
+      deadline.tv_nsec -= 1000000000;
+    }
+    pthread_cond_timedwait(&grok_refresh_cond, &codex_credentials_lock, &deadline);
+  }
+}
+
+static void grok_refresh_end(ClayConnectedProvider *provider, int result) {
+  pthread_mutex_lock(&codex_credentials_lock);
+  provider->grok_refresh_active = 0;
+  provider->grok_refresh_epoch++;
+  if (result != 0) {
+    provider->grok_refresh_failure_epoch = provider->grok_refresh_epoch;
+    if (provider->grok_version != provider->grok_refresh_start_version)
+      provider->grok_refresh_unpersisted = 1;
+  }
+  pthread_cond_broadcast(&grok_refresh_cond);
+  pthread_mutex_unlock(&codex_credentials_lock);
+}
 
 ClayOpenAICodex *clay_commands_codex_snapshot(ClayConnectedProvider *provider,
                                                const char *model, uint64_t *version) {
@@ -599,14 +728,15 @@ int clay_commands_save_grok_credentials(ClayConnectedProvider *provider,
   if (!provider || !provider->config || !client) return -1;
   ClayGrokCredentials credentials = {0};
   int invalid = clay_grok_authentication_invalid(client);
-  if (!invalid && clay_grok_copy_credentials(client, &credentials) != 0) return -1;
   pthread_mutex_lock(&codex_credentials_lock);
   int rc = 0;
   ClayProviderConfig *config = provider->config;
   if (provider->grok_version != version) {
     rc = 1;
   } else if (invalid) {
-    if (!provider->environment_override) rc = clay_config_remove(config->id);
+    rc = -1;
+  } else if (clay_grok_copy_credentials(client, &credentials) != 0) {
+    rc = -1;
   } else if (!same_optional_string(config->access_token, credentials.access_token) ||
              !same_optional_string(config->refresh_token, credentials.refresh_token) ||
              !same_optional_string(config->id_token, credentials.id_token) ||
@@ -630,24 +760,20 @@ int clay_commands_save_grok_credentials(ClayConnectedProvider *provider,
   clay_grok_credentials_free(&credentials);
   return rc;
 }
-int clay_commands_save_codex_credentials(ClayConnectedProvider *provider,
-                                         const ClayOpenAICodex *client, uint64_t version) {
+static int save_codex_credentials(ClayConnectedProvider *provider,
+                                  const ClayOpenAICodex *client, uint64_t *version) {
   if (!provider || !provider->config || !client) return -1;
   ClayCodexCredentials credentials = {0};
   int invalid = clay_openai_codex_authentication_invalid(client);
-  if (!invalid) {
-    if (clay_openai_codex_copy_credentials(client, &credentials) != 0) {
-      clay_openai_codex_credentials_free(&credentials);
-      return -1;
-    }
-  }
   pthread_mutex_lock(&codex_credentials_lock);
   int rc = 0;
   ClayProviderConfig *config = provider->config;
-  if (provider->codex_version != version) {
+  if (provider->codex_version != *version) {
     rc = 1;
   } else if (invalid) {
     if (!provider->environment_override) rc = clay_config_remove(config->id);
+  } else if (clay_openai_codex_copy_credentials(client, &credentials) != 0) {
+    rc = -1;
   } else if (!same_optional_string(config->access_token, credentials.access_token) ||
              !same_optional_string(config->refresh_token, credentials.refresh_token) ||
              !same_optional_string(config->id_token, credentials.id_token) ||
@@ -665,6 +791,7 @@ int clay_commands_save_codex_credentials(ClayConnectedProvider *provider,
       config->expires_at = credentials.expires_at;
       memset(&credentials, 0, sizeof(credentials));
       provider->codex_version++;
+      *version = provider->codex_version;
       if (!provider->environment_override) rc = clay_config_save(config);
     }
   } else if (!provider->environment_override) {
@@ -672,6 +799,144 @@ int clay_commands_save_codex_credentials(ClayConnectedProvider *provider,
   }
   pthread_mutex_unlock(&codex_credentials_lock);
   clay_openai_codex_credentials_free(&credentials);
+  return rc;
+}
+
+int clay_commands_save_codex_credentials(ClayConnectedProvider *provider,
+                                         const ClayOpenAICodex *client, uint64_t version) {
+  return save_codex_credentials(provider, client, &version);
+}
+
+typedef struct {
+  ClayConnectedProvider *provider;
+  uint64_t version;
+} CodexRefreshSave;
+
+static int begin_codex_refresh(void *userdata, ClayOpenAICodex *client,
+    int (*should_abort)(void *), void *abort_userdata) {
+  CodexRefreshSave *save = userdata;
+  int rc = clay_commands_codex_refresh_begin(save->provider, save->version,
+                                              should_abort, abort_userdata);
+  if (rc != 1) return rc;
+  uint64_t version;
+  ClayOpenAICodex *copy = clay_commands_codex_snapshot(save->provider, NULL, &version);
+  if (!copy) return -1;
+  ClayCodexCredentials credentials = {0};
+  clay_openai_codex_swap_credentials(copy, &credentials);
+  clay_openai_codex_swap_credentials(client, &credentials);
+  clay_openai_codex_credentials_free(&credentials);
+  clay_openai_codex_destroy(copy);
+  save->version = version;
+  return 1;
+}
+
+static void end_codex_refresh(void *userdata, int result) {
+  CodexRefreshSave *save = userdata;
+  clay_commands_codex_refresh_end(save->provider, result);
+}
+
+static int save_codex_refresh(void *userdata, ClayOpenAICodex *client) {
+  CodexRefreshSave *save = userdata;
+  ClayConnectedProvider *provider = save->provider;
+  pthread_mutex_lock(&codex_credentials_lock);
+  ClayProviderConfig *config = provider->config;
+  if (provider->codex_version != save->version || provider->codex_version == UINT64_MAX) {
+    pthread_mutex_unlock(&codex_credentials_lock);
+    return -1;
+  }
+  ClayCodexCredentials credentials = {config->access_token, config->refresh_token,
+                                      config->id_token, config->account_id,
+                                      config->expires_at};
+  clay_openai_codex_swap_credentials(client, &credentials);
+  config->access_token = credentials.access_token;
+  config->refresh_token = credentials.refresh_token;
+  config->id_token = credentials.id_token;
+  config->account_id = credentials.account_id;
+  config->expires_at = credentials.expires_at;
+  provider->codex_version++;
+  int rc = provider->environment_override ? 0 : clay_config_save(config);
+  ClayOpenAICodex *copy = NULL;
+  if (!rc) {
+    ClayCodexCredentials published = {config->access_token, config->refresh_token,
+                                       config->id_token, config->account_id,
+                                       config->expires_at};
+    copy = clay_openai_codex_create(&published, NULL);
+    if (!copy) rc = -1;
+  }
+  if (!rc) {
+    ClayCodexCredentials old = {0};
+    clay_openai_codex_swap_credentials(copy, &old);
+    clay_openai_codex_swap_credentials(client, &old);
+    clay_openai_codex_credentials_free(&old);
+    save->version = provider->codex_version;
+  }
+  clay_openai_codex_destroy(copy);
+  pthread_mutex_unlock(&codex_credentials_lock);
+  return rc;
+}
+
+typedef struct {
+  ClayConnectedProvider *provider;
+  uint64_t version;
+} GrokRefreshSave;
+
+static int begin_grok_refresh(void *userdata, ClayGrok *client,
+    int (*should_abort)(void *), void *abort_userdata) {
+  GrokRefreshSave *save = userdata;
+  int rc = grok_refresh_begin(save->provider, save->version,
+                                              should_abort, abort_userdata);
+  if (rc != 1) return rc;
+  uint64_t version;
+  ClayGrok *copy = clay_commands_grok_snapshot(save->provider, NULL, &version);
+  if (!copy) return -1;
+  ClayGrokCredentials credentials = {0};
+  clay_grok_swap_credentials(copy, &credentials);
+  clay_grok_swap_credentials(client, &credentials);
+  clay_grok_credentials_free(&credentials);
+  clay_grok_destroy(copy);
+  save->version = version;
+  return 1;
+}
+
+static void end_grok_refresh(void *userdata, int result) {
+  GrokRefreshSave *save = userdata;
+  grok_refresh_end(save->provider, result);
+}
+
+static int save_grok_refresh(void *userdata, ClayGrok *client) {
+  GrokRefreshSave *save = userdata;
+  ClayConnectedProvider *provider = save->provider;
+  pthread_mutex_lock(&codex_credentials_lock);
+  ClayProviderConfig *config = provider->config;
+  if (provider->grok_version != save->version || provider->grok_version == UINT64_MAX) {
+    pthread_mutex_unlock(&codex_credentials_lock);
+    return -1;
+  }
+  ClayGrokCredentials credentials = {config->access_token, config->refresh_token,
+                                      config->id_token, config->expires_at};
+  clay_grok_swap_credentials(client, &credentials);
+  config->access_token = credentials.access_token;
+  config->refresh_token = credentials.refresh_token;
+  config->id_token = credentials.id_token;
+  config->expires_at = credentials.expires_at;
+  provider->grok_version++;
+  int rc = provider->environment_override ? 0 : clay_config_save(config);
+  ClayGrok *copy = NULL;
+  if (!rc) {
+    ClayGrokCredentials published = {config->access_token, config->refresh_token,
+                                    config->id_token, config->expires_at};
+    copy = clay_grok_create(&published, NULL);
+    if (!copy) rc = -1;
+  }
+  if (!rc) {
+    ClayGrokCredentials old = {0};
+    clay_grok_swap_credentials(copy, &old);
+    clay_grok_swap_credentials(client, &old);
+    clay_grok_credentials_free(&old);
+    save->version = provider->grok_version;
+  }
+  clay_grok_destroy(copy);
+  pthread_mutex_unlock(&codex_credentials_lock);
   return rc;
 }
 
@@ -1113,12 +1378,16 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
       clay_openai_codex_destroy(codex);
       return rc;
     }
+    CodexRefreshSave save = {provider, version};
+    clay_openai_codex_set_refresh_observer(codex, save_codex_refresh, &save);
+    clay_openai_codex_set_refresh_coordination(codex, begin_codex_refresh, end_codex_refresh, &save);
     clay_openai_codex_set_reasoning_effort(codex, effort);
     clay_openai_codex_set_prompt_cache_key(codex, cache_key);
     int rc = clay_openai_codex_run(codex, messages, tool_list, tool_count,
                                    max_rounds, callbacks);
     /* Save a refresh or rotated refresh token before discarding the client. */
-    clay_commands_save_codex_credentials(provider, codex, version);
+    if (save_codex_credentials(provider, codex, &save.version) < 0)
+      rc = -1;
     clay_openai_codex_destroy(codex);
     return rc;
   }
@@ -1133,11 +1402,15 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
       clay_grok_destroy(grok);
       return rc;
     }
+    GrokRefreshSave save = {provider, version};
+    clay_grok_set_refresh_observer(grok, save_grok_refresh, &save);
+    clay_grok_set_refresh_coordination(grok, begin_grok_refresh, end_grok_refresh, &save);
     clay_grok_set_reasoning_effort(grok, effort);
     clay_grok_set_conversation_id(grok, cache_key);
     int rc =
         clay_grok_run(grok, messages, tool_list, tool_count, max_rounds, callbacks);
-    clay_commands_save_grok_credentials(provider, grok, version);
+    if (clay_commands_save_grok_credentials(provider, grok, save.version) < 0)
+      rc = -1;
     clay_grok_destroy(grok);
     return rc;
   }
@@ -1352,21 +1625,32 @@ int clay_commands_fetch_models(void *ctx, ClayArray *out) {
     ClayTask *task =
         clay_task_start("Retrieving %s models", provider->type->label);
     if (strcmp(provider->type->id, "openai-codex") == 0) {
-      uint64_t version;
+      uint64_t version = 0;
       ClayOpenAICodex *codex = clay_commands_codex_snapshot(provider, NULL, &version);
+      CodexRefreshSave save = {provider, version};
+      if (codex) {
+        clay_openai_codex_set_refresh_observer(codex, save_codex_refresh, &save);
+        clay_openai_codex_set_refresh_coordination(codex, begin_codex_refresh, end_codex_refresh, &save);
+      }
       provider->models_rc = codex ? clay_openai_codex_list_models(codex, &provider->models) : -1;
       provider->models_status = codex ? clay_openai_codex_last_status(codex) : 0;
-      if (provider->models_rc == 0)
-        clay_commands_save_codex_credentials(provider, codex, version);
+      if (provider->models_rc == 0 &&
+          save_codex_credentials(provider, codex, &save.version) < 0)
+        provider->models_rc = -1;
       clay_openai_codex_destroy(codex);
     } else if (strcmp(provider->type->id, "grok") == 0 &&
                provider->grok_client) {
-      uint64_t version;
+      uint64_t version = 0;
       ClayGrok *grok = clay_commands_grok_snapshot(provider, NULL, &version);
+      GrokRefreshSave save = {provider, version};
+      if (grok) {
+        clay_grok_set_refresh_observer(grok, save_grok_refresh, &save);
+        clay_grok_set_refresh_coordination(grok, begin_grok_refresh, end_grok_refresh, &save);
+      }
       provider->models_rc = grok ? clay_grok_list_models(grok, &provider->models) : -1;
       provider->models_status = grok ? clay_grok_last_status(grok) : 0;
-      if (provider->models_rc == 0)
-        clay_commands_save_grok_credentials(provider, grok, version);
+      if (grok && clay_commands_save_grok_credentials(provider, grok, save.version) < 0)
+        provider->models_rc = -1;
       clay_grok_destroy(grok);
     } else {
       provider->models_rc =

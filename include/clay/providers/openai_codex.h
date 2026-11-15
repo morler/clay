@@ -32,6 +32,16 @@ ClayOpenAICodex *
 clay_openai_codex_create(const ClayCodexCredentials *credentials,
                          const char *model);
 void clay_openai_codex_destroy(ClayOpenAICodex *client);
+/* Called synchronously after a successful token rotation. */
+void clay_openai_codex_set_refresh_observer(ClayOpenAICodex *client,
+    int (*observer)(void *, ClayOpenAICodex *), void *userdata);
+/* begin returns 0 for ownership, 1 for adopted credentials, 2 for cancellation. */
+void clay_openai_codex_set_refresh_coordination(ClayOpenAICodex *client,
+    int (*begin)(void *, ClayOpenAICodex *, int (*)(void *), void *),
+    void (*end)(void *, int), void *userdata);
+/* Exchange owned credential strings without allocating. */
+void clay_openai_codex_swap_credentials(ClayOpenAICodex *client,
+                                         ClayCodexCredentials *credentials);
 /* NULL omits reasoning from Responses requests and uses the model default. */
 void clay_openai_codex_set_reasoning_effort(ClayOpenAICodex *client,
                                             const char *effort);

@@ -183,7 +183,7 @@ TARGET_WIN    := $(BIN_DIR_WIN)/clay.exe
 OBJ_WIN := $(patsubst src/%.c,$(BUILD_DIR_WIN)/%.o,$(SRC_WIN))
 DEP_WIN := $(OBJ_WIN:.o=.d)
 
-UNIT_TEST_TARGETS := $(BIN_DIR)/test_workspace_fd $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(MESSAGE_TEST_TARGET) $(CHAT_TEST_TARGET) \
+UNIT_TEST_TARGETS := $(BIN_DIR)/test_reasoning $(BIN_DIR)/test_reasoning_codex $(BIN_DIR)/test_workspace_fd $(CLI_TEST_TARGET) $(COMMAND_TEST_TARGET) $(MESSAGE_TEST_TARGET) $(CHAT_TEST_TARGET) \
 	$(UUID_TEST_TARGET) $(MEMORY_TEST_TARGET) $(SANDBOX_TEST_TARGET) \
 	$(FS_TOOLS_TEST_TARGET) $(CHECKPOINT_TEST_TARGET) $(PERMISSIONS_TEST_TARGET) \
 	$(CONTEXT_COMPACT_TEST_TARGET) $(PROJECT_INSTRUCTIONS_TEST_TARGET) \
@@ -471,3 +471,9 @@ clean:
 -include $(DEP_WIN)
 -include $(DEP_RELEASE)
 -include $(TEST_DEP)
+
+$(BIN_DIR)/test_reasoning: $(filter-out $(BUILD_DIR)/providers/openai.o $(BUILD_DIR)/providers/grok.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_reasoning.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)
+
+$(BIN_DIR)/test_reasoning_codex: $(filter-out $(BUILD_DIR)/providers/openai_codex.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_reasoning_codex.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS)

@@ -255,7 +255,8 @@ static const ClayReasoningEffort REASONING_EFFORTS[] = {
     {"low", "Low", "Favor lower latency and token use when supported."},
     {"medium", "Medium", "Balance reasoning depth, latency, and token use."},
     {"high", "High", "Favor deeper reasoning when supported."},
-    {"xhigh", "XHigh", "Use the highest reasoning level when supported."},
+    {"xhigh", "XHigh", "Use very deep reasoning when supported."},
+    {"max", "Max", "Request maximum reasoning when supported."},
 };
 
 static const char *env_value(const char *first, const char *second) {
@@ -652,7 +653,8 @@ void clay_commands_update_selected_below(ClayCommands *commands) {
                     clay_color(CLAY_RESET), clay_color(CLAY_GRAY),
                     clay_color(CLAY_RESET), clay_color(CLAY_GRAY),
                     commands->selected_provider, clay_color(CLAY_RESET),
-                    clay_color(CLAY_GRAY), clay_color(CLAY_CYAN), effort->label,
+                    clay_color(CLAY_GRAY), clay_color(CLAY_CYAN),
+                    effort->label,
                     clay_color(CLAY_GRAY), clay_color(CLAY_RESET));
   } else {
     clay_str_push(&text, "None");
@@ -1027,6 +1029,7 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
   const ClayTool *tool_list = tools ? tools->tools.data : NULL;
   size_t tool_count = tools ? tools->tools.count : 0;
   const char *effort = clay_commands_reasoning_effort(commands)->id;
+  int is_openrouter = strcmp(provider->type->id, "openrouter") == 0;
   int is_codex = strcmp(provider->type->id, "openai-codex") == 0;
   int is_grok_subscription =
       strcmp(provider->type->id, "grok") == 0 && provider->grok_client != NULL;
@@ -1069,7 +1072,10 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
                          commands->selected_model);
   if (!client)
     return -1;
-  clay_openai_set_reasoning_effort(client, effort);
+  if (is_openrouter && effort && strcmp(effort, "max") == 0)
+    clay_openai_set_openrouter_max_reasoning(client);
+  else
+    clay_openai_set_reasoning_effort(client, effort);
   if (strcmp(provider->type->id, "openai") == 0)
     clay_openai_set_prompt_cache_key(client, cache_key);
   else if (strcmp(provider->type->id, "grok") == 0)

@@ -32,6 +32,7 @@ static void test_provider_selection(void) {
     assert(commands);
     assert(commands->selected_provider && strcmp(commands->selected_provider, "custom") == 0);
     assert(commands->selected_model && strcmp(commands->selected_model, "saved-model") == 0);
+    assert(!clay_commands_reasoning_effort(commands)->id);
     clay_commands_destroy(commands);
 
     assert(setenv("CLAY_PROVIDER", "openai", 1) == 0);
@@ -56,6 +57,11 @@ int main(void) {
     assert(clearenv() == 0);
     assert(setenv("HOME", home, 1) == 0);
     test_provider_selection();
+    assert(clay_config_set_reasoning_effort("max") == 0);
+    ClayCommands *effort_commands = clay_commands_create(NULL);
+    assert(strcmp(clay_commands_reasoning_effort(effort_commands)->id, "max") == 0);
+    assert(strcmp(clay_commands_reasoning_effort(effort_commands)->label, "Max") == 0);
+    clay_commands_destroy(effort_commands);
     assert(clay_sandbox_supported()); /* the 4-way cycle needs a real sandbox */
 
     ClayCommands commands;

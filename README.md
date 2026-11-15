@@ -203,7 +203,9 @@ separate.
 | `/connect [openai\|openai-codex\|grok\|openrouter\|groq\|deepseek\|mistral\|together\|custom]` (`/login`, `/provider`, `/providers`) | Connect a provider. OpenAI Codex uses ChatGPT Plus/Pro OAuth; Groq, DeepSeek, Mistral, and Together AI use their OpenAI-compatible APIs with preset base URLs. |
 | `/logout` | Choose a connected provider and remove its saved session. |
 | `/model [id]` (`/models`) | Browse models by provider, or set an id directly. |
-| `/effort` | Set the model reasoning effort when supported. |
+| `/effort` | Set the model reasoning effort when supported. Max is sent explicitly; support depends on the provider and model. |
+
+For max, OpenRouter and Codex receive reasoning.effort, and other OpenAI-compatible providers (including custom and Grok) receive reasoning_effort. Unsupported values may be rejected by the service; Clay does not downgrade them. OpenRouter maps both max and xhigh to approximately 95% of the reasoning token budget; actual behavior depends on the model. See [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
 ### Safety & control
 

@@ -23,6 +23,7 @@ struct ClayOpenAI {
   char *api_key;
   char *model;
   char *reasoning_effort;
+  int openrouter_max_reasoning;
   char *prompt_cache_key;
   ClayOpenAIHeader extra_headers[CLAY_OPENAI_EXTRA_HEADERS_LIMIT];
   size_t extra_header_count;
@@ -136,6 +137,12 @@ long clay_openai_last_status(const ClayOpenAI *client) {
 void clay_openai_set_reasoning_effort(ClayOpenAI *client, const char *effort) {
   free(client->reasoning_effort);
   client->reasoning_effort = effort ? strdup(effort) : NULL;
+  client->openrouter_max_reasoning = 0;
+}
+
+void clay_openai_set_openrouter_max_reasoning(ClayOpenAI *client) {
+  clay_openai_set_reasoning_effort(client, NULL);
+  client->openrouter_max_reasoning = 1;
 }
 
 int clay_openai_list_models(ClayOpenAI *client, ClayArray *models) {
@@ -445,7 +452,11 @@ static ClayStr build_request_body(ClayOpenAI *client, const ClayJson *messages,
   if (client->prompt_cache_key)
     clay_json_object_set(root, "prompt_cache_key",
                          clay_json_string(client->prompt_cache_key));
-  if (client->reasoning_effort) {
+  if (client->openrouter_max_reasoning) {
+    ClayJson *reasoning = clay_json_object();
+    clay_json_object_set(reasoning, "effort", clay_json_string("max"));
+    clay_json_object_set(root, "reasoning", reasoning);
+  } else if (client->reasoning_effort) {
     clay_json_object_set(root, "reasoning_effort",
                          clay_json_string(client->reasoning_effort));
   }

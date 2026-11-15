@@ -35,6 +35,8 @@ int clay_openai_set_extra_header(ClayOpenAI *client, const char *name,
 long clay_openai_last_status(const ClayOpenAI *client);
 /* NULL omits reasoning_effort from requests and uses the provider default. */
 void clay_openai_set_reasoning_effort(ClayOpenAI *client, const char *effort);
+/* OpenRouter Chat Completions uses reasoning.effort for max. */
+void clay_openai_set_openrouter_max_reasoning(ClayOpenAI *client);
 
 /* Retrieves every id returned by the provider's OpenAI-compatible
    `GET /models` endpoint. `models` must be a ClayArray of `char *`;

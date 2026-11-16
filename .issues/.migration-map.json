@@ -1,0 +1,726 @@
+{
+  "source": "lif",
+  "target": "git-issues",
+  "migrated_at": "2026-11-16T16:16:04.656491+00:00",
+  "migration_issue_id": 1,
+  "first_issue_id": 2,
+  "source_counts": {
+    "items": 59,
+    "by_status": {
+      "draft": 5,
+      "completed": 44,
+      "in-progress": 6,
+      "todo": 4
+    },
+    "by_type": {
+      "task": 47,
+      "feature": 3,
+      "bug": 9
+    },
+    "by_priority": {
+      "normal": 58,
+      "high": 1
+    }
+  },
+  "issues": [
+    {
+      "lif_id": "clay-3r23",
+      "issue_id": 2,
+      "title": "验证并适配 Windows Unicode 控制台输入",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:3",
+        "draft"
+      ]
+    },
+    {
+      "lif_id": "clay-4lb4",
+      "issue_id": 3,
+      "title": "修复中文输入与终端显示支持",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:feature",
+        "draft"
+      ]
+    },
+    {
+      "lif_id": "clay-505n",
+      "issue_id": 4,
+      "title": "修复中文显示宽度和流式输出",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:3",
+        "draft"
+      ]
+    },
+    {
+      "lif_id": "clay-69su",
+      "issue_id": 5,
+      "title": "中文支持端到端回归验证",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:3",
+        "draft"
+      ]
+    },
+    {
+      "lif_id": "clay-ogb9",
+      "issue_id": 6,
+      "title": "统一 UTF-8 边界和终端列宽处理",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:3"
+      ]
+    },
+    {
+      "lif_id": "clay-p83r",
+      "issue_id": 7,
+      "title": "修复中文编辑和粘贴识别",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:3",
+        "draft"
+      ]
+    },
+    {
+      "lif_id": "clay-ijou",
+      "issue_id": 8,
+      "title": "修复保存的 provider 启动选择",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    },
+    {
+      "lif_id": "clay-mqh4",
+      "issue_id": 9,
+      "title": "运行 supercov 质量评估",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task"
+      ]
+    },
+    {
+      "lif_id": "clay-if52",
+      "issue_id": 10,
+      "title": "核实质量评估并修复确定缺陷",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task"
+      ]
+    },
+    {
+      "lif_id": "clay-nb73",
+      "issue_id": 11,
+      "title": "修复质量审查的文件边界和权限问题",
+      "status": "in-progress",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task"
+      ]
+    },
+    {
+      "lif_id": "clay-guq0",
+      "issue_id": 12,
+      "title": "文件工具防止符号链接竞态",
+      "status": "in-progress",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-zqs6",
+      "issue_id": 13,
+      "title": "修复 Windows 工作区路径解析",
+      "status": "in-progress",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    },
+    {
+      "lif_id": "clay-zul5",
+      "issue_id": 14,
+      "title": "沙箱内挂载 /etc/alternatives，修复 Fedora 上 shell 命令缺失",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    },
+    {
+      "lif_id": "clay-1m1e",
+      "issue_id": 15,
+      "title": "Linux 文件工具竞态防护",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:feature"
+      ]
+    },
+    {
+      "lif_id": "clay-07dm",
+      "issue_id": 16,
+      "title": "建立 grep 行为与竞态基线",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-6n35",
+      "issue_id": 17,
+      "title": "实现 undo 乐观冲突检测",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-h7s8",
+      "issue_id": 18,
+      "title": "定义 Linux 竞态威胁模型与安全契约",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-imjp",
+      "issue_id": 19,
+      "title": "加固 write 和 edit 提交及权限",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-jk7c",
+      "issue_id": 20,
+      "title": "加固 glob 和 repo-map 遍历到读取",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-mqrk",
+      "issue_id": 21,
+      "title": "梳理 write edit undo 检查提交链路",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-mubf",
+      "issue_id": 22,
+      "title": "构建确定性交错与强制回退测试",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-u610",
+      "issue_id": 23,
+      "title": "加固 Linux grep 的 FD 读取",
+      "status": "in-progress",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-uska",
+      "issue_id": 24,
+      "title": "README 与 lif 收尾",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-uxeh",
+      "issue_id": 25,
+      "title": "按需统一共享路径解析",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-w8rj",
+      "issue_id": 26,
+      "title": "基线与未提交改动审查",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-wnop",
+      "issue_id": 27,
+      "title": "审核已有 workspace_fd 实现及测试",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-x1fn",
+      "issue_id": 28,
+      "title": "确定 openat2 降级与错误策略",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-x1q4",
+      "issue_id": 29,
+      "title": "全量测试与 Linux 正常回退竞态矩阵",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:15"
+      ]
+    },
+    {
+      "lif_id": "clay-ni3u",
+      "issue_id": 30,
+      "title": "修复新文件原子提交及清理错误",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    },
+    {
+      "lif_id": "clay-d3og",
+      "issue_id": 31,
+      "title": "增加 max 思考等级",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task"
+      ]
+    },
+    {
+      "lif_id": "clay-7cyn",
+      "issue_id": 32,
+      "title": "修复 max 思考等级的非 OpenRouter 提示",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    },
+    {
+      "lif_id": "clay-c8lo",
+      "issue_id": 33,
+      "title": "429 自适应限流与安全重试（两阶段）",
+      "status": "open",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:feature"
+      ]
+    },
+    {
+      "lif_id": "clay-5jth",
+      "issue_id": 34,
+      "title": "一阶段：保留响应限流头与错误信息",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-onc0",
+      "issue_id": 35,
+      "title": "一阶段：识别 HTTP 与 SSE 中的 429",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-h8nw",
+      "issue_id": 36,
+      "title": "一阶段：安全边界内有限重试与取消",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-7609",
+      "issue_id": 37,
+      "title": "一阶段：确定性 mock 回归与兼容验证",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-s4rb",
+      "issue_id": 38,
+      "title": "二阶段：进程内共享配额作用域和生命周期",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-2jq8",
+      "issue_id": 39,
+      "title": "二阶段：自适应 RPM、并发与冷却调度",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-tg6w",
+      "issue_id": 40,
+      "title": "二阶段：TPM 预算估算与实际 usage 校准",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-8mkl",
+      "issue_id": 41,
+      "title": "二阶段：端到端压力回归与限制说明",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-6cks",
+      "issue_id": 42,
+      "title": "一阶段细化：捕获最终响应头与错误体",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-0tzp",
+      "issue_id": 43,
+      "title": "细化：分类 HTTP 429 与永久配额错误",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-79q6",
+      "issue_id": 44,
+      "title": "细化：分类 SSE 中明确的 429",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-m6zq",
+      "issue_id": 45,
+      "title": "细化：解析 Retry-After 秒数与日期",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-w8im",
+      "issue_id": 46,
+      "title": "细化：重试安全边界与临时状态清理",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-0ac5",
+      "issue_id": 47,
+      "title": "细化：TPM 估算与并发预算预留",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-0oh1",
+      "issue_id": 48,
+      "title": "细化：有限退避预算与可取消等待",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-3566",
+      "issue_id": 49,
+      "title": "细化：usage 结算与异常记账",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-56ky",
+      "issue_id": 50,
+      "title": "细化：默认策略与限制文档",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-dxtk",
+      "issue_id": 51,
+      "title": "细化：permit 排队及取消释放",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-exbv",
+      "issue_id": 52,
+      "title": "细化：离线 mock 场景与资源回归",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-j7un",
+      "issue_id": 53,
+      "title": "细化：共享 scope 身份与对象生命周期",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-psns",
+      "issue_id": 54,
+      "title": "细化：RPM 响应信号与冷却恢复",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-pwho",
+      "issue_id": 55,
+      "title": "细化：端到端并发离线压力回归",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-usy4",
+      "issue_id": 56,
+      "title": "细化：reasoning 与现有 provider 兼容回归",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-zn7b",
+      "issue_id": 57,
+      "title": "细化：共享状态线程安全与取消",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:task",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-k2gt",
+      "issue_id": 58,
+      "title": "修复一阶段 429 审查缺陷",
+      "status": "closed",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug",
+        "parent:33"
+      ]
+    },
+    {
+      "lif_id": "clay-m0er",
+      "issue_id": 59,
+      "title": "修复 subagent 终端取消事件归属",
+      "status": "in-progress",
+      "priority": "medium",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    },
+    {
+      "lif_id": "clay-mcxf",
+      "issue_id": 60,
+      "title": "修复并发 worker 的 Codex/Grok OAuth 凭据竞态",
+      "status": "in-progress",
+      "priority": "high",
+      "labels": [
+        "source:lif",
+        "type:bug"
+      ]
+    }
+  ]
+}

@@ -116,6 +116,8 @@ void clay_scope_release(ClayScope *scope);
 
 typedef int (*ClayCompletionTestHook)(ClayScope *, const ClayOpenAICallbacks *, void *);
 void clay_scope_test_fail_allocation(ClayScopeRegistry *registry, int nth);
+void clay_scope_test_cancel_poll_ms(ClayScope *scope, int ms);
+int clay_scope_test_waits(ClayScope *scope);
 
 struct ClayCommands {
   ClayApp *app;

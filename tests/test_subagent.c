@@ -925,6 +925,48 @@ static int abort_after_acquire(void *arg) {
     return ++*calls == 2;
 }
 
+static void *wake_scope(void *arg) {
+    ClayScope *scope = arg;
+    if (clay_scope_acquire(scope, NULL, NULL)) clay_scope_release(scope);
+    return NULL;
+}
+
+static void test_scope_wakeup(void) {
+    ClayScopeRegistry *registry = clay_scope_registry_create();
+    assert(registry);
+    ClayScope *scope = clay_scope_get(registry, 1, "endpoint", "wake");
+    assert(scope);
+    /* Cancellation polling is pushed far out so only release() can wake the waiter. */
+    clay_scope_test_cancel_poll_ms(scope, 5000);
+    assert(clay_scope_acquire(scope, NULL, NULL));
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, wake_scope, scope));
+    struct timespec started, now, deadline;
+    assert(!clock_gettime(CLOCK_MONOTONIC, &started));
+    while (!clay_scope_test_waits(scope)) {
+        assert(!clock_gettime(CLOCK_MONOTONIC, &now));
+        assert((now.tv_sec - started.tv_sec) * 1000 + (now.tv_nsec - started.tv_nsec) / 1000000 < 1000);
+        clay_term_sleep_ms(1);
+    }
+    int waits = clay_scope_test_waits(scope);
+    clay_term_sleep_ms(50);
+    /* Temporal detector: a waiter that only polls still advances waits. */
+    int waited = clay_scope_test_waits(scope);
+    assert(waited == waits);
+    clay_scope_release(scope);
+    assert(!clock_gettime(CLOCK_REALTIME, &deadline));
+    deadline.tv_sec++;
+    assert(!pthread_timedjoin_np(thread, NULL, &deadline));
+    assert(!clock_gettime(CLOCK_MONOTONIC, &now));
+    long elapsed_ms = (now.tv_sec - started.tv_sec) * 1000 + (now.tv_nsec - started.tv_nsec) / 1000000;
+    assert(elapsed_ms < 1000);
+    /* The woken waiter returned its permit; nobody is stuck holding it. */
+    assert(clay_scope_acquire(scope, NULL, NULL));
+    clay_scope_release(scope);
+    clay_scope_test_cancel_poll_ms(scope, 1);
+    clay_scope_registry_destroy(registry);
+}
+
 static void test_scope_wait(void) {
     ClayScopeRegistry *registry = clay_scope_registry_create();
     assert(registry);
@@ -1279,6 +1321,7 @@ int main(void) {
     test_grok_invalid_grant_preserves_config();
 
     test_scope_wait();
+    test_scope_wakeup();
     test_scopes();
     test_concurrent_scope_failure();
     test_provider_generations();

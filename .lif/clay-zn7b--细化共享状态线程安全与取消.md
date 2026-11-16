@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-15T03:55:04Z
-updated_at: 2026-11-16T02:14:14Z
+updated_at: 2026-11-16T03:03:15Z
 parent: clay-c8lo
 blocking:
     - clay-s4rb
@@ -26,3 +26,13 @@ blocked_by:
 本轮：tests/test_subagent.c 强化真实 scope permit 测试：持有同 scope 时等待线程至少经历两次取消检查，验证取消退出和释放后获取；异 scope 在线程中获取并有界 join。make test-subagent test-pty 通过，test_subagent 额外重复 3 次通过；git diff --check 通过。TSAN 独立编译成功，运行报告 src/render/term.c:69 handle_sigint 写 g_interrupted 与 src/render/term.c:1578 clay_term_take_interrupt 读取之间 data race（经 subagent batch 轮询），退出 66；测试本身结束但不能声称线程安全。permit 尚未接入 provider 请求，现有 completion hook 仅验证 scope 身份，不能视为实际调度验证；批次创建/失败和并发 destroy 尚未完整覆盖。clay-m0er 取消事件归属边界和普通输入丢失未解决，验收不满足，保持 in-progress。
 
 本轮：src/render/term.c 将 g_interrupted 改为编译期要求 ATOMIC_INT_LOCK_FREE == 2 的 C11 原子 int，信号处理器仅 relaxed 原子存储，消费者用 atomic_exchange 单次消费；粘贴中断直接交换以避免检查与清除间丢信号。tests/test_subagent.c 新增 1000 轮 SIGINT 后双线程竞争单次消费测试，并保留同批取消及后续批次测试。make test-subagent test-pty 和 make test 通过；独立 GCC ThreadSanitizer 构建及 test_subagent 运行通过（退出 0）；git diff --check、lif check 通过。未验证 Windows 构建或运行；不支持始终 lock-free int 的目标会编译失败。既有其他共享状态、输入归属及 scope/provider 集成风险未消除，本 item 保持 in-progress。
+
+
+本轮：src/commands/scope.c 的允许等待改为条件变量。ClayScope 新增 pthread_cond_t released 与 waits 计数；clay_scope_acquire 在 scope->lock 内以 pthread_cond_timedwait 等待（期限仅用于按 CLAY_SCOPE_CANCEL_POLL_MS=20 轮询锁外取消回调），无期限时退化为 pthread_cond_wait；clay_scope_release 置 occupied=0 后 pthread_cond_signal。scope_alloc 走 malloc，故新增字段在创建分支显式清零（此前未清零导致 cancel_poll_ms/waits 读到垃圾值）。新增测试钩子 clay_scope_test_cancel_poll_ms 与 clay_scope_test_waits（context.h 声明）。
+
+tests/test_subagent.c 新增 test_scope_wakeup：把取消轮询拉到 5000ms，使只有 release() 能唤醒等待者；先确认等待线程已进入条件等待（waits>0 且 1 秒内有界），再断言 50ms 内未自旋（waits 不增长，探测到轮询式实现），release 后 1 秒内有界 join 且耗时 <1000ms，最后验证 permit 已归还可再次获取。变异验证：删除 pthread_cond_signal 后该测试以 join 超时断言失败，说明断言确实依赖唤醒。
+
+验证：make -j8 test-subagent test-tasks 通过；make -j8 test 通过；git diff --check 通过；独立 GCC ThreadSanitizer 构建（/tmp/tsan2，OPT=-O1 -g -fsanitize=thread）运行 test_subagent 退出 0、无 TSAN 报告，此前 term.c g_interrupted 的 data race 不再出现。未覆盖：make test-pty 在本轮前后（含干净 HEAD b5cbba2）均失败于 viewport redraw timed out，属既有问题（中文输入重绘，clay-4lb4/clay-505n 范围），与本改动无关；未做泄漏专项（valgrind/ASAN）；permit 仍未接入 provider 请求，真实服务与 Windows 未验证。
+
+
+泄漏检查补充：AddressSanitizer 独立构建（/tmp/asan，OPT=-O1 -g -fsanitize=address）运行 test_subagent 仅有 tests/test_subagent.c:699-704 的 retry_config fixture 泄漏（5 个 strdup 共 414 字节，属既有测试夹具），src/commands/scope.c 无任何泄漏帧。TSAN 与 ASAN 均无 scope 相关报告。

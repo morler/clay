@@ -8,7 +8,10 @@ struct ClayScope {
   unsigned char endpoint[32];
   unsigned char model[32];
   pthread_mutex_t lock;
+  pthread_cond_t released;
   int occupied;
+  int waits; /* test hook: number of cond waits so far */
+  int cancel_poll_ms; /* test hook; 0 means the default */
   struct ClayScope *next;
 };
 
@@ -40,6 +43,7 @@ void clay_scope_registry_destroy(ClayScopeRegistry *registry) {
   ClayScope *scope = registry->head;
   while (scope) {
     ClayScope *next = scope->next;
+    pthread_cond_destroy(&scope->released);
     pthread_mutex_destroy(&scope->lock);
     free(scope);
     scope = next;
@@ -52,6 +56,19 @@ void clay_scope_test_fail_allocation(ClayScopeRegistry *registry, int nth) {
   pthread_mutex_lock(&registry->lock);
   registry->fail_allocation = nth;
   pthread_mutex_unlock(&registry->lock);
+}
+
+void clay_scope_test_cancel_poll_ms(ClayScope *scope, int ms) {
+  pthread_mutex_lock(&scope->lock);
+  scope->cancel_poll_ms = ms;
+  pthread_mutex_unlock(&scope->lock);
+}
+
+int clay_scope_test_waits(ClayScope *scope) {
+  pthread_mutex_lock(&scope->lock);
+  int waits = scope->waits;
+  pthread_mutex_unlock(&scope->lock);
+  return waits;
 }
 
 static void *scope_alloc(ClayScopeRegistry *registry, size_t size) {
@@ -102,8 +119,15 @@ ClayScope *clay_scope_get(ClayScopeRegistry *registry, uint64_t generation,
       free(scope);
       scope = NULL;
     }
+    if (scope && pthread_cond_init(&scope->released, NULL) != 0) {
+      pthread_mutex_destroy(&scope->lock);
+      free(scope);
+      scope = NULL;
+    }
     if (scope) {
       scope->occupied = 0;
+      scope->waits = 0;
+      scope->cancel_poll_ms = 0;
       scope->generation = generation;
       memcpy(scope->endpoint, endpoint_hash, 32);
       memcpy(scope->model, model_hash, 32);
@@ -115,29 +139,52 @@ ClayScope *clay_scope_get(ClayScopeRegistry *registry, uint64_t generation,
   return scope;
 }
 
+/* The wait deadline exists only so cancellation gets polled from the lock-free callback. */
+#define CLAY_SCOPE_CANCEL_POLL_MS 20
+
+static int scope_deadline(ClayScope *scope, struct timespec *deadline) {
+  if (clock_gettime(CLOCK_REALTIME, deadline) != 0)
+    return -1;
+  int ms = scope->cancel_poll_ms > 0 ? scope->cancel_poll_ms : CLAY_SCOPE_CANCEL_POLL_MS;
+  deadline->tv_sec += ms / 1000;
+  deadline->tv_nsec += (long)(ms % 1000) * 1000000L;
+  if (deadline->tv_nsec >= 1000000000L) {
+    deadline->tv_sec++;
+    deadline->tv_nsec -= 1000000000L;
+  }
+  return 0;
+}
+
 int clay_scope_acquire(ClayScope *scope, int (*should_abort)(void *), void *userdata) {
   for (;;) {
     if (should_abort && should_abort(userdata))
       return 0;
     pthread_mutex_lock(&scope->lock);
     int acquired = !scope->occupied;
-    if (acquired)
-      scope->occupied = 1;
-    pthread_mutex_unlock(&scope->lock);
     if (acquired) {
-      if (should_abort && should_abort(userdata)) {
-        clay_scope_release(scope);
-        return 0;
-      }
-      return 1;
+      scope->occupied = 1;
+      pthread_mutex_unlock(&scope->lock);
+    } else {
+      scope->waits++;
+      struct timespec deadline;
+      if (scope_deadline(scope, &deadline) == 0)
+        pthread_cond_timedwait(&scope->released, &scope->lock, &deadline);
+      else
+        pthread_cond_wait(&scope->released, &scope->lock);
+      pthread_mutex_unlock(&scope->lock);
+      continue;
     }
-    /* shortcut: cancellation is polled every 20 ms, upgrade for explicit wakeups. */
-    clay_term_sleep_ms(20);
+    if (should_abort && should_abort(userdata)) {
+      clay_scope_release(scope);
+      return 0;
+    }
+    return 1;
   }
 }
 
 void clay_scope_release(ClayScope *scope) {
   pthread_mutex_lock(&scope->lock);
   scope->occupied = 0;
+  pthread_cond_signal(&scope->released);
   pthread_mutex_unlock(&scope->lock);
 }

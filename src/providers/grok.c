@@ -486,14 +486,20 @@ int clay_grok_list_models(ClayGrok *client, ClayArray *models) {
      no model has been selected yet. */
   ClayOpenAIHeader headers[] = {{"X-XAI-Token-Auth", GROK_TOKEN_AUTH},
                                 {"x-grok-client-version", GROK_CLIENT_VERSION}};
-  ClayOpenAI *catalog = clay_openai_create_with_headers(
-      CLAY_GROK_SUBSCRIPTION_URL, client->credentials.access_token, "", headers,
-      2);
-  if (!catalog)
-    return -1;
-  int rc = clay_openai_list_models(catalog, models);
-  clay_openai_destroy(catalog);
-  return rc;
+  /* One retry after a 401/403 refresh; the catalog client copies the token at creation. */
+  for (int attempt = 0; attempt < 2; attempt++) {
+    ClayOpenAI *catalog = clay_openai_create_with_headers(
+        CLAY_GROK_SUBSCRIPTION_URL, client->credentials.access_token, "", headers,
+        2);
+    if (!catalog)
+      return -1;
+    int rc = clay_openai_list_models(catalog, models);
+    long status = clay_openai_last_status(catalog);
+    clay_openai_destroy(catalog);
+    if (rc == 0 || attempt || (status != 401 && status != 403) || refresh(client) != 0)
+      return rc;
+  }
+  return -1;
 }
 static int refresh_for_run(void *userdata) {
   return refresh(userdata);

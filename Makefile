@@ -501,5 +501,5 @@ $(BIN_DIR)/test_provider_retry: $(BUILD_DIR)/tests/test_provider_retry.o $(BUILD
 $(BIN_DIR)/test_openai_codex_refresh: $(filter-out $(BUILD_DIR)/providers/openai_codex.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_openai_codex_refresh.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS)
 
-$(BIN_DIR)/test_grok_refresh: $(filter-out $(BUILD_DIR)/providers/grok.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_grok_refresh.o | $(BIN_DIR)
+$(BIN_DIR)/test_grok_refresh: $(filter-out $(BUILD_DIR)/providers/openai.o $(BUILD_DIR)/providers/grok.o,$(LIB_OBJ)) $(BUILD_DIR)/tests/test_grok_refresh.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS)

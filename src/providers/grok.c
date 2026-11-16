@@ -35,6 +35,7 @@ struct ClayGrok {
   ClayGrokCredentials credentials;
   ClayOpenAI *openai;
   int refresh_failed;
+  int openai_key_stale; /* credentials rotated but the OpenAI client still holds the old key */
   int authentication_invalid;
   int (*refresh_observer)(void *, ClayGrok *);
   void *refresh_observer_userdata;
@@ -409,7 +410,10 @@ static int refresh(ClayGrok *client) {
   int owner = rc == 0;
   if (owner) rc = refresh_request(client);
   else rc = 0;
-  if (!rc) rc = clay_openai_set_api_key(client->openai, client->credentials.access_token);
+  if (!rc) {
+    rc = clay_openai_set_api_key(client->openai, client->credentials.access_token);
+    client->openai_key_stale = rc != 0;
+  }
   if (owner && client->refresh_end) client->refresh_end(client->refresh_coordination_userdata, rc);
   return rc;
 }
@@ -417,7 +421,8 @@ static int refresh(ClayGrok *client) {
 static int ensure_access_token(ClayGrok *client) {
   if (!client || !client->credentials.access_token)
     return -1;
-  if ((long long)time(NULL) < client->credentials.expires_at - GROK_REFRESH_EARLY_SECONDS)
+  if (!client->openai_key_stale &&
+      (long long)time(NULL) < client->credentials.expires_at - GROK_REFRESH_EARLY_SECONDS)
     return 0;
   return refresh(client);
 }

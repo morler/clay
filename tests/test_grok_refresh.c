@@ -141,6 +141,15 @@ int main(void) {
   assert(seq_n == 3 && models.count == 0);
   clay_array_free(&models);
   clay_grok_destroy(client);
+  /* Stale OpenAI key forces a refresh even when the token is not near expiry. */
+  client = clay_grok_create(&fresh, "model");
+  assert(client);
+  client->openai_key_stale = 1;
+  seq_n = 0;
+  seq_status[0] = 200; seq_body[0] = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}";
+  assert(ensure_access_token(client) == 0);
+  assert(seq_n == 1 && !client->openai_key_stale);
+  clay_grok_destroy(client);
   seq_mode = 0;
   puts("grok refresh tests passed");
   return 0;

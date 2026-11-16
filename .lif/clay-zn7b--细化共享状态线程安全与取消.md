@@ -1,11 +1,11 @@
 ---
 # clay-zn7b
 title: 细化：共享状态线程安全与取消
-status: in-progress
+status: completed
 type: task
 priority: normal
 created_at: 2026-11-15T03:55:04Z
-updated_at: 2026-11-16T03:06:36Z
+updated_at: 2026-11-16T03:06:52Z
 parent: clay-c8lo
 blocking:
     - clay-s4rb
@@ -49,3 +49,7 @@ tests/test_subagent.c 新增 test_scope_wakeup：把取消轮询拉到 5000ms，
 验证：make -j8 test-subagent / test-tasks / test 均通过，test_subagent 额外重复运行 3 次通过；git diff --check、lif check 通过。
 
 仍然不在本任务范围或未验证：permit 尚未被任何 provider 入口调用（src/providers 下无 clay_scope_acquire 调用），provider 侧准入归 clay-dxtk/clay-2jq8；真实服务与 Windows 构建未验证；make test-pty 在干净 HEAD 与本改动后都失败于既有 viewport redraw timed out，与 scope 无关。
+
+## Summary of Changes
+
+共享状态线程安全与取消：scope 等待改为条件变量唤醒（release 时 signal，期限仅用于轮询取消回调）；新增 test_scope_wakeup 证明唤醒而非轮询，新增 test_scope_sharing_under_workers 用真实 completion 路径验证同 scope 共享与单持有人不变量（20 轮/60 次获取）；取消、无死锁悬挂由 test_scope_wait 与 test_completion_scopes 覆盖；TSAN（/tmp/tsan2）与 ASAN（/tmp/asan，scope.c 零泄漏帧）通过，make test 通过。范围外未验证：permit 未接入 provider（归 clay-dxtk/clay-2jq8）、真实服务与 Windows；make test-pty 为既有失败。

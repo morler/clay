@@ -34,7 +34,8 @@
         "type:task",
         "parent:3",
         "draft"
-      ]
+      ],
+      "filename": "0002--验证并适配-Windows-Unicode-控制台输入.md"
     },
     {
       "lif_id": "clay-4lb4",
@@ -46,7 +47,8 @@
         "source:lif",
         "type:feature",
         "draft"
-      ]
+      ],
+      "filename": "0003--修复中文输入与终端显示支持.md"
     },
     {
       "lif_id": "clay-505n",
@@ -59,7 +61,8 @@
         "type:task",
         "parent:3",
         "draft"
-      ]
+      ],
+      "filename": "0004--修复中文显示宽度和流式输出.md"
     },
     {
       "lif_id": "clay-69su",
@@ -72,7 +75,8 @@
         "type:task",
         "parent:3",
         "draft"
-      ]
+      ],
+      "filename": "0005--中文支持端到端回归验证.md"
     },
     {
       "lif_id": "clay-ogb9",
@@ -84,7 +88,8 @@
         "source:lif",
         "type:task",
         "parent:3"
-      ]
+      ],
+      "filename": "0006--统一-UTF-8-边界和终端列宽处理.md"
     },
     {
       "lif_id": "clay-p83r",
@@ -97,7 +102,8 @@
         "type:task",
         "parent:3",
         "draft"
-      ]
+      ],
+      "filename": "0007--修复中文编辑和粘贴识别.md"
     },
     {
       "lif_id": "clay-ijou",
@@ -108,7 +114,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0008--修复保存的-provider-启动选择.md"
     },
     {
       "lif_id": "clay-mqh4",
@@ -119,7 +126,8 @@
       "labels": [
         "source:lif",
         "type:task"
-      ]
+      ],
+      "filename": "0009--运行-supercov-质量评估.md"
     },
     {
       "lif_id": "clay-if52",
@@ -130,7 +138,8 @@
       "labels": [
         "source:lif",
         "type:task"
-      ]
+      ],
+      "filename": "0010--核实质量评估并修复确定缺陷.md"
     },
     {
       "lif_id": "clay-nb73",
@@ -141,7 +150,8 @@
       "labels": [
         "source:lif",
         "type:task"
-      ]
+      ],
+      "filename": "0011--修复质量审查的文件边界和权限问题.md"
     },
     {
       "lif_id": "clay-guq0",
@@ -153,7 +163,8 @@
         "source:lif",
         "type:bug",
         "parent:15"
-      ]
+      ],
+      "filename": "0012--文件工具防止符号链接竞态.md"
     },
     {
       "lif_id": "clay-zqs6",
@@ -164,7 +175,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0013--修复-Windows-工作区路径解析.md"
     },
     {
       "lif_id": "clay-zul5",
@@ -175,7 +187,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0014--沙箱内挂载-etc-alternatives-修复-Fedora-上-shell-命令缺失.md"
     },
     {
       "lif_id": "clay-1m1e",
@@ -186,7 +199,8 @@
       "labels": [
         "source:lif",
         "type:feature"
-      ]
+      ],
+      "filename": "0015--Linux-文件工具竞态防护.md"
     },
     {
       "lif_id": "clay-07dm",
@@ -198,7 +212,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0016--建立-grep-行为与竞态基线.md"
     },
     {
       "lif_id": "clay-6n35",
@@ -210,7 +225,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0017--实现-undo-乐观冲突检测.md"
     },
     {
       "lif_id": "clay-h7s8",
@@ -222,7 +238,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0018--定义-Linux-竞态威胁模型与安全契约.md"
     },
     {
       "lif_id": "clay-imjp",
@@ -234,7 +251,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0019--加固-write-和-edit-提交及权限.md"
     },
     {
       "lif_id": "clay-jk7c",
@@ -246,7 +264,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0020--加固-glob-和-repo-map-遍历到读取.md"
     },
     {
       "lif_id": "clay-mqrk",
@@ -258,7 +277,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0021--梳理-write-edit-undo-检查提交链路.md"
     },
     {
       "lif_id": "clay-mubf",
@@ -270,7 +290,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0022--构建确定性交错与强制回退测试.md"
     },
     {
       "lif_id": "clay-u610",
@@ -282,7 +303,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0023--加固-Linux-grep-的-FD-读取.md"
     },
     {
       "lif_id": "clay-uska",
@@ -294,7 +316,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0024--README-与-lif-收尾.md"
     },
     {
       "lif_id": "clay-uxeh",
@@ -306,7 +329,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0025--按需统一共享路径解析.md"
     },
     {
       "lif_id": "clay-w8rj",
@@ -318,7 +342,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0026--基线与未提交改动审查.md"
     },
     {
       "lif_id": "clay-wnop",
@@ -330,7 +355,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0027--审核已有-workspace-fd-实现及测试.md"
     },
     {
       "lif_id": "clay-x1fn",
@@ -342,7 +368,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0028--确定-openat2-降级与错误策略.md"
     },
     {
       "lif_id": "clay-x1q4",
@@ -354,7 +381,8 @@
         "source:lif",
         "type:task",
         "parent:15"
-      ]
+      ],
+      "filename": "0029--全量测试与-Linux-正常回退竞态矩阵.md"
     },
     {
       "lif_id": "clay-ni3u",
@@ -365,7 +393,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0030--修复新文件原子提交及清理错误.md"
     },
     {
       "lif_id": "clay-d3og",
@@ -376,7 +405,8 @@
       "labels": [
         "source:lif",
         "type:task"
-      ]
+      ],
+      "filename": "0031--增加-max-思考等级.md"
     },
     {
       "lif_id": "clay-7cyn",
@@ -387,7 +417,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0032--修复-max-思考等级的非-OpenRouter-提示.md"
     },
     {
       "lif_id": "clay-c8lo",
@@ -398,7 +429,8 @@
       "labels": [
         "source:lif",
         "type:feature"
-      ]
+      ],
+      "filename": "0033--429-自适应限流与安全重试-两阶段.md"
     },
     {
       "lif_id": "clay-5jth",
@@ -410,7 +442,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0034--一阶段-保留响应限流头与错误信息.md"
     },
     {
       "lif_id": "clay-onc0",
@@ -422,7 +455,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0035--一阶段-识别-HTTP-与-SSE-中的-429.md"
     },
     {
       "lif_id": "clay-h8nw",
@@ -434,7 +468,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0036--一阶段-安全边界内有限重试与取消.md"
     },
     {
       "lif_id": "clay-7609",
@@ -446,7 +481,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0037--一阶段-确定性-mock-回归与兼容验证.md"
     },
     {
       "lif_id": "clay-s4rb",
@@ -458,7 +494,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0038--二阶段-进程内共享配额作用域和生命周期.md"
     },
     {
       "lif_id": "clay-2jq8",
@@ -470,7 +507,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0039--二阶段-自适应-RPM-并发与冷却调度.md"
     },
     {
       "lif_id": "clay-tg6w",
@@ -482,7 +520,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0040--二阶段-TPM-预算估算与实际-usage-校准.md"
     },
     {
       "lif_id": "clay-8mkl",
@@ -494,7 +533,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0041--二阶段-端到端压力回归与限制说明.md"
     },
     {
       "lif_id": "clay-6cks",
@@ -506,7 +546,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0042--一阶段细化-捕获最终响应头与错误体.md"
     },
     {
       "lif_id": "clay-0tzp",
@@ -518,7 +559,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0043--细化-分类-HTTP-429-与永久配额错误.md"
     },
     {
       "lif_id": "clay-79q6",
@@ -530,7 +572,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0044--细化-分类-SSE-中明确的-429.md"
     },
     {
       "lif_id": "clay-m6zq",
@@ -542,7 +585,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0045--细化-解析-Retry-After-秒数与日期.md"
     },
     {
       "lif_id": "clay-w8im",
@@ -554,7 +598,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0046--细化-重试安全边界与临时状态清理.md"
     },
     {
       "lif_id": "clay-0ac5",
@@ -566,7 +611,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0047--细化-TPM-估算与并发预算预留.md"
     },
     {
       "lif_id": "clay-0oh1",
@@ -578,7 +624,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0048--细化-有限退避预算与可取消等待.md"
     },
     {
       "lif_id": "clay-3566",
@@ -590,7 +637,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0049--细化-usage-结算与异常记账.md"
     },
     {
       "lif_id": "clay-56ky",
@@ -602,7 +650,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0050--细化-默认策略与限制文档.md"
     },
     {
       "lif_id": "clay-dxtk",
@@ -614,7 +663,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0051--细化-permit-排队及取消释放.md"
     },
     {
       "lif_id": "clay-exbv",
@@ -626,7 +676,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0052--细化-离线-mock-场景与资源回归.md"
     },
     {
       "lif_id": "clay-j7un",
@@ -638,7 +689,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0053--细化-共享-scope-身份与对象生命周期.md"
     },
     {
       "lif_id": "clay-psns",
@@ -650,7 +702,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0054--细化-RPM-响应信号与冷却恢复.md"
     },
     {
       "lif_id": "clay-pwho",
@@ -662,7 +715,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0055--细化-端到端并发离线压力回归.md"
     },
     {
       "lif_id": "clay-usy4",
@@ -674,7 +728,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0056--细化-reasoning-与现有-provider-兼容回归.md"
     },
     {
       "lif_id": "clay-zn7b",
@@ -686,7 +741,8 @@
         "source:lif",
         "type:task",
         "parent:33"
-      ]
+      ],
+      "filename": "0057--细化-共享状态线程安全与取消.md"
     },
     {
       "lif_id": "clay-k2gt",
@@ -698,7 +754,8 @@
         "source:lif",
         "type:bug",
         "parent:33"
-      ]
+      ],
+      "filename": "0058--修复一阶段-429-审查缺陷.md"
     },
     {
       "lif_id": "clay-m0er",
@@ -709,7 +766,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0059--修复-subagent-终端取消事件归属.md"
     },
     {
       "lif_id": "clay-mcxf",
@@ -720,7 +778,8 @@
       "labels": [
         "source:lif",
         "type:bug"
-      ]
+      ],
+      "filename": "0060--修复并发-worker-的-Codex-Grok-OAuth-凭据竞态.md"
     }
   ]
 }

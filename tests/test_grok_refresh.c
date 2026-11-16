@@ -88,8 +88,55 @@ int main(void) {
   assert(models.count == 1);
   assert(strcmp(client->credentials.access_token, "new-access") == 0);
   clay_array_free(&models);
-  seq_mode = 0;
+  clay_array_free(&models);
   clay_grok_destroy(client);
+  /* Models 200 on the first try: no refresh, one request. */
+  ClayGrokCredentials ok_creds = {"old-access", "old-refresh", "old-id", (long long)time(NULL) + 100000};
+  ClayGrok *ok_client = clay_grok_create(&ok_creds, "model");
+  assert(ok_client);
+  seq_mode = 1; seq_n = 0;
+  seq_status[0] = 200; seq_body[0] = "{\"data\":[{\"id\":\"grok-test\"}]}";
+  assert(clay_grok_list_models(ok_client, &models) == 0);
+  assert(seq_n == 1 && models.count == 1);
+  assert(strcmp(ok_client->credentials.access_token, "old-access") == 0);
+  clay_array_free(&models);
+  clay_grok_destroy(ok_client);
+  /* Models 403 -> refresh -> retry succeeds. */
+  client = clay_grok_create(&fresh, "model");
+  assert(client);
+  clay_array_init(&models, sizeof(char *));
+  seq_n = 0;
+  seq_status[0] = 403; seq_body[0] = "{}";
+  seq_status[1] = 200; seq_body[1] = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}";
+  seq_status[2] = 200; seq_body[2] = "{\"data\":[{\"id\":\"grok-test\"}]}";
+  assert(clay_grok_list_models(client, &models) == 0);
+  assert(seq_n == 3 && models.count == 1);
+  clay_array_free(&models);
+  clay_grok_destroy(client);
+  /* Models 401 -> refresh fails (invalid_grant) -> no retry, error returned. */
+  client = clay_grok_create(&fresh, "model");
+  assert(client);
+  clay_array_init(&models, sizeof(char *));
+  seq_n = 0;
+  seq_status[0] = 401; seq_body[0] = "{}";
+  seq_status[1] = 400; seq_body[1] = "{\"error\":\"invalid_grant\"}";
+  assert(clay_grok_list_models(client, &models) != 0);
+  assert(seq_n == 2 && models.count == 0);
+  clay_array_free(&models);
+  clay_grok_destroy(client);
+  /* Models 401 -> refresh ok -> models 401 again: exactly one refresh, no third retry. */
+  client = clay_grok_create(&fresh, "model");
+  assert(client);
+  clay_array_init(&models, sizeof(char *));
+  seq_n = 0;
+  seq_status[0] = 401; seq_body[0] = "{}";
+  seq_status[1] = 200; seq_body[1] = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\",\"expires_in\":3600}";
+  seq_status[2] = 401; seq_body[2] = "{}";
+  assert(clay_grok_list_models(client, &models) != 0);
+  assert(seq_n == 3 && models.count == 0);
+  clay_array_free(&models);
+  clay_grok_destroy(client);
+  seq_mode = 0;
   puts("grok refresh tests passed");
   return 0;
 }

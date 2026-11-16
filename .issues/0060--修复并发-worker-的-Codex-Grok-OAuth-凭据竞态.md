@@ -9,6 +9,21 @@ labels:
 relations:
     blocks:
         - 51
+    depends-on:
+        - 62
+        - 63
+        - 64
+        - 65
+        - 66
+        - 67
+        - 68
+        - 69
+        - 70
+        - 71
+        - 72
+        - 73
+        - 74
+        - 75
 created: "2026-11-17"
 updated: "2026-11-17"
 ---
@@ -116,6 +131,10 @@ Grok completion 与模型列表按独立 provider 版本和 epoch 协调预过�
 ## 2026-11-16 Grok 模型列表 401/403 刷新重试
 
 clay_grok_list_models 在 401/403 时经 refresh(client) 协调刷新后重试一次（grok.c:482-510）；测试 tests/test_grok_refresh.c 新增序列 mock 用例（401 → 刷新 200 → models 200）；Makefile test_grok_refresh 链接去掉 openai.o。验证：make -j4 test-grok、make -j4 test、git diff --check 通过。未做：TSAN、真实网络、首次 200 不刷新、403 分支、刷新失败分支等额外用例；clay-mcxf 其余未完成项仍 open，保持 in-progress。
+
+## 2026-11-17 拆分计划
+
+本 item 已拆为 #62-#75 共 14 个子项，覆盖 TSAN 基础设施、Codex/Grok 刷新与取消边界、持久化失败恢复、凭据锁与 provider 生命周期、故障注入与确定性交错测试、真实网络验证。所有子项完成前本 item 保持 in-progress；`issues check` 已验证关系一致。
 
 ---
 

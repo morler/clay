@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-15T03:55:04Z
-updated_at: 2026-11-16T03:03:15Z
+updated_at: 2026-11-16T03:06:36Z
 parent: clay-c8lo
 blocking:
     - clay-s4rb
@@ -36,3 +36,16 @@ tests/test_subagent.c 新增 test_scope_wakeup：把取消轮询拉到 5000ms，
 
 
 泄漏检查补充：AddressSanitizer 独立构建（/tmp/asan，OPT=-O1 -g -fsanitize=address）运行 test_subagent 仅有 tests/test_subagent.c:699-704 的 retry_config fixture 泄漏（5 个 strdup 共 414 字节，属既有测试夹具），src/commands/scope.c 无任何泄漏帧。TSAN 与 ASAN 均无 scope 相关报告。
+
+
+## 收尾（验收项逐条）
+
+1. 条件等待与无丢唤醒：已改为 `pthread_cond_t released` + `pthread_cond_signal`（提交 9af9218），并用变异测试证明断言依赖唤醒。
+2. 同 scope 共享 / 异 scope 隔离：tests/test_subagent.c 新增 `test_scope_sharing_under_workers`：真实 `ClayCommands` + `clay_commands_run_completion`，20 轮、每轮 1 主会话 + 2 worker 共 60 次 permit 获取，断言 `acquire_failures == 0`、`peak == 1`（同时最多一个持有者）、`releases == 60`。变异验证：把 `clay_scope_acquire` 的 `int acquired = !scope->occupied;` 改成恒 1 后，test_scope_wait 的取消断言失败，说明现有测试能识别 permit 失效。
+3. 取消退出：test_scope_wait（等待中取消、获取后取消归还 permit）、test_completion_scopes（SIGINT 同批双 worker 粘性取消、下批无残留）覆盖。
+4. 无死锁悬挂：所有等待线程用 `pthread_timedjoin_np` 1 秒上限 join；test_scope_wakeup 额外断言唤醒后 1 秒内归还 permit 并可再次获取。
+5. 泄漏：ASAN 构建（/tmp/asan）运行 test_subagent 无任何 scope.c 帧，仅 tests/test_subagent.c:699-704 的 retry_config 夹具泄漏（既有，414 字节，free 修复留作后续）；TSAN 构建（/tmp/tsan2）退出 0、无报告。
+
+验证：make -j8 test-subagent / test-tasks / test 均通过，test_subagent 额外重复运行 3 次通过；git diff --check、lif check 通过。
+
+仍然不在本任务范围或未验证：permit 尚未被任何 provider 入口调用（src/providers 下无 clay_scope_acquire 调用），provider 侧准入归 clay-dxtk/clay-2jq8；真实服务与 Windows 构建未验证；make test-pty 在干净 HEAD 与本改动后都失败于既有 viewport redraw timed out，与 scope 无关。

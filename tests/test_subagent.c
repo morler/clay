@@ -931,6 +931,84 @@ static void *wake_scope(void *arg) {
     return NULL;
 }
 
+/* Two workers of one batch and the main session race for one scope; every
+   guaranteed (callbacks-driven) acquire must come back with the permit free. */
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    ClayScope *scope;
+    int in_flight, peak, acquire_failures, releases;
+} ScopeRace;
+
+static int race_probe(ClayScope *scope, const ClayOpenAICallbacks *callbacks, void *userdata) {
+    ScopeRace *race = userdata;
+    pthread_mutex_lock(&race->lock);
+    if (!clay_scope_acquire(scope, NULL, NULL)) {
+        race->acquire_failures++;
+    } else {
+        if (++race->in_flight > race->peak) race->peak = race->in_flight;
+        clay_scope_release(scope);
+        race->in_flight--;
+        race->releases++;
+    }
+    pthread_mutex_unlock(&race->lock);
+    if (callbacks && callbacks->on_token) callbacks->on_token("offline summary", callbacks->userdata);
+    return 0;
+}
+
+static void *run_race_batch(void *arg) {
+    ClayJson *result = call(arg, "{\"tasks\":[{\"description\":\"a\",\"prompt\":\"a\"},{\"description\":\"b\",\"prompt\":\"b\"}]}");
+    assert(ok(result));
+    clay_json_free(result);
+    return NULL;
+}
+
+static void test_scope_sharing_under_workers(void) {
+    ClayCommands c = {0};
+    clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+    clay_array_init(&c.tasks, sizeof(ClayBackgroundTask *));
+    clay_array_init(&c.plan.todos, sizeof(ClayTodoItem));
+    clay_array_init(&c.mcp_bindings, sizeof(ClayMcpToolBinding));
+    clay_array_init(&c.mcp_servers, sizeof(ClayMcpServer *));
+    c.mcp_connect_attempted = 1;
+    c.mode = CLAY_MODE_ACT;
+    c.scopes = clay_scope_registry_create();
+    c.chat = clay_chat_create("system");
+    assert(c.scopes && c.chat);
+    assert(setenv("OPENAI_API_KEY", "offline-key", 1) == 0);
+    clay_commands_load_provider(&c, clay_commands_find_provider_type("openai"));
+    c.selected_provider = "openai";
+    c.selected_model = "model-a";
+    ScopeRace race = {0};
+    assert(!pthread_mutex_init(&race.lock, NULL));
+    assert(!pthread_cond_init(&race.cond, NULL));
+    c.completion_test_hook = race_probe;
+    c.completion_test_userdata = &race;
+    for (int round = 0; round < 20; round++) {
+        pthread_t batch;
+        assert(!pthread_create(&batch, NULL, run_race_batch, &c));
+        assert(clay_commands_run_completion(&c, NULL, NULL, 1, NULL, NULL) == 0);
+        assert(!pthread_join(batch, NULL));
+    }
+    /* Main plus two workers: only one holder at a time, every acquire released. */
+    assert(race.acquire_failures == 0);
+    assert(race.peak == 1);
+    assert(race.releases == 60);
+    c.completion_test_hook = NULL;
+    c.completion_test_userdata = NULL;
+    c.selected_provider = NULL;
+    c.selected_model = NULL;
+    ClayConnectedProvider *provider = clay_commands_find_provider(&c, "openai");
+    assert(clay_config_save(provider->config) == 0);
+    assert(clay_commands_logout_provider(&c, "openai") == 0);
+    clay_array_free(&c.providers);
+    clay_scope_registry_destroy(c.scopes);
+    clay_chat_destroy(c.chat);
+    pthread_cond_destroy(&race.cond);
+    pthread_mutex_destroy(&race.lock);
+    assert(unsetenv("OPENAI_API_KEY") == 0);
+}
+
 static void test_scope_wakeup(void) {
     ClayScopeRegistry *registry = clay_scope_registry_create();
     assert(registry);
@@ -1322,6 +1400,7 @@ int main(void) {
 
     test_scope_wait();
     test_scope_wakeup();
+    test_scope_sharing_under_workers();
     test_scopes();
     test_concurrent_scope_failure();
     test_provider_generations();

@@ -5,7 +5,7 @@ status: in-progress
 type: bug
 priority: high
 created_at: 2026-11-15T07:42:54Z
-updated_at: 2026-11-15T08:48:58Z
+updated_at: 2026-11-16T02:20:25Z
 blocking:
     - clay-dxtk
 ---
@@ -107,3 +107,9 @@ Grok 成功刷新后立即在业务请求前按版本检查并无分配交换客
 Grok completion 与模型列表按独立 provider 版本和 epoch 协调预过期及 completion 的 401 刷新；网络在锁外，成功先即时发布并持久化，等待者采用新凭据并更新实际 OpenAI 客户端，更新失败不重放旧 token；等待可取消，刷新失败唤醒等待者，持久化失败保留内存新 token 并阻止自动重试。独立客户端仍可使用；版本或 epoch 耗尽时不发送刷新。受控 HTTP mock 覆盖模型列表与 completion 双 worker 预过期、取消、invalid_grant、保存失败，以及两个 completion 的旧 401 交错和新 token 重放，各断言仅一次刷新。模型列表本身的 401 刷新未实现。
 
 验证：make -j4 test-grok test-openai-codex test-subagent、make -j4 test、git diff --check 通过。未测试真实网络、TSAN、401 等待取消和 OpenAI key 复制失败注入；服务端响应丢失、JSON 解析分配失败、磁盘保存失败后退出及既有 Codex 风险仍存在，保持 in-progress。
+
+
+
+## 2026-11-16 Grok 模型列表 401/403 刷新重试
+
+clay_grok_list_models 在 401/403 时经 refresh(client) 协调刷新后重试一次（grok.c:482-510）；测试 tests/test_grok_refresh.c 新增序列 mock 用例（401 → 刷新 200 → models 200）；Makefile test_grok_refresh 链接去掉 openai.o。验证：make -j4 test-grok、make -j4 test、git diff --check 通过。未做：TSAN、真实网络、首次 200 不刷新、403 分支、刷新失败分支等额外用例；clay-mcxf 其余未完成项仍 open，保持 in-progress。

@@ -5,7 +5,7 @@ status: in-progress
 type: bug
 priority: normal
 created_at: 2026-11-15T07:29:20Z
-updated_at: 2026-11-15T07:35:59Z
+updated_at: 2026-11-16T02:14:14Z
 ---
 
 修复 Ctrl-O 阻塞取消及跨批次取消残留，增加可控终端输入测试。

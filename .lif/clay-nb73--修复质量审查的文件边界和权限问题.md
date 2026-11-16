@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: normal
 created_at: 2026-11-14T02:40:10Z
-updated_at: 2026-11-14T02:44:09Z
+updated_at: 2026-11-16T02:14:14Z
 ---
 
 修复文件工具链接越界和项目文件权限变化，并验证安全限制。

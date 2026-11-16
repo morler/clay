@@ -21,6 +21,11 @@ static int test_http(const ClayHttpRequest *request, ClayHttpResponse *response)
   (void)request;
   memset(response, 0, sizeof(*response));
   if (seq_mode) {
+    if (seq_n >= (int)(sizeof(seq_status) / sizeof(seq_status[0]))) {
+      response->status = 500; /* unexpected extra request: fail the assertion, not UB */
+      response->body = strdup("{}");
+      return 0;
+    }
     response->status = seq_status[seq_n];
     response->body = strdup(seq_body[seq_n++]);
     return 0;
@@ -88,7 +93,7 @@ int main(void) {
   assert(models.count == 1);
   assert(strcmp(client->credentials.access_token, "new-access") == 0);
   clay_array_free(&models);
-  clay_array_free(&models);
+  clay_array_init(&models, sizeof(char *));
   clay_grok_destroy(client);
   /* Models 200 on the first try: no refresh, one request. */
   ClayGrokCredentials ok_creds = {"old-access", "old-refresh", "old-id", (long long)time(NULL) + 100000};

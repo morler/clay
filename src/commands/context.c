@@ -509,6 +509,8 @@ void clay_commands_load_provider(ClayCommands *commands,
     provider_models_free(existing);
     existing->config = config;
     existing->generation = generation;
+    existing->codex_refresh_unpersisted = 0;
+    existing->grok_refresh_unpersisted = 0;
     existing->environment_override = environment_override;
     existing->client = (is_codex || is_grok_subscription)
                            ? NULL
@@ -566,15 +568,16 @@ static pthread_mutex_t codex_credentials_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t codex_refresh_cond = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t grok_refresh_cond = PTHREAD_COND_INITIALIZER;
 
+/* Caller holds codex_credentials_lock. Environment credentials are never persisted, so the flag is simply dropped. */
 static void retry_codex_unpersisted(ClayConnectedProvider *provider) {
-  if (provider->codex_refresh_unpersisted && !provider->environment_override &&
-      clay_config_save(provider->config) == 0)
+  if (!provider->codex_refresh_unpersisted) return;
+  if (provider->environment_override || clay_config_save(provider->config) == 0)
     provider->codex_refresh_unpersisted = 0;
 }
 
 static void retry_grok_unpersisted(ClayConnectedProvider *provider) {
-  if (provider->grok_refresh_unpersisted && !provider->environment_override &&
-      clay_config_save(provider->config) == 0)
+  if (!provider->grok_refresh_unpersisted) return;
+  if (provider->environment_override || clay_config_save(provider->config) == 0)
     provider->grok_refresh_unpersisted = 0;
 }
 
@@ -788,6 +791,7 @@ static int save_codex_credentials(ClayConnectedProvider *provider,
     rc = 1;
   } else if (invalid) {
     if (!provider->environment_override) rc = clay_config_remove(config->id);
+    if (rc == 0) provider->codex_refresh_unpersisted = 0;
   } else if (clay_openai_codex_copy_credentials(client, &credentials) != 0) {
     rc = -1;
   } else if (!same_optional_string(config->access_token, credentials.access_token) ||

@@ -695,8 +695,8 @@ static void test_grok_concurrent_snapshot(void) {
 }
 static void test_unpersisted_retry(void) {
     /* A blocked HOME makes clay_config_save fail; the flag must survive until a save succeeds. */
-    char *saved_home = strdup(getenv("HOME"));
-    assert(saved_home);
+    const char *home = getenv("HOME");
+    char *saved_home = home ? strdup(home) : NULL;
     assert(!system("rm -rf /tmp/clay_retry_ok /tmp/clay_retry_blocked && touch /tmp/clay_retry_blocked"));
     assert(!setenv("HOME", "/tmp/clay_retry_blocked", 1));
     ClayProviderConfig config = {.id = "retry-test", .access_token = "new", .refresh_token = "new-r", .expires_at = 1};
@@ -712,7 +712,8 @@ static void test_unpersisted_retry(void) {
     assert(client && provider.grok_refresh_unpersisted == 0);
     clay_grok_destroy(client);
     assert(!access("/tmp/clay_retry_ok/.clay/providers/retry-test.json", F_OK));
-    assert(!setenv("HOME", saved_home, 1));
+    if (saved_home) assert(!setenv("HOME", saved_home, 1));
+    else assert(!unsetenv("HOME"));
     free(saved_home);
 }
 

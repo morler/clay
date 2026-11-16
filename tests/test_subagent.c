@@ -628,6 +628,7 @@ static void test_codex_concurrent_snapshot(void) {
     for (int i = 0; i < 2; i++) assert(!pthread_join(threads[i], NULL));
     assert(race.result[0] + race.result[1] == 1);
     assert(provider.codex_version == 1);
+    assert(!strcmp(config.access_token, "new-a") || !strcmp(config.access_token, "new-b"));
     assert(!pthread_barrier_destroy(&race.barrier));
     free(config.access_token); free(config.refresh_token); free(config.account_id);
 }
@@ -683,6 +684,7 @@ static void test_grok_concurrent_snapshot(void) {
     for (int i = 0; i < 2; i++) assert(!pthread_join(threads[i], NULL));
     assert(race.result[0] + race.result[1] == 1);
     assert(provider.grok_version == 1 && provider.grok_client == persistent);
+    assert(!strcmp(config.access_token, "new-a") || !strcmp(config.access_token, "new-b"));
     ClayGrokCredentials original = {0};
     assert(clay_grok_copy_credentials(persistent, &original) == 0);
     assert(!strcmp(original.access_token, "old"));

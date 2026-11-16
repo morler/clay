@@ -693,6 +693,29 @@ static void test_grok_concurrent_snapshot(void) {
     assert(!pthread_barrier_destroy(&race.barrier));
     free(config.access_token); free(config.refresh_token);
 }
+static void test_unpersisted_retry(void) {
+    /* A blocked HOME makes clay_config_save fail; the flag must survive until a save succeeds. */
+    char *saved_home = strdup(getenv("HOME"));
+    assert(saved_home);
+    assert(!system("rm -rf /tmp/clay_retry_ok /tmp/clay_retry_blocked && touch /tmp/clay_retry_blocked"));
+    assert(!setenv("HOME", "/tmp/clay_retry_blocked", 1));
+    ClayProviderConfig config = {.id = "retry-test", .access_token = "new", .refresh_token = "new-r", .expires_at = 1};
+    ClayConnectedProvider provider = {.config = &config};
+    provider.grok_refresh_unpersisted = 1;
+    uint64_t version;
+    ClayGrok *client = clay_commands_grok_snapshot(&provider, NULL, &version);
+    assert(client && provider.grok_refresh_unpersisted == 1);
+    clay_grok_destroy(client);
+    assert(!system("mkdir -p /tmp/clay_retry_ok"));
+    assert(!setenv("HOME", "/tmp/clay_retry_ok", 1));
+    client = clay_commands_grok_snapshot(&provider, NULL, &version);
+    assert(client && provider.grok_refresh_unpersisted == 0);
+    clay_grok_destroy(client);
+    assert(!access("/tmp/clay_retry_ok/.clay/providers/retry-test.json", F_OK));
+    assert(!setenv("HOME", saved_home, 1));
+    free(saved_home);
+}
+
 static ClayJson *call(ClayCommands *commands, const char *json_args) {
     ClayJson *args = clay_json_parse(json_args, NULL);
     assert(args);
@@ -1186,6 +1209,7 @@ int main(void) {
     test_codex_publication_waits_for_end();
     test_codex_concurrent_snapshot();
     test_grok_concurrent_snapshot();
+    test_unpersisted_retry();
     test_stale_completion_results();
     test_interrupt_consumed_once();
     char template[] = "/tmp/clay_test_subagent_XXXXXX";

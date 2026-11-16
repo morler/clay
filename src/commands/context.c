@@ -566,12 +566,25 @@ static pthread_mutex_t codex_credentials_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t codex_refresh_cond = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t grok_refresh_cond = PTHREAD_COND_INITIALIZER;
 
+static void retry_codex_unpersisted(ClayConnectedProvider *provider) {
+  if (provider->codex_refresh_unpersisted && !provider->environment_override &&
+      clay_config_save(provider->config) == 0)
+    provider->codex_refresh_unpersisted = 0;
+}
+
+static void retry_grok_unpersisted(ClayConnectedProvider *provider) {
+  if (provider->grok_refresh_unpersisted && !provider->environment_override &&
+      clay_config_save(provider->config) == 0)
+    provider->grok_refresh_unpersisted = 0;
+}
+
 int clay_commands_codex_refresh_begin(ClayConnectedProvider *provider,
     uint64_t version, int (*should_abort)(void *), void *userdata) {
   if (!provider) return -1;
   pthread_mutex_lock(&codex_credentials_lock);
   uint64_t epoch = provider->codex_refresh_epoch;
   for (;;) {
+    retry_codex_unpersisted(provider);
     if (provider->codex_refresh_failure_epoch > epoch ||
         provider->codex_refresh_unpersisted) {
       pthread_mutex_unlock(&codex_credentials_lock);
@@ -633,6 +646,7 @@ static int grok_refresh_begin(ClayConnectedProvider *provider,
   pthread_mutex_lock(&codex_credentials_lock);
   uint64_t epoch = provider->grok_refresh_epoch;
   for (;;) {
+    retry_grok_unpersisted(provider);
     if (provider->grok_refresh_failure_epoch > epoch ||
         provider->grok_refresh_unpersisted) {
       pthread_mutex_unlock(&codex_credentials_lock);
@@ -696,6 +710,7 @@ ClayOpenAICodex *clay_commands_codex_snapshot(ClayConnectedProvider *provider,
                                                const char *model, uint64_t *version) {
   if (!provider || !provider->config || !version) return NULL;
   pthread_mutex_lock(&codex_credentials_lock);
+  retry_codex_unpersisted(provider);
   ClayProviderConfig *config = provider->config;
   ClayCodexCredentials credentials = {config->access_token, config->refresh_token,
                                        config->id_token, config->account_id,
@@ -714,6 +729,7 @@ ClayGrok *clay_commands_grok_snapshot(ClayConnectedProvider *provider,
                                       const char *model, uint64_t *version) {
   if (!provider || !provider->config || !version) return NULL;
   pthread_mutex_lock(&codex_credentials_lock);
+  retry_grok_unpersisted(provider);
   ClayProviderConfig *config = provider->config;
   ClayGrokCredentials credentials = {config->access_token, config->refresh_token,
                                      config->id_token, config->expires_at};
@@ -1825,6 +1841,13 @@ void clay_commands_destroy(ClayCommands *commands) {
   pthread_mutex_destroy(&commands->tool_lock);
   free(commands->environment_block);
   free(commands->notes_block);
+  pthread_mutex_lock(&codex_credentials_lock);
+  for (size_t i = 0; i < commands->providers.count; i++) {
+    ClayConnectedProvider *provider = clay_array_get(&commands->providers, i);
+    retry_codex_unpersisted(provider);
+    retry_grok_unpersisted(provider);
+  }
+  pthread_mutex_unlock(&codex_credentials_lock);
   for (size_t i = 0; i < commands->providers.count; i++)
     provider_free(clay_array_get(&commands->providers, i));
   clay_array_free(&commands->providers);

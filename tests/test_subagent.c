@@ -768,6 +768,9 @@ static void test_unpersisted_retry(void) {
     if (saved_home) assert(!setenv("HOME", saved_home, 1));
     else assert(!unsetenv("HOME"));
     free(saved_home);
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);  /* root comes from mkdtemp, no quoting hazards */
+    assert(system(cmd) == 0);
 }
 
 static ClayJson *call(ClayCommands *commands, const char *json_args) {

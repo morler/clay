@@ -182,9 +182,10 @@ void clay_openai_destroy(ClayOpenAI *client) {
 int clay_openai_set_api_key(ClayOpenAI *client, const char *api_key) {
   if (!client) return -1;
   char *copy = strdup(api_key ? api_key : "");
-  if (!copy) return -1;
   free(client->api_key);
+  /* shortcut: NULL key on OOM so requests cannot reuse the stale token; callers of auth sites fall back to "" */
   client->api_key = copy;
+  if (!copy) return -1;
   return 0;
 }
 
@@ -245,7 +246,7 @@ int clay_openai_list_models(ClayOpenAI *client, ClayArray *models) {
 
   ClayStr auth;
   clay_str_init(&auth);
-  clay_str_printf(&auth, "Bearer %s", client->api_key);
+  clay_str_printf(&auth, "Bearer %s", client->api_key ? client->api_key : "");
 
   ClayHttpHeader headers[1 + CLAY_OPENAI_EXTRA_HEADERS_LIMIT];
   headers[0] = (ClayHttpHeader){"Authorization", auth.data};
@@ -711,7 +712,7 @@ retry_request:;
 
     ClayStr auth;
     clay_str_init(&auth);
-    clay_str_printf(&auth, "Bearer %s", client->api_key);
+    clay_str_printf(&auth, "Bearer %s", client->api_key ? client->api_key : "");
 
     ClayHttpHeader headers[3 + CLAY_OPENAI_EXTRA_HEADERS_LIMIT];
     headers[0] = (ClayHttpHeader){"Authorization", auth.data};

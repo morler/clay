@@ -96,6 +96,9 @@ ClayProviderConfig *clay_config_load(const char *id) {
   config->account_id = json_optional_string(root, "account_id");
   config->expires_at = (long long)clay_json_number_value(
       clay_json_object_get(root, "expires_at"));
+  config->tpm = (long long)clay_json_number_value(clay_json_object_get(root, "tpm"));
+  if (config->tpm < 0)
+    config->tpm = 0;
   if (!config->id) {
     clay_config_free(config);
     config = NULL;
@@ -134,6 +137,8 @@ int clay_config_save(const ClayProviderConfig *config) {
   if (config->expires_at > 0)
     clay_json_object_set(root, "expires_at",
                          clay_json_number(config->expires_at));
+  if (config->tpm > 0)
+    clay_json_object_set(root, "tpm", clay_json_number((double)config->tpm));
 
   int rc = clay_storage_write_json_atomic_private(path, root);
   free(path);

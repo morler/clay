@@ -18,6 +18,9 @@ typedef struct {
   char *id_token;
   char *account_id;
   long long expires_at;
+  /* Optional tokens-per-minute budget written by hand in the provider file.
+     0 (or absent) means unknown: no local budget is enforced. */
+  long long tpm;
 } ClayProviderConfig;
 
 int clay_config_exists(const char *id);

@@ -207,6 +207,10 @@ separate.
 
 For max, OpenRouter and Codex receive reasoning.effort, and other OpenAI-compatible providers (including custom and Grok) receive reasoning_effort. Unsupported values may be rejected by the service; Clay does not downgrade them. OpenRouter maps both max and xhigh to approximately 95% of the reasoning token budget; actual behavior depends on the model. See [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
+**Local token budget (`tpm`, optional).** Add `"tpm": <tokens per minute>` to a provider file under `~/.clay/providers/` to cap that provider's endpoint and model in Clay. Unset (or 0) means no local budget. Before each request Clay reserves an estimate: half the request's bytes plus 4096 tokens for the reply. It waits for the 60-second window to free room, then replaces the estimate with the usage the provider reports. A request without reported usage keeps its estimate, so the count only runs high. A request larger than the budget is refused at once. This is Clay's own estimate, not the provider's quota: Clay cannot read remaining quota, does not know cached-token billing, and does not coordinate with other Clay processes.
+
+**429 responses.** Clay retries a 429 up to twice with backoff, honouring a valid `Retry-After` up to 30 seconds. Each 429 also cools the endpoint and model for other requests and doubles the spacing between admissions (capped at 30 seconds); each success halves that spacing. Requests to the same endpoint and model run one at a time.
+
 ### Safety & control
 
 | Command | What it does |

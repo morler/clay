@@ -81,6 +81,8 @@ typedef struct {
   ClayOpenAIRetryState retry;
   long input_tokens;
   long output_tokens;
+  int usage_known; /* the stream reported usage; tokens are input + output */
+  uint64_t usage_tokens;
 } CodexStream;
 
 char *clay_openai_codex_authorization_url(const char *challenge,
@@ -574,6 +576,14 @@ static void codex_sse_json(const char *text, void *userdata) {
   } else if (strcmp(type, "response.completed") == 0) {
     ClayJson *response = clay_json_object_get(root, "response");
     ClayJson *usage = clay_json_object_get(response, "usage");
+    if (clay_json_type(usage) == CLAY_JSON_OBJECT) {
+      ClayTokenUsage counted;
+      clay_openai_usage_from_json(usage, &counted);
+      if (counted.input_tokens >= 0 && counted.output_tokens >= 0) {
+        s->usage_known = 1;
+        s->usage_tokens = (uint64_t)counted.input_tokens + (uint64_t)counted.output_tokens;
+      }
+    }
     if (clay_json_type(usage) == CLAY_JSON_OBJECT && s->callbacks &&
         (s->callbacks->on_usage || s->callbacks->on_usage_details)) {
       s->retry.callback_delivered = 1;
@@ -854,7 +864,24 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
     req.low_speed_seconds = 60;
     req.max_response_bytes = CODEX_RESPONSE_LIMIT;
     ClayHttpResponse response;
+    /* One permit per attempt, released before retry sleeps, refresh or tools. */
+    ClayScope *scope = clay_openai_codex_scope(client);
+    uint64_t ticket = 0;
+    int admitted = scope ? clay_scope_admit(scope, body.len, stream_abort, &stream, &ticket) : 1;
+    if (admitted != 1) {
+      clay_str_free(&body);
+      clay_str_free(&auth);
+      stream_free(&stream);
+      if (admitted == 0)
+        return 1;
+      if (callbacks && callbacks->on_error)
+      callbacks->on_error(0, "request not admitted: scope queue, wait limit, or tpm budget",
+                            callbacks->userdata);
+      return -1;
+    }
     int transport = clay_http_request(&req, &response);
+    if (scope)
+      clay_scope_finish(scope, ticket, stream.usage_known, stream.usage_tokens);
     client->last_status = response.status;
     clay_str_free(&body);
     clay_str_free(&auth);
@@ -884,6 +911,7 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       decision.error_body_len = strlen(stream.sse_error);
       decision.error_body_truncated = 0;
     }
+    clay_scope_note_response(scope, &decision, clay_openai_permanent_quota(&decision));
     if (retry_enabled && !transport && !stream.malformed &&
         !decision.error_body_truncated &&
         clay_provider_retry_wait(&retry, &clock, &decision, clay_openai_permanent_quota(&decision),

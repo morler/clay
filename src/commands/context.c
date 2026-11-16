@@ -1396,6 +1396,7 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
                                     provider->config->base_url, commands->selected_model);
   if (!scope)
     return -1;
+  clay_scope_set_tpm(scope, provider->config->tpm > 0 ? (uint64_t)provider->config->tpm : 0);
   const ClayTool *tool_list = tools ? tools->tools.data : NULL;
   size_t tool_count = tools ? tools->tools.count : 0;
   const char *effort = clay_commands_reasoning_effort(commands)->id;

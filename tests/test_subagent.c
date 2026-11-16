@@ -140,6 +140,21 @@ static void test_codex_publication_waits_for_end(void) {
 }
 #include "clay/http.h"
 static int review_mock;
+static int http_inflight, http_peak; /* review mock 18 */
+static int http_calls; /* review mock 19 */
+static ClayScope *http_scope;
+static uint64_t http_pace_seen;
+static uint64_t http_first_ms, http_second_ms; /* review mock 20 */
+
+static uint64_t mono_ms_now(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000;
+}
+
+static int abort_when_due(void *arg) {
+    return mono_ms_now() >= *(uint64_t *)arg;
+}
 static ClayProviderConfig *grok_published;
 static int fail_codex_create;
 ClayOpenAICodex *__real_clay_openai_codex_create(const ClayCodexCredentials *, const char *);
@@ -218,6 +233,45 @@ int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp)
             resp->status = 200;
             resp->body = strdup("{\"data\":[{\"id\":\"codex-test\"}]}");
         }
+        return 0;
+    }
+    /* Review mock 18: count HTTP attempts in flight; one scope must never exceed one. */
+    if (review_mock == 18) {
+        pthread_mutex_lock(&network_lock);
+        if (++http_inflight > http_peak) http_peak = http_inflight;
+        pthread_mutex_unlock(&network_lock);
+        usleep(20000);
+        pthread_mutex_lock(&network_lock);
+        http_inflight--;
+        pthread_mutex_unlock(&network_lock);
+        resp->status = 200;
+        resp->body = strdup("");
+        return 0;
+    }
+    /* Review mock 19: first attempt 429, later attempts 200; counts attempts. */
+    if (review_mock == 19) {
+        pthread_mutex_lock(&network_lock);
+        int n = ++http_calls;
+        pthread_mutex_unlock(&network_lock);
+        resp->status = n == 1 ? 429 : 200;
+        if (n == 2) http_pace_seen = clay_scope_test_pace(http_scope);
+        resp->body = strdup("");
+        return 0;
+    }
+    /* Review mock 20: the first attempt reports 17000 tokens of usage; times both attempts. */
+    if (review_mock == 20) {
+        pthread_mutex_lock(&network_lock);
+        int n = ++http_calls;
+        if (n == 1) http_first_ms = mono_ms_now();
+        else if (n == 2) http_second_ms = mono_ms_now();
+        pthread_mutex_unlock(&network_lock);
+        if (n == 1) {
+            static const char usage_event[] =
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":12000,\"output_tokens\":5000}}}\n\n";
+            req->on_chunk(usage_event, strlen(usage_event), req->userdata);
+        }
+        resp->status = 200;
+        resp->body = strdup("");
         return 0;
     }
     if (review_mock == 9 || review_mock == 10) {
@@ -410,7 +464,10 @@ static void test_grok_network_singleflight(void) {
         network_entered = network_release = network_waiting = network_requests = 0;
         stale_old = stale_new = stale_release = 0;
         network_cancel = scenario == 1; review_mock = 13 + scenario;
-        ReviewRun a = {&c, -99}, b = {&c, -99};
+        /* Distinct models mean distinct scopes: requests in one scope are serialized by design. */
+        ClayCommands c2 = c;
+        c2.selected_model = "model-b";
+        ReviewRun a = {&c, -99}, b = {&c2, -99};
         NetworkModels models = {shared, -99};
         pthread_t leader, waiter;
         assert(!pthread_create(&leader, NULL, scenario == 3 ? network_completion : network_models,
@@ -469,7 +526,10 @@ static void test_codex_stale_http(void) {
             ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
             review_mock = 11; stale_status = status;
             stale_old = stale_new = stale_release = network_requests = 0;
-            ReviewRun a = {&c, -99}, b = {&c, -99};
+            /* Two in-flight stale 401s need two scopes; one scope admits one request at a time. */
+            ClayCommands c2 = c;
+            c2.selected_model = "model-b";
+            ReviewRun a = {&c, -99}, b = {&c2, -99};
             NetworkModels models = {shared, -99};
             pthread_t first, second;
             assert(!pthread_create(&first, NULL, network_completion, &a));
@@ -1133,6 +1193,246 @@ static void test_scopes(void) {
     clay_scope_registry_destroy(registry);
 }
 
+/* Three completions in one scope reach the transport one at a time. */
+static void test_scope_admission_limits_http(void) {
+    ClayCommands c = {0};
+    clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+    c.scopes = clay_scope_registry_create();
+    c.selected_provider = "openai-codex"; c.selected_model = "model";
+    ClayProviderConfig config = {0};
+    config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+    config.account_id = strdup("account"); config.expires_at = 4102444800LL;
+    ClayConnectedProvider provider = {0};
+    provider.config = &config; provider.environment_override = 1; provider.generation = 1;
+    provider.type = clay_commands_find_provider_type("openai-codex");
+    clay_array_init(&provider.models, sizeof(char *));
+    clay_array_push_val(&c.providers, &provider);
+    review_mock = 18; http_inflight = http_peak = 0;
+    ReviewRun runs[3] = {{&c, -99}, {&c, -99}, {&c, -99}};
+    pthread_t threads[3];
+    for (int i = 0; i < 3; i++)
+        assert(!pthread_create(&threads[i], NULL, review_run, &runs[i]));
+    for (int i = 0; i < 3; i++)
+        assert(!pthread_join(threads[i], NULL));
+    assert(http_peak == 1 && http_inflight == 0);
+    review_mock = 0;
+    ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+    for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
+    clay_array_free(&shared->models);
+    clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+    free(config.access_token); free(config.refresh_token); free(config.account_id);
+}
+
+static void add_rate_header(ClayHttpResponse *r, const char *name, const char *value) {
+    ClayHttpRateHeader *h = &r->rate_headers[r->rate_header_count++];
+    h->name = name;
+    snprintf(h->value, sizeof(h->value), "%s", value);
+}
+
+/* 429 cooldown and pacing are per scope; a success halves the spacing back to zero. */
+static void test_scope_cooldown_and_pacing(void) {
+    ClayScopeRegistry *registry = clay_scope_registry_create();
+    assert(registry);
+    ClayScope *scope = clay_scope_get(registry, 1, "endpoint", "cool");
+    ClayScope *other = clay_scope_get(registry, 1, "endpoint", "other");
+    assert(scope && other);
+    ClayHttpResponse limited;
+    memset(&limited, 0, sizeof(limited));
+    limited.status = 429;
+
+    /* Missing Retry-After: base cooldown and base pacing. */
+    clay_scope_note_response(scope, &limited, 0);
+    assert(clay_scope_test_pace(scope) == 1000);
+    uint64_t left = clay_scope_test_cooldown_left(scope);
+    assert(left > 0 && left <= 1000);
+    assert(!clay_scope_try_acquire(scope));
+    /* Isolation: a 429 on one scope does not delay another. */
+    assert(clay_scope_try_acquire(other));
+    clay_scope_release(other);
+
+    /* A waiting admission sleeps out the cooldown; the next is paced 1000 ms after it. */
+    uint64_t t0 = mono_ms_now();
+    assert(clay_scope_acquire(scope, NULL, NULL) == 1);
+    assert(mono_ms_now() - t0 >= 900);
+    clay_scope_release(scope);
+    t0 = mono_ms_now();
+    assert(clay_scope_acquire(scope, NULL, NULL) == 1);
+    assert(mono_ms_now() - t0 >= 900);
+    clay_scope_release(scope);
+
+    /* Duplicated Retry-After is a conflict: strictest cap, and cancel during the wait
+       returns without a permit. */
+    ClayScope *cancelled = clay_scope_get(registry, 1, "endpoint", "cancel");
+    ClayHttpResponse conflict = limited;
+    add_rate_header(&conflict, "retry-after", "5");
+    add_rate_header(&conflict, "retry-after", "6");
+    clay_scope_note_response(cancelled, &conflict, 0);
+    assert(clay_scope_test_cooldown_left(cancelled) >= 29000);
+    uint64_t abort_after = mono_ms_now() + 50;
+    t0 = mono_ms_now();
+    assert(clay_scope_acquire(cancelled, abort_when_due, &abort_after) == 0);
+    assert(mono_ms_now() - t0 < 2000);
+
+    /* A valid Retry-After is honoured; dropped headers are unknown, so strictest. */
+    ClayScope *honoured = clay_scope_get(registry, 1, "endpoint", "retry");
+    ClayHttpResponse valid = limited;
+    add_rate_header(&valid, "retry-after", "2");
+    clay_scope_note_response(honoured, &valid, 0);
+    left = clay_scope_test_cooldown_left(honoured);
+    assert(left > 1500 && left <= 2000);
+    ClayScope *dropped = clay_scope_get(registry, 1, "endpoint", "dropped");
+    ClayHttpResponse drop = limited;
+    drop.rate_headers_dropped = 1;
+    clay_scope_note_response(dropped, &drop, 0);
+    assert(clay_scope_test_cooldown_left(dropped) >= 29000);
+
+    /* Permanent quota is not a rate limit: no cooldown, no pacing. */
+    ClayScope *quota = clay_scope_get(registry, 1, "endpoint", "quota");
+    clay_scope_note_response(quota, &limited, 1);
+    assert(clay_scope_test_pace(quota) == 0 && clay_scope_test_cooldown_left(quota) == 0);
+
+    /* Recovery: each 429 doubles pacing; each success halves it back to zero. */
+    ClayScope *recover = clay_scope_get(registry, 1, "endpoint", "recover");
+    clay_scope_note_response(recover, &limited, 0);
+    clay_scope_note_response(recover, &limited, 0);
+    assert(clay_scope_test_pace(recover) == 2000);
+    ClayHttpResponse ok;
+    memset(&ok, 0, sizeof(ok));
+    ok.status = 200;
+    clay_scope_note_response(recover, &ok, 0);
+    assert(clay_scope_test_pace(recover) == 1000);
+    clay_scope_note_response(recover, &ok, 0);
+    assert(clay_scope_test_pace(recover) == 0);
+    clay_scope_registry_destroy(registry);
+}
+
+/* One 429 then 200 through the real Codex loop: the 429 cools and paces the scope,
+   and the success after it halves the pacing (1000 -> 500). */
+static void test_scope_rate_limit_http(void) {
+    ClayCommands c = {0};
+    clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+    c.scopes = clay_scope_registry_create();
+    c.selected_provider = "openai-codex"; c.selected_model = "model";
+    ClayProviderConfig config = {0};
+    config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+    config.account_id = strdup("account"); config.expires_at = 4102444800LL;
+    ClayConnectedProvider provider = {0};
+    provider.config = &config; provider.environment_override = 1; provider.generation = 1;
+    provider.type = clay_commands_find_provider_type("openai-codex");
+    clay_array_init(&provider.models, sizeof(char *));
+    clay_array_push_val(&c.providers, &provider);
+    review_mock = 19; http_calls = 0;
+    http_scope = clay_scope_get(c.scopes, 1, NULL, "model");
+    ReviewRun run = {&c, -99};
+    review_run(&run);
+    assert(http_calls == 2);
+    ClayScope *scope = clay_scope_get(c.scopes, 1, NULL, "model");
+    assert(http_pace_seen == 1000); /* the 429 paced the scope before the retry */
+    assert(scope && clay_scope_test_pace(scope) == 0); /* the success halved 1000 below base */
+    review_mock = 0;
+    ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+    for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
+    clay_array_free(&shared->models);
+    clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+    free(config.access_token); free(config.refresh_token); free(config.account_id);
+}
+
+/* Tokens-per-minute budget per scope: estimates, settlement, rejection, cancel, window roll. */
+static void test_scope_tpm_budget(void) {
+    ClayScopeRegistry *registry = clay_scope_registry_create();
+    assert(registry);
+    ClayScope *scope = clay_scope_get(registry, 1, "endpoint", "tpm");
+    assert(scope);
+    uint64_t ticket = 99;
+    /* No tpm configured: no ticket and nothing recorded. */
+    assert(clay_scope_admit(scope, 2000, NULL, NULL, &ticket) == 1 && ticket == 0);
+    clay_scope_finish(scope, ticket, 0, 0);
+    assert(clay_scope_test_spent(scope) == 0);
+
+    clay_scope_set_tpm(scope, 10000);
+    clay_scope_test_tpm_window(scope, 300);
+    /* Estimate for 2000 request bytes: 1000 + 4096 = 5096 tokens. */
+    assert(clay_scope_admit(scope, 2000, NULL, NULL, &ticket) == 1 && ticket != 0);
+    clay_scope_finish(scope, ticket, 1, 3000); /* usage below the estimate frees budget */
+    assert(clay_scope_test_spent(scope) == 3000);
+    assert(clay_scope_admit(scope, 2000, NULL, NULL, &ticket) == 1);
+    clay_scope_finish(scope, ticket, 0, 0); /* no usage: the estimate stays */
+    assert(clay_scope_test_spent(scope) == 3000 + 5096);
+
+    /* Can never fit: refused at once, and nothing is held. */
+    assert(clay_scope_admit(scope, 20000, NULL, NULL, &ticket) == -1);
+    assert(clay_scope_try_acquire(scope));
+    clay_scope_release(scope);
+
+    /* Over budget waits; cancel while waiting holds nothing. */
+    uint64_t abort_after = mono_ms_now() + 50;
+    uint64_t t0 = mono_ms_now();
+    assert(clay_scope_admit(scope, 2000, abort_when_due, &abort_after, &ticket) == 0);
+    assert(mono_ms_now() - t0 < 250);
+    assert(clay_scope_try_acquire(scope));
+    clay_scope_release(scope);
+
+    /* Once the window rolls, the same request is admitted. */
+    t0 = mono_ms_now();
+    assert(clay_scope_admit(scope, 2000, NULL, NULL, &ticket) == 1);
+    assert(mono_ms_now() - t0 >= 200);
+    clay_scope_finish(scope, ticket, 1, 100);
+    assert(clay_scope_test_spent(scope) == 100);
+    clay_scope_registry_destroy(registry);
+}
+
+/* Codex loop with tpm 20000: the first attempt reports 17000 tokens, so the second must
+   wait for that entry to leave the window before it is sent. */
+static void test_provider_tpm_window(void) {
+    ClayCommands c = {0};
+    clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+    c.scopes = clay_scope_registry_create();
+    c.selected_provider = "openai-codex"; c.selected_model = "model";
+    ClayProviderConfig config = {0};
+    config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
+    config.account_id = strdup("account"); config.expires_at = 4102444800LL;
+    config.tpm = 20000;
+    ClayConnectedProvider provider = {0};
+    provider.config = &config; provider.environment_override = 1; provider.generation = 1;
+    provider.type = clay_commands_find_provider_type("openai-codex");
+    clay_array_init(&provider.models, sizeof(char *));
+    clay_array_push_val(&c.providers, &provider);
+    ClayScope *scope = clay_scope_get(c.scopes, 1, NULL, "model");
+    clay_scope_test_tpm_window(scope, 300);
+    review_mock = 20; http_calls = 0;
+    ReviewRun run = {&c, -99};
+    review_run(&run);
+    review_run(&run);
+    assert(http_calls == 2);
+    assert(http_second_ms - http_first_ms >= 250);
+    uint64_t spent = clay_scope_test_spent(scope);
+    assert(spent >= 4096 && spent <= 20000); /* second attempt: estimate only */
+    review_mock = 0;
+    ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
+    for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
+    clay_array_free(&shared->models);
+    clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
+    free(config.access_token); free(config.refresh_token); free(config.account_id);
+}
+
+/* tpm is optional: saved when set, absent or zero means unknown. */
+static void test_provider_tpm_config(void) {
+    ClayProviderConfig config = {0};
+    config.id = "tpm-check";
+    config.base_url = "https://example.test/v1";
+    config.tpm = 1234;
+    assert(clay_config_save(&config) == 0);
+    ClayProviderConfig *loaded = clay_config_load("tpm-check");
+    assert(loaded && loaded->tpm == 1234);
+    clay_config_free(loaded);
+    config.tpm = 0;
+    assert(clay_config_save(&config) == 0);
+    loaded = clay_config_load("tpm-check");
+    assert(loaded && loaded->tpm == 0);
+    clay_config_free(loaded);
+    assert(clay_config_remove("tpm-check") == 0);
+}
+
 static void test_provider_generations(void) {
     ClayCommands c = {0};
     clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
@@ -1405,6 +1705,12 @@ int main(void) {
     test_concurrent_scope_failure();
     test_provider_generations();
     test_completion_scopes();
+    test_scope_admission_limits_http();
+    test_scope_cooldown_and_pacing();
+    test_scope_rate_limit_http();
+    test_scope_tpm_budget();
+    test_provider_tpm_window();
+    test_provider_tpm_config();
 
     ClayCommands commands;
     memset(&commands, 0, sizeof(commands));

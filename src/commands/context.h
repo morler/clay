@@ -112,6 +112,15 @@ ClayScope *clay_scope_get(ClayScopeRegistry *registry, uint64_t generation,
 
 /* One permit per scope; each successful acquire requires one release. */
 int clay_scope_acquire(ClayScope *scope, int (*should_abort)(void *), void *userdata);
+int clay_scope_try_acquire(ClayScope *scope);
+void clay_scope_note_response(ClayScope *scope, const ClayHttpResponse *response, int permanent_quota);
+void clay_scope_set_tpm(ClayScope *scope, uint64_t tpm);
+int clay_scope_admit(ClayScope *scope, size_t request_bytes, int (*should_abort)(void *), void *userdata, uint64_t *ticket);
+void clay_scope_finish(ClayScope *scope, uint64_t ticket, int usage_known, uint64_t usage_tokens);
+void clay_scope_test_tpm_window(ClayScope *scope, uint64_t ms);
+uint64_t clay_scope_test_spent(ClayScope *scope);
+uint64_t clay_scope_test_pace(ClayScope *scope);
+uint64_t clay_scope_test_cooldown_left(ClayScope *scope);
 void clay_scope_release(ClayScope *scope);
 
 typedef int (*ClayCompletionTestHook)(ClayScope *, const ClayOpenAICallbacks *, void *);

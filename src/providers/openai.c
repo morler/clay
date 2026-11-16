@@ -355,6 +355,8 @@ typedef struct {
   char *sse_error;
   int sse_failed;
   int sse_rate_limit;
+  int usage_known; /* the stream reported usage; tokens are input + output */
+  uint64_t usage_tokens;
   ClayOpenAIRetryState retry;
 } ClayStreamState;
 
@@ -372,6 +374,8 @@ static void stream_state_init(ClayStreamState *st,
   st->sse_error = NULL;
   st->sse_failed = 0;
   st->sse_rate_limit = 0;
+  st->usage_known = 0;
+  st->usage_tokens = 0;
   st->retry = (ClayOpenAIRetryState){0};
 }
 
@@ -440,6 +444,14 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
   }
 
   ClayJson *usage = clay_json_object_get(root, "usage");
+  if (clay_json_type(usage) == CLAY_JSON_OBJECT) {
+    ClayTokenUsage counted;
+    clay_openai_usage_from_json(usage, &counted);
+    if (counted.input_tokens >= 0 && counted.output_tokens >= 0) {
+      st->usage_known = 1;
+      st->usage_tokens = (uint64_t)counted.input_tokens + (uint64_t)counted.output_tokens;
+    }
+  }
   if (clay_json_type(usage) == CLAY_JSON_OBJECT && st->callbacks &&
       (st->callbacks->on_usage || st->callbacks->on_usage_details))
     st->retry.callback_delivered = 1;
@@ -737,7 +749,25 @@ retry_request:;
     req.max_response_bytes = CLAY_OPENAI_STREAM_RESPONSE_LIMIT;
 
     ClayHttpResponse resp;
+    /* One permit per attempt, released before retry sleeps, refresh or tools. */
+    ClayScope *scope = clay_openai_scope(client);
+    uint64_t ticket = 0;
+    int admitted = scope ? clay_scope_admit(scope, body.len, should_abort_stream, &st, &ticket) : 1;
+    if (admitted != 1) {
+      clay_str_free(&url);
+      clay_str_free(&auth);
+      clay_str_free(&body);
+      stream_state_free(&st);
+      if (admitted == 0)
+        return 1;
+      if (callbacks && callbacks->on_error)
+        callbacks->on_error(0, "request not admitted: scope queue, wait limit, or tpm budget",
+                            callbacks->userdata);
+      return -1;
+    }
     int rc = clay_http_request(&req, &resp);
+    if (scope)
+      clay_scope_finish(scope, ticket, st.usage_known, st.usage_tokens);
     client->last_status = resp.status;
     if (!clay_openai_retry_safe(&st.retry)) client->last_run_replay_safe = 0;
 
@@ -757,6 +787,7 @@ retry_request:;
       decision.error_body_len = strlen(st.sse_error);
       decision.error_body_truncated = 0;
     }
+    clay_scope_note_response(scope, &decision, clay_openai_permanent_quota(&decision));
     if (retry_enabled && rc == 0 && !st.limit_exceeded &&
         !decision.error_body_truncated &&
         clay_provider_retry_wait(&retry, &clock, &decision, clay_openai_permanent_quota(&decision),

@@ -1,3 +1,4 @@
+#include "clay/array.h"
 #include "clay/http.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -16,9 +17,13 @@ static const char *reply;
 static int seq_mode;
 static int seq_n;
 static long seq_status[3];
+static char seq_auth[3][256]; /* Authorization header seen by each sequenced request */
 static const char *seq_body[3];
+static void free_models(ClayArray *models) {
+  for (size_t i = 0; i < models->count; i++) free(*(char **)clay_array_get(models, i));
+  clay_array_free(models);
+}
 static int test_http(const ClayHttpRequest *request, ClayHttpResponse *response) {
-  (void)request;
   memset(response, 0, sizeof(*response));
   if (seq_mode) {
     if (seq_n >= (int)(sizeof(seq_status) / sizeof(seq_status[0]))) {
@@ -26,6 +31,10 @@ static int test_http(const ClayHttpRequest *request, ClayHttpResponse *response)
       response->body = strdup("{}");
       return 0;
     }
+    seq_auth[seq_n][0] = 0;
+    for (size_t i = 0; i < request->header_count; i++)
+      if (!strcmp(request->headers[i].name, "Authorization"))
+        snprintf(seq_auth[seq_n], sizeof(seq_auth[0]), "%s", request->headers[i].value);
     response->status = seq_status[seq_n];
     response->body = strdup(seq_body[seq_n++]);
     return 0;
@@ -92,7 +101,7 @@ int main(void) {
   assert(seq_n == 3);
   assert(models.count == 1);
   assert(strcmp(client->credentials.access_token, "new-access") == 0);
-  clay_array_free(&models);
+  free_models(&models);
   clay_array_init(&models, sizeof(char *));
   clay_grok_destroy(client);
   /* Models 200 on the first try: no refresh, one request. */
@@ -104,7 +113,7 @@ int main(void) {
   assert(clay_grok_list_models(ok_client, &models) == 0);
   assert(seq_n == 1 && models.count == 1);
   assert(strcmp(ok_client->credentials.access_token, "old-access") == 0);
-  clay_array_free(&models);
+  free_models(&models);
   clay_grok_destroy(ok_client);
   /* Models 403 -> refresh -> retry succeeds. */
   client = clay_grok_create(&fresh, "model");
@@ -116,7 +125,8 @@ int main(void) {
   seq_status[2] = 200; seq_body[2] = "{\"data\":[{\"id\":\"grok-test\"}]}";
   assert(clay_grok_list_models(client, &models) == 0);
   assert(seq_n == 3 && models.count == 1);
-  clay_array_free(&models);
+  assert(!strcmp(seq_auth[0], "Bearer old-access") && !strcmp(seq_auth[2], "Bearer new-access"));
+  free_models(&models);
   clay_grok_destroy(client);
   /* Models 401 -> refresh fails (invalid_grant) -> no retry, error returned. */
   client = clay_grok_create(&fresh, "model");
@@ -127,7 +137,7 @@ int main(void) {
   seq_status[1] = 400; seq_body[1] = "{\"error\":\"invalid_grant\"}";
   assert(clay_grok_list_models(client, &models) != 0);
   assert(seq_n == 2 && models.count == 0);
-  clay_array_free(&models);
+  free_models(&models);
   clay_grok_destroy(client);
   /* Models 401 -> refresh ok -> models 401 again: exactly one refresh, no third retry. */
   client = clay_grok_create(&fresh, "model");
@@ -139,7 +149,7 @@ int main(void) {
   seq_status[2] = 401; seq_body[2] = "{}";
   assert(clay_grok_list_models(client, &models) != 0);
   assert(seq_n == 3 && models.count == 0);
-  clay_array_free(&models);
+  free_models(&models);
   clay_grok_destroy(client);
   /* Stale OpenAI key forces a refresh even when the token is not near expiry. */
   client = clay_grok_create(&fresh, "model");

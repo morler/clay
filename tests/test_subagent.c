@@ -6,6 +6,8 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -693,25 +695,76 @@ static void test_grok_concurrent_snapshot(void) {
     assert(!pthread_barrier_destroy(&race.barrier));
     free(config.access_token); free(config.refresh_token);
 }
+static ClayProviderConfig *retry_config(void) {
+    ClayProviderConfig *config = calloc(1, sizeof(*config));
+    assert(config);
+    config->id = strdup("retry-test");
+    config->access_token = strdup("new");
+    config->refresh_token = strdup("new-r");
+    config->base_url = strdup("");
+    config->expires_at = 1;
+    assert(config->id && config->access_token && config->refresh_token && config->base_url);
+    return config;
+}
+
 static void test_unpersisted_retry(void) {
-    /* A blocked HOME makes clay_config_save fail; the flag must survive until a save succeeds. */
+    char root[] = "/tmp/clay_retry_XXXXXX";
+    assert(mkdtemp(root));
+    char blocked[256], ok[256], path[512];
+    snprintf(blocked, sizeof(blocked), "%s/blocked", root);
+    snprintf(ok, sizeof(ok), "%s/ok", root);
+    FILE *file = fopen(blocked, "w");  /* a regular file as HOME makes ~/.clay creation fail */
+    assert(file);
+    fclose(file);
     const char *home = getenv("HOME");
     char *saved_home = home ? strdup(home) : NULL;
-    assert(!system("rm -rf /tmp/clay_retry_ok /tmp/clay_retry_blocked && touch /tmp/clay_retry_blocked"));
-    assert(!setenv("HOME", "/tmp/clay_retry_blocked", 1));
-    ClayProviderConfig config = {.id = "retry-test", .access_token = "new", .refresh_token = "new-r", .expires_at = 1};
-    ClayConnectedProvider provider = {.config = &config};
+    assert(!setenv("HOME", blocked, 1));
+
+    /* Snapshot path: a failed save keeps the flag; a later retry persists and clears it. */
+    ClayConnectedProvider provider = {0};
+    provider.config = retry_config();
     provider.grok_refresh_unpersisted = 1;
     uint64_t version;
     ClayGrok *client = clay_commands_grok_snapshot(&provider, NULL, &version);
     assert(client && provider.grok_refresh_unpersisted == 1);
     clay_grok_destroy(client);
-    assert(!system("mkdir -p /tmp/clay_retry_ok"));
-    assert(!setenv("HOME", "/tmp/clay_retry_ok", 1));
+    assert(!mkdir(ok, 0700));
+    assert(!setenv("HOME", ok, 1));
+    provider.grok_retry_at = 0;  /* skip the failure backoff */
     client = clay_commands_grok_snapshot(&provider, NULL, &version);
     assert(client && provider.grok_refresh_unpersisted == 0);
     clay_grok_destroy(client);
-    assert(!access("/tmp/clay_retry_ok/.clay/providers/retry-test.json", F_OK));
+    ClayProviderConfig *loaded = clay_config_load("retry-test");
+    assert(loaded && !strcmp(loaded->access_token, "new") && !strcmp(loaded->refresh_token, "new-r"));
+    clay_config_free(loaded);
+
+    /* Shutdown path: destroy forces a retry even during backoff. Destroy frees the commands struct, so it is heap-allocated. */
+    ClayCommands *commands = calloc(1, sizeof(*commands));
+    assert(commands);
+    clay_array_init(&commands->providers, sizeof(ClayConnectedProvider));
+    ClayConnectedProvider pending = {0};
+    pending.config = retry_config();
+    pending.codex_refresh_unpersisted = 1;
+    pending.codex_retry_at = time(NULL) + 3600;
+    clay_array_push_val(&commands->providers, &pending);
+    assert(!setenv("HOME", blocked, 1));
+    clay_commands_destroy(commands);  /* save fails: warning only, nothing persisted */
+    commands = calloc(1, sizeof(*commands));
+    assert(commands);
+    clay_array_init(&commands->providers, sizeof(ClayConnectedProvider));
+    pending = (ClayConnectedProvider){0};
+    pending.config = retry_config();
+    pending.codex_refresh_unpersisted = 1;
+    pending.codex_retry_at = time(NULL) + 3600;
+    clay_array_push_val(&commands->providers, &pending);
+    assert(!setenv("HOME", ok, 1));
+    clay_commands_destroy(commands);
+    loaded = clay_config_load("retry-test");
+    assert(loaded && !strcmp(loaded->access_token, "new") && !strcmp(loaded->refresh_token, "new-r"));
+    clay_config_free(loaded);
+    snprintf(path, sizeof(path), "%s/.clay/providers/retry-test.json", ok);
+    assert(!access(path, F_OK));
+
     if (saved_home) assert(!setenv("HOME", saved_home, 1));
     else assert(!unsetenv("HOME"));
     free(saved_home);

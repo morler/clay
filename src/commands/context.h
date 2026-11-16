@@ -9,6 +9,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <time.h>
 
 typedef struct {
   const char *id;
@@ -28,6 +29,7 @@ typedef struct {
   uint64_t grok_version; /* protected by the credential mutex */
   uint64_t grok_refresh_epoch, grok_refresh_failure_epoch, grok_refresh_start_version;
   int grok_refresh_unpersisted, grok_refresh_active;
+  time_t codex_retry_at, grok_retry_at; /* earliest next disk retry for unpersisted credentials */
   ClayProviderConfig *config;
   ClayOpenAI *client;
   ClayOpenAICodex *codex_client;

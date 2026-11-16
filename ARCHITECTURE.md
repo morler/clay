@@ -20,7 +20,7 @@ src/main.c          process bootstrap and input loop
 tests/test_*.c      standalone test harnesses
 ```
 
-Each layer only depends on the layers listed above it. `mm` depends on nothing else in the project. `json` depends only on `mm`. `http` depends on `mm` and libcurl, not on `json` - it's a generic transport, agnostic of what's riding on it. `providers/` depends on `mm`, `json`, and `http`. `config` and `chat` depend on `mm`, `json`, and `term` (for the home directory and file permissions - see below), not on `http`/`providers` - they only persist local data. `cli/` depends on `mm` and `term`. `render` depends on `mm` and `term`. `commands` is the integration layer over render/config/chat/providers. `main.c` only owns process startup and the input loop; `tests/test_openai.c` is a separate provider/http harness.
+Each layer only depends on the layers listed above it. `mm` depends on nothing else in the project. `json` depends only on `mm`. `http` depends on `mm` and libcurl, not on `json` - it's a generic transport, agnostic of what's riding on it. `providers/` depends on `mm`, `json`, and `http`. `config` and `chat` depend on `mm`, `json`, and `term` (for the home directory and file permissions - see below), not on `http`/`providers` - they only persist local data. `cli/` depends on `mm` and `term`. `render` depends on `mm` and `term`. `commands` is the integration layer over render/config/chat/providers. `main.c` only owns process startup and the input loop; `tests/test_openai.c` is a separate provider/http harness, and `providers/retry.c` holds the shared 429 replay decision and bounded wait used by all streaming clients. Rate-limit scope and admission live in `commands/scope.c` - see "Request limits, retries, and errors" below.
 
 ### `src/mm/` — memory
 
@@ -37,7 +37,7 @@ An opaque `ClayJson` value tree (null/bool/number/string/array/object), built on
 
 ### `src/http.c` — HTTP client
 
-A thin wrapper over libcurl's easy interface - the only place in the project that links a third-party library, and only dynamically (`-lcurl`, never bundled/static; see CODESTYLE.md). `clay_http_request` runs synchronously on the calling thread; a streaming response is read via a caller-supplied `on_chunk` callback (raw bytes, not line-buffered) instead of being accumulated whole, since a chat completion can stay open for a while. Its optional progress callback can abort an in-flight transfer. Callers needing whole lines (SSE) do their own buffering - see `providers/openai.c`.
+A thin wrapper over libcurl's easy interface - the only place in the project that links a third-party library, and only dynamically (`-lcurl`, never bundled/static; see CODESTYLE.md). `clay_http_request` runs synchronously on the calling thread; a streaming response is read via a caller-supplied `on_chunk` callback (raw bytes, not line-buffered) instead of being accumulated whole, since a chat completion can stay open for a while. Its optional progress callback can abort an in-flight transfer. Callers needing whole lines (SSE) do their own buffering - see `providers/openai.c`. A small allowlist of rate-limit headers is retained verbatim, with a strict parser for a single `Retry-After`; the other headers are reported, not converted into quota figures.
 
 ### `src/providers/` — LLM provider clients
 
@@ -48,7 +48,7 @@ A thin wrapper over libcurl's easy interface - the only place in the project tha
 
 ### `src/config.c` — saved provider credentials
 
-Persists a `ClayProviderConfig {id, apikey, base_url}` per provider as `~/.clay/providers/<id>.json`, restricted to the owner (`clay_term_restrict_file`, POSIX 0600) since it holds a plaintext API key. `~/.clay/config.json` separately stores the selected `provider`, `model`, and `history_preview_count` (default 4). It never stores an active chat id. Doesn't know about provider *types* (openai vs. openrouter vs. a custom endpoint) - that mapping lives in `commands/context.c`'s `PROVIDER_TYPES` table, since they're all the same OpenAI-compatible wire format and only differ by default `base_url`. `id` doubles as both the config filename and the provider type it was connected as.
+Persists a `ClayProviderConfig {id, apikey, base_url}` per provider as `~/.clay/providers/<id>.json`, restricted to the owner (`clay_term_restrict_file`, POSIX 0600) since it holds a plaintext API key. `~/.clay/config.json` separately stores the selected `provider`, `model`, and `history_preview_count` (default 4). The same provider file may carry a positive `tpm` for the local budget; absent or zero means unknown. It never stores an active chat id. Doesn't know about provider *types* (openai vs. openrouter vs. a custom endpoint) - that mapping lives in `commands/context.c`'s `PROVIDER_TYPES` table, since they're all the same OpenAI-compatible wire format and only differ by default `base_url`. `id` doubles as both the config filename and the provider type it was connected as.
 
 ### `src/chat.c` — chat journals
 
@@ -96,6 +96,18 @@ The process bootstrap. It starts the terminal/HTTP layers, builds the command se
 **Color is a single switch.** `clay_color(CODE)` returns `CODE` or `""` depending on one process-wide flag, initialized from `NO_COLOR` and overridable via `--no-color`. Every ANSI constant is routed through it, so no code path can leak color when it's supposed to be off.
 
 **Ownership follows the codebase's `_create`/`_destroy` and `_init`/`_free` convention throughout** — `ClayApp`, `ClayCommandRegistry`, `ClayStr`, `ClayTask`, `ClayModelSelection` all pair a constructor with an explicit teardown; nothing relies on process exit to clean up.
+
+## Request limits, retries, and errors
+
+**Default retry policy.** `providers/retry.c` waits only on an explicit HTTP or SSE 429, at most twice per round: roughly one and two seconds of backoff plus `[0,999]ms` of jitter. A single valid `Retry-After` of at most 30 seconds raises the wait; one wait above 30 seconds, more than 60 seconds in total, cancellation, or a duplicated, invalid, or dropped header ends the attempt and returns the original error. Replay is allowed only while no text, reasoning, tool side effect, or error callback has reached the caller. Permanent quota errors (`insufficient_quota`, `billing_hard_limit_reached`) are classified before retry and never replayed; OAuth refresh is a separate, once-per-request recovery path.
+
+**Admission scopes.** `commands/scope.c` owns a registry per `ClayCommands`, keyed by a process-random salt, the provider connection generation, the endpoint, and the selected model. Main-session and subagent completions share that scope. One permit is in flight at a time, up to eight callers may wait, and each wait is cancellable and capped at ten minutes; wakeups are not FIFO. A 429 cools the scope and doubles its admission spacing from one second up to 30 seconds; a success halves it back to zero. A missing `Retry-After` uses the one-second cooldown, while a duplicated, invalid, or dropped one uses the strict 30-second cap. The permit is released before retry sleeps, credential refreshes, and tool calls. Registry state is process-local: separate `clay` processes do not coordinate.
+
+**Estimated local budget.** A positive `tpm` in `~/.clay/providers/<id>.json` enables a local budget; absent or zero means unknown. Each admission reserves `request_bytes / 2 + 4096` tokens in a 60-second window, then settles with `input_tokens + output_tokens` when the provider reports usage, including when it exceeds the estimate. Without usage the reservation stands until it leaves the window; no assumption is made about cached-token billing. This is Clay's estimate, not the provider's quota.
+
+**The original error stays original.** HTTP keeps the raw error-body prefix (up to 64 KiB) and the allowlisted rate headers. `ClayOpenAIError` carries status, classification, body, header state, and the parsed `Retry-After` to the optional `on_http_error` callback alongside the legacy `on_error` callback. An SSE 429 keeps its real HTTP status and carries `from_sse` and the event text, so the transport failure that followed a stream is not rewritten as a synthetic 429. After retries are exhausted the final response is reported, not an inferred quota number.
+
+**Platform limits are not upstream capacity.** Provider rate limits, account or subscription capacity, and Clay's local estimate are separate things. Received rate-limit headers are retained but never converted into precise RPM or remaining quota. Clay makes no admin or usage API calls: such APIs may require privileges, be rate-limited themselves, vary between platforms, or not exist at all. The code promises no exact quota, general quota-query interface, or cross-process coordination.
 
 ## Build
 

@@ -167,10 +167,78 @@ static pthread_cond_t network_cond = PTHREAD_COND_INITIALIZER;
 static int network_entered, network_release, network_waiting, network_cancel, network_requests;
 static pthread_barrier_t review_barrier;
 static int stale_status, stale_old, stale_new, stale_release;
+
+#define CLAY_STRESS_FLOW_COUNT 5
+typedef struct {
+    const char *marker;
+    int attempts;
+    int is_main;
+    int expect_tool;
+    int expect_error;
+    int missing_header;
+} StressFlow;
+
+typedef struct {
+    pthread_mutex_t lock;
+    StressFlow flows[CLAY_STRESS_FLOW_COUNT];
+    int inflight, peak;
+    int tool_calls, missing_header_retries;
+} StressMock;
+static StressMock *stress_mock;
+
 int __real_clay_http_request(const ClayHttpRequest *, ClayHttpResponse *);
 int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp) {
     if (!review_mock) return __real_clay_http_request(req, resp);
     memset(resp, 0, sizeof(*resp));
+    if (review_mock == 21) {
+        StressMock *mock = stress_mock;
+        assert(mock && req->body);
+        StressFlow *flow = NULL;
+        for (size_t i = 0; i < CLAY_STRESS_FLOW_COUNT; i++) {
+            if (strstr(req->body, mock->flows[i].marker)) {
+                flow = &mock->flows[i];
+                break;
+            }
+        }
+        assert(flow);
+        pthread_mutex_lock(&mock->lock);
+        int attempt = ++flow->attempts;
+        if (++mock->inflight > mock->peak) mock->peak = mock->inflight;
+        if (attempt == 1 && flow->missing_header) mock->missing_header_retries++;
+        if (attempt == 2 && flow->expect_tool) mock->tool_calls++;
+        pthread_mutex_unlock(&mock->lock);
+
+        static const char tool_event[] =
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"stress\",\"function\":{\"name\":\"todowrite\",\"arguments\":\"{\\\"todos\\\":[{\\\"content\\\":\\\"stress step\\\",\\\"status\\\":\\\"completed\\\"}]}\"}}]}}]}\n\n";
+        static const char content_event[] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"offline summary\"}}]}\n\n";
+        if (flow->expect_error) {
+            resp->status = 500;
+            resp->error_body = strdup("offline failure");
+            resp->error_body_len = strlen(resp->error_body);
+        } else if (attempt == 1) {
+            resp->status = 429;
+            resp->error_body = strdup("offline limited");
+            resp->error_body_len = strlen(resp->error_body);
+            if (!flow->missing_header) {
+                resp->rate_header_count = 1;
+                resp->rate_headers[0].name = "retry-after";
+                strcpy(resp->rate_headers[0].value, "0");
+            }
+        } else if (attempt == 2 && flow->expect_tool) {
+            resp->status = 200;
+            assert(req->on_chunk);
+            req->on_chunk(tool_event, strlen(tool_event), req->userdata);
+        } else {
+            resp->status = 200;
+            assert(req->on_chunk);
+            req->on_chunk(content_event, strlen(content_event), req->userdata);
+        }
+        pthread_mutex_lock(&mock->lock);
+        mock->inflight--;
+        pthread_mutex_unlock(&mock->lock);
+        return 0;
+    }
     if (review_mock >= 13 && review_mock <= 17) {
         if (strstr(req->url, "/oauth2/token")) {
             pthread_mutex_lock(&network_lock);
@@ -855,6 +923,260 @@ static int has_tool(ClayToolSet *set, const char *name) {
         if (strcmp(tool->name, name) == 0) return 1;
     }
     return 0;
+}
+
+static void stress_mock_init(StressMock *mock) {
+    memset(mock, 0, sizeof(*mock));
+    assert(!pthread_mutex_init(&mock->lock, NULL));
+    mock->flows[0] = (StressFlow){"branch-a", 0, 0, 1, 0, 0};
+    mock->flows[1] = (StressFlow){"branch-b", 0, 0, 1, 0, 0};
+    mock->flows[2] = (StressFlow){"branch-c", 0, 0, 1, 0, 1};
+    mock->flows[3] = (StressFlow){"branch-d", 0, 0, 0, 1, 0};
+    mock->flows[4] = (StressFlow){"main-session", 0, 1, 0, 0, 0};
+}
+
+typedef struct { ClayCommands *commands; ClayJson *result; } StressBatch;
+
+static void *stress_run_batch(void *arg) {
+    StressBatch *batch = arg;
+    batch->result = call(batch->commands,
+        "{\"tasks\":["
+        "{\"description\":\"a\",\"prompt\":\"branch-a stress\"},"
+        "{\"description\":\"b\",\"prompt\":\"branch-b stress\"},"
+        "{\"description\":\"c\",\"prompt\":\"branch-c stress\"},"
+        "{\"description\":\"d\",\"prompt\":\"branch-d stress\"}]}");
+    return NULL;
+}
+
+static void *stress_main_session(void *arg) {
+    ClayCommands *commands = arg;
+    ClayJson *messages = clay_json_array();
+    clay_json_array_push(messages, clay_openai_message("user", "main-session stress"));
+    int rc = clay_commands_run_completion(commands, messages, NULL, 1, NULL, NULL);
+    clay_json_free(messages);
+    assert(rc == 0);
+    return NULL;
+}
+
+static void stress_commands_init(ClayCommands *commands) {
+    memset(commands, 0, sizeof(*commands));
+    clay_array_init(&commands->providers, sizeof(ClayConnectedProvider));
+    clay_array_init(&commands->tasks, sizeof(ClayBackgroundTask *));
+    clay_array_init(&commands->plan.todos, sizeof(ClayTodoItem));
+    clay_array_init(&commands->mcp_bindings, sizeof(ClayMcpToolBinding));
+    clay_array_init(&commands->mcp_servers, sizeof(ClayMcpServer *));
+    commands->mcp_connect_attempted = 1;
+    commands->mode = CLAY_MODE_ACT;
+    commands->scopes = clay_scope_registry_create();
+    commands->chat = clay_chat_create("system");
+    assert(commands->scopes && commands->chat);
+    pthread_mutexattr_t attributes;
+    assert(!pthread_mutexattr_init(&attributes));
+    assert(!pthread_mutexattr_settype(&attributes, PTHREAD_MUTEX_RECURSIVE));
+    assert(!pthread_mutex_init(&commands->tool_lock, &attributes));
+    pthread_mutexattr_destroy(&attributes);
+}
+
+static void stress_commands_free(ClayCommands *commands, const char *logout_id) {
+    commands->selected_provider = NULL;
+    commands->selected_model = NULL;
+    ClayConnectedProvider *provider = clay_commands_find_provider(commands, logout_id);
+    if (provider) {
+        assert(clay_config_save(provider->config) == 0);
+        assert(clay_commands_logout_provider(commands, logout_id) == 0);
+    }
+    clay_array_free(&commands->providers);
+    clay_scope_registry_destroy(commands->scopes);
+    clay_chat_destroy(commands->chat);
+    clay_array_free(&commands->tasks);
+    clay_array_free(&commands->plan.todos);
+    clay_array_free(&commands->mcp_bindings);
+    clay_array_free(&commands->mcp_servers);
+    pthread_mutex_destroy(&commands->tool_lock);
+}
+
+static void stress_assert_transcript(ClayJson *entry, int tool_calls, const char *summary) {
+    const char *path = clay_json_string_value(clay_json_object_get(entry, "transcript"));
+    assert(path && *path);
+    ClayStr text;
+    clay_str_init(&text);
+    assert(!clay_term_read_file(path, 1 << 20, &text));
+    ClayJson *document = clay_json_parse(text.data, NULL);
+    assert(document);
+    assert((int)clay_json_number_value(clay_json_object_get(document, "tool_calls")) == tool_calls);
+    const char *saved = clay_json_string_value(clay_json_object_get(document, "summary"));
+    assert(saved && strstr(saved, summary));
+    clay_json_free(document);
+    clay_str_free(&text);
+}
+
+/* One main completion and four subagents over one offline HTTP scope: 429 recovery,
+   a real tool round trip, a missing header, and a hard error are all exercised. */
+static void test_subagent_stress_http(void) {
+    ClayCommands commands;
+    stress_commands_init(&commands);
+    assert(setenv("OPENAI_API_KEY", "offline-key", 1) == 0);
+    const ClayProviderType *type = clay_commands_find_provider_type("openai");
+    assert(type);
+    clay_commands_load_provider(&commands, type);
+    commands.selected_provider = "openai";
+    commands.selected_model = "stress-model";
+
+    StressMock mock;
+    stress_mock_init(&mock);
+    stress_mock = &mock;
+    review_mock = 21;
+    StressBatch batch = {&commands, NULL};
+    pthread_t batch_thread, main_thread;
+    assert(!pthread_create(&batch_thread, NULL, stress_run_batch, &batch));
+    assert(!pthread_create(&main_thread, NULL, stress_main_session, &commands));
+    assert(!pthread_join(batch_thread, NULL));
+    assert(!pthread_join(main_thread, NULL));
+    review_mock = 0;
+    stress_mock = NULL;
+
+    assert(mock.inflight == 0 && mock.peak == 1);
+    assert(mock.tool_calls == 3 && mock.missing_header_retries == 1);
+    assert(mock.flows[0].attempts == 3 && mock.flows[1].attempts == 3);
+    assert(mock.flows[2].attempts == 3 && mock.flows[3].attempts == 1);
+    assert(mock.flows[4].attempts == 2);
+
+    assert(batch.result && !ok(batch.result));
+    ClayJson *results = clay_json_object_get(batch.result, "results");
+    assert(results && clay_json_array_count(results) == 4);
+    for (size_t i = 0; i < 4; i++) {
+        ClayJson *entry = clay_json_array_get(results, i);
+        if (i == 3) {
+            assert(!ok(entry));
+            assert(strstr(error_of(entry), "no summary"));
+            assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 0);
+            stress_assert_transcript(entry, 0, "");
+        } else {
+            assert(ok(entry));
+            assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 1);
+            const char *summary = clay_json_string_value(clay_json_object_get(entry, "summary"));
+            assert(summary && strstr(summary, "offline summary"));
+            stress_assert_transcript(entry, 1, "offline summary");
+        }
+    }
+    clay_json_free(batch.result);
+    pthread_mutex_destroy(&mock.lock);
+    assert(unsetenv("OPENAI_API_KEY") == 0);
+    stress_commands_free(&commands, "openai");
+}
+
+typedef struct {
+    ClayScope *expected_scope;
+    pthread_mutex_t lock;
+    int cancel_first;
+    int calls, tool_calls, cancelled;
+} MixedProbe;
+
+static int mixed_scope_probe(ClayScope *scope, const ClayOpenAICallbacks *callbacks, void *userdata) {
+    MixedProbe *probe = userdata;
+    assert(scope == probe->expected_scope);
+    pthread_mutex_lock(&probe->lock);
+    probe->calls++;
+    int cancel = probe->cancel_first && callbacks && callbacks->userdata && !probe->cancelled;
+    if (cancel) probe->cancelled = 1;
+    pthread_mutex_unlock(&probe->lock);
+    if (cancel) return 1;
+    if (callbacks && callbacks->on_tool_call)
+        callbacks->on_tool_call("todowrite",
+            "{\"todos\":[{\"content\":\"mixed step\",\"status\":\"completed\"}]}",
+            callbacks->userdata);
+    if (callbacks && callbacks->on_token)
+        callbacks->on_token("mixed summary", callbacks->userdata);
+    if (callbacks && callbacks->userdata) {
+        pthread_mutex_lock(&probe->lock);
+        probe->tool_calls++;
+        pthread_mutex_unlock(&probe->lock);
+    }
+    return 0;
+}
+
+static ClayScope *stress_scope(ClayCommands *commands, const char *id, const char *model) {
+    ClayConnectedProvider *provider = clay_commands_find_provider(commands, id);
+    assert(provider);
+    ClayScope *scope = clay_scope_get(commands->scopes, provider->generation,
+                                      provider->config->base_url, model);
+    assert(scope);
+    return scope;
+}
+
+/* Two sessions with different providers/models run four branches plus their own main
+   completion; the second session cancels one branch without disturbing the others. */
+static void test_subagent_stress_mixed(void) {
+    ClayCommands openai, grok;
+    stress_commands_init(&openai);
+    stress_commands_init(&grok);
+    assert(setenv("OPENAI_API_KEY", "offline-key", 1) == 0);
+    assert(setenv("GROK_ACCESS_TOKEN", "offline-access", 1) == 0);
+    assert(setenv("GROK_REFRESH_TOKEN", "offline-refresh", 1) == 0);
+    clay_commands_load_provider(&openai, clay_commands_find_provider_type("openai"));
+    clay_commands_load_provider(&grok, clay_commands_find_provider_type("grok"));
+    openai.selected_provider = "openai";
+    openai.selected_model = "model-a";
+    grok.selected_provider = "grok";
+    grok.selected_model = "model-b";
+
+    MixedProbe first = {.expected_scope = stress_scope(&openai, "openai", "model-a")};
+    MixedProbe second = {.expected_scope = stress_scope(&grok, "grok", "model-b"), .cancel_first = 1};
+    assert(first.expected_scope != second.expected_scope);
+    assert(!pthread_mutex_init(&first.lock, NULL));
+    assert(!pthread_mutex_init(&second.lock, NULL));
+    openai.completion_test_hook = mixed_scope_probe;
+    openai.completion_test_userdata = &first;
+    grok.completion_test_hook = mixed_scope_probe;
+    grok.completion_test_userdata = &second;
+
+    StressBatch batch_a = {&openai, NULL}, batch_b = {&grok, NULL};
+    pthread_t threads[2];
+    assert(!pthread_create(&threads[0], NULL, stress_run_batch, &batch_a));
+    assert(!pthread_create(&threads[1], NULL, stress_main_session, &openai));
+    assert(!pthread_join(threads[0], NULL));
+    assert(!pthread_join(threads[1], NULL));
+    assert(!pthread_create(&threads[0], NULL, stress_run_batch, &batch_b));
+    assert(!pthread_create(&threads[1], NULL, stress_main_session, &grok));
+    assert(!pthread_join(threads[0], NULL));
+    assert(!pthread_join(threads[1], NULL));
+
+    assert(first.calls == 5 && first.tool_calls == 4 && !first.cancelled);
+    assert(second.calls == 5 && second.tool_calls == 3 && second.cancelled);
+    openai.completion_test_hook = NULL;
+    grok.completion_test_hook = NULL;
+
+    assert(batch_a.result && ok(batch_a.result));
+    assert(batch_b.result && !ok(batch_b.result));
+    ClayJson *results_a = clay_json_object_get(batch_a.result, "results");
+    ClayJson *results_b = clay_json_object_get(batch_b.result, "results");
+    assert(clay_json_array_count(results_a) == 4 && clay_json_array_count(results_b) == 4);
+    for (size_t i = 0; i < 4; i++) {
+        ClayJson *entry = clay_json_array_get(results_a, i);
+        assert(ok(entry));
+        assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 1);
+        const char *summary = clay_json_string_value(clay_json_object_get(entry, "summary"));
+        assert(summary && strstr(summary, "mixed summary"));
+
+        entry = clay_json_array_get(results_b, i);
+        if (ok(entry)) {
+            assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 1);
+            summary = clay_json_string_value(clay_json_object_get(entry, "summary"));
+            assert(summary && strstr(summary, "mixed summary"));
+        } else {
+            assert(strstr(error_of(entry), "cancelled"));
+        }
+    }
+
+    clay_json_free(batch_a.result);
+    clay_json_free(batch_b.result);
+    pthread_mutex_destroy(&first.lock);
+    pthread_mutex_destroy(&second.lock);
+    assert(unsetenv("OPENAI_API_KEY") == 0);
+    assert(unsetenv("GROK_ACCESS_TOKEN") == 0);
+    assert(unsetenv("GROK_REFRESH_TOKEN") == 0);
+    stress_commands_free(&openai, "openai");
+    stress_commands_free(&grok, "grok");
 }
 
 typedef struct {
@@ -1711,6 +2033,8 @@ int main(void) {
     test_scope_tpm_budget();
     test_provider_tpm_window();
     test_provider_tpm_config();
+    test_subagent_stress_http();
+    test_subagent_stress_mixed();
 
     ClayCommands commands;
     memset(&commands, 0, sizeof(commands));

@@ -46,6 +46,25 @@ int main(void) {
     assert(!strstr(index, "Rewrote auth for compliance"));
     free(index);
 
+    /* The index is capped: forty entries by newest, then a line that says
+       where the rest are. */
+    for (int i = 0; i < 40; i++) {
+        char slug[16];
+        snprintf(slug, sizeof(slug), "filler-%02d", i);
+        assert(clay_memory_write(slug, "task", "filler entry", "body") == 0);
+    }
+    index = clay_memory_index();
+    assert(index);
+    assert(strlen(index) <= 4 * 1024);
+    assert(strstr(index, "entries; memory_list and memory_read show the rest"));
+    assert(strstr(index, "filler entry"));
+    /* Newest first: the last filler written is listed before the first. */
+    char *newest = strstr(index, "filler-39");
+    char *oldest = strstr(index, "filler-32");
+    assert(newest && oldest && newest < oldest);
+    assert(!strstr(index, "filler-00")); /* beyond the ceiling */
+    free(index);
+
     ClayStr path;
     clay_str_init(&path);
     clay_str_printf(&path, "%s/.clay/memory/index.json", home);
@@ -56,6 +75,12 @@ int main(void) {
     clay_str_clear(&path);
     clay_str_printf(&path, "%s/.clay/memory/bug-fix-1.md", home);
     assert(remove(path.data) == 0);
+    for (int i = 0; i < 40; i++) {
+        char slug[16], file[512];
+        snprintf(slug, sizeof(slug), "filler-%02d", i);
+        snprintf(file, sizeof(file), "%s/.clay/memory/%s.md", home, slug);
+        assert(remove(file) == 0);
+    }
     clay_str_clear(&path);
     clay_str_printf(&path, "%s/.clay/memory", home);
     assert(rmdir(path.data) == 0);

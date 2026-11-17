@@ -370,18 +370,46 @@ int clay_skill_set_enabled(const char *name, int enabled) {
     return save_manifest(root);
 }
 
+/* The index is in every chat's system prompt; the body is not. */
+#define CLAY_SKILL_INDEX_MAX_ENTRIES 60
+#define CLAY_SKILL_INDEX_MAX_BYTES (8 * 1024)
+
 char *clay_skill_index(void) {
     ClayJson *root = load_manifest();
     ClayJson *entries = clay_json_object_get(root, "entries");
     ClayStr out;
     clay_str_init(&out);
+    size_t shown = 0, enabled = 0;
+    /* Names and one-line descriptions only, capped like the memory index:
+       this text is in every chat's system prompt, and the full instructions
+       load on demand through the skill tool. */
     for (size_t i = 0; i < clay_json_array_count(entries); i++) {
         ClayJson *entry = clay_json_array_get(entries, i);
-        ClayJson *enabled = clay_json_object_get(entry, "enabled");
-        if (enabled && clay_json_type(enabled) == CLAY_JSON_BOOL && !clay_json_bool_value(enabled)) continue;
-        clay_str_printf(&out, "- %s: %s\n", clay_json_string_value(clay_json_object_get(entry, "name")),
+        ClayJson *is_enabled = clay_json_object_get(entry, "enabled");
+        if (is_enabled && clay_json_type(is_enabled) == CLAY_JSON_BOOL &&
+            !clay_json_bool_value(is_enabled))
+            continue;
+        enabled++;
+        if (shown >= CLAY_SKILL_INDEX_MAX_ENTRIES ||
+            out.len >= CLAY_SKILL_INDEX_MAX_BYTES)
+            continue;
+        ClayStr line;
+        clay_str_init(&line);
+        clay_str_printf(&line, "- %s: %.200s\n",
+                        clay_json_string_value(clay_json_object_get(entry, "name")),
                         clay_json_string_value(clay_json_object_get(entry, "description")));
+        if (out.len + line.len > CLAY_SKILL_INDEX_MAX_BYTES) {
+            clay_str_free(&line);
+            continue;
+        }
+        clay_str_push_n(&out, line.data, line.len);
+        clay_str_free(&line);
+        shown++;
     }
+    if (shown < enabled)
+        clay_str_printf(&out,
+                        "(%zu of %zu skills listed; /skill lists the rest)\n",
+                        shown, enabled);
     clay_json_free(root);
     return out.data;
 }

@@ -1,7 +1,7 @@
 ---
 id: 106
 title: memory 与 skill 索引上限
-status: open
+status: in-progress
 priority: medium
 labels:
     - type:task

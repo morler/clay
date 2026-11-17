@@ -139,17 +139,45 @@ int clay_memory_delete(const char *slug) {
     return save_manifest(root);
 }
 
+/* The index rides in every chat's system prompt. Twenty entries and 4 KB is
+   what killi settled on for the same job. */
+#define CLAY_MEMORY_INDEX_MAX_ENTRIES 20
+#define CLAY_MEMORY_INDEX_MAX_BYTES (4 * 1024)
+
 char *clay_memory_index(void) {
     ClayJson *root = load_manifest();
     ClayJson *entries = clay_json_object_get(root, "entries");
     ClayStr out;
     clay_str_init(&out);
-    for (size_t i = 0; i < clay_json_array_count(entries); i++) {
+    size_t shown = 0;
+    /* Newest first: when the ceiling bites, what the user touched last is
+       what the model most likely needs. Every line is one index entry, so
+       the byte budget is checked per line and never splits one. */
+    for (size_t i = clay_json_array_count(entries); i-- > 0;) {
+        if (shown >= CLAY_MEMORY_INDEX_MAX_ENTRIES ||
+            out.len >= CLAY_MEMORY_INDEX_MAX_BYTES)
+            break;
         ClayJson *entry = clay_json_array_get(entries, i);
-        clay_str_printf(&out, "- %s [%s]: %s\n", clay_json_string_value(clay_json_object_get(entry, "slug")),
+        ClayStr line;
+        clay_str_init(&line);
+        clay_str_printf(&line, "- %s [%s]: %s\n",
+                        clay_json_string_value(clay_json_object_get(entry, "slug")),
                         clay_json_string_value(clay_json_object_get(entry, "type")),
                         clay_json_string_value(clay_json_object_get(entry, "summary")));
+        if (out.len + line.len > CLAY_MEMORY_INDEX_MAX_BYTES) {
+            clay_str_free(&line);
+            break;
+        }
+        clay_str_push_n(&out, line.data, line.len);
+        clay_str_free(&line);
+        shown++;
     }
+    size_t total = clay_json_array_count(entries);
+    if (shown < total)
+        clay_str_printf(&out,
+                        "(%zu of %zu entries; memory_list and memory_read "
+                        "show the rest)\n",
+                        shown, total);
     clay_json_free(root);
     return out.data;
 }

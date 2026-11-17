@@ -74,6 +74,24 @@ int main(void) {
     assert(strstr(index, "demo-skill: A demo skill for tests."));
     free(index);
 
+    /* Sixty skill names fit; the sixty-first is replaced by a pointer to
+       /skill instead of growing every chat's system prompt. */
+    for (int i = 0; i < 70; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "filler-%02d", i);
+        assert(clay_skill_install(source_dir, name) == 0);
+    }
+    index = clay_skill_index();
+    assert(index);
+    assert(strlen(index) <= 8 * 1024);
+    assert(strstr(index, "skills listed; /skill lists the rest"));
+    free(index);
+    for (int i = 0; i < 70; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "filler-%02d", i);
+        assert(clay_skill_remove(name) == 0);
+    }
+
     ClayArray entries;
     clay_skill_list(&entries);
     assert(entries.count == 1);

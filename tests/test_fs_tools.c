@@ -256,6 +256,33 @@ int main(void) {
     assert(ok(result));
     clay_json_free(result);
 
+    /* More matches than the walk lists: the result says so and names the way
+       to narrow it. */
+    {
+        assert(mkdir("glob-many", 0755) == 0);
+        for (int i = 0; i < 520; i++) {
+            char name[64];
+            snprintf(name, sizeof(name), "glob-many/f%03d.txt", i);
+            FILE *file = fopen(name, "w");
+            assert(file);
+            assert(fclose(file) == 0);
+        }
+        result = call(clay_fs_tool_glob,
+                      "{\"pattern\":\"glob-many/*.txt\"}");
+        assert(ok(result));
+        assert(clay_json_bool_value(clay_json_object_get(result, "output_truncated")));
+        const char *hint =
+            clay_json_string_value(clay_json_object_get(result, "hint"));
+        assert(hint && strstr(hint, "narrower"));
+        clay_json_free(result);
+        for (int i = 0; i < 520; i++) {
+            char name[64];
+            snprintf(name, sizeof(name), "glob-many/f%03d.txt", i);
+            assert(unlink(name) == 0);
+        }
+        assert(rmdir("glob-many") == 0);
+    }
+
     result = call(clay_fs_tool_read, "{\"path\":\"a.txt\"}");
     assert(ok(result));
     const char *output = clay_json_string_value(clay_json_object_get(result, "output"));

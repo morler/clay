@@ -995,6 +995,12 @@ ClayJson *clay_fs_tool_glob(const ClayJson *arguments, void *userdata) {
     clay_json_object_set(result, "ok", clay_json_bool(1));
     clay_json_object_set(result, "output", clay_json_string(output.data));
     clay_json_object_set(result, "output_truncated", clay_json_bool(truncated));
+    if (truncated)
+        clay_json_object_set(
+            result, "hint",
+            clay_json_string("Only the first matches are listed (the walk stops "
+                             "at its match and scan limits): pass a narrower "
+                             "path or pattern to see the rest."));
     clay_str_free(&output);
     return result;
 }

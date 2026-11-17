@@ -1,7 +1,7 @@
 ---
 id: 84
 title: 重构 /compact：保留用户原话、压缩摘要请求、落 journal 并恢复 context 块
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -18,6 +18,7 @@ relations:
         - 119
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 现状（src/commands/compact.c）：

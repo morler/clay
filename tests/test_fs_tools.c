@@ -263,6 +263,66 @@ int main(void) {
     assert(strstr(output, "line2"));
     clay_json_free(result);
 
+    /* A long file pages: the default window ends with where to continue, and
+       following that offset reaches the rest. */
+    {
+        ClayStr big;
+        clay_str_init(&big);
+        for (int i = 1; i <= 2100; i++) clay_str_printf(&big, "line %d\\n", i);
+        ClayStr arguments;
+        clay_str_init(&arguments);
+        clay_str_printf(&arguments,
+                        "{\"path\":\"big.txt\",\"content\":\"%s\"}",
+                        big.data);
+        result = call(clay_fs_tool_write, arguments.data);
+        assert(ok(result));
+        clay_json_free(result);
+
+        result = call(clay_fs_tool_read, "{\"path\":\"big.txt\"}");
+        assert(ok(result));
+        const char *paged =
+            clay_json_string_value(clay_json_object_get(result, "output"));
+        assert(strstr(paged, "line 1"));
+        assert(strstr(paged, "[Showing lines 1-2000 of 2100. Use offset=2001"));
+        assert(!strstr(paged, "line 2100"));
+        clay_json_free(result);
+
+        result = call(clay_fs_tool_read, "{\"path\":\"big.txt\",\"offset\":2001}");
+        assert(ok(result));
+        const char *tail =
+            clay_json_string_value(clay_json_object_get(result, "output"));
+        assert(strstr(tail, "line 2100"));
+        assert(!strstr(tail, "Use offset="));
+        clay_json_free(result);
+
+        /* One enormous line is cut and says so, instead of one result of
+           megabytes. */
+        ClayStr single;
+        clay_str_init(&single);
+        for (int i = 0; i < 5000; i++) clay_str_push_char(&single, 'x');
+        ClayStr huge_args;
+        clay_str_init(&huge_args);
+        clay_str_printf(&huge_args,
+                        "{\"path\":\"huge.txt\",\"content\":\"%s\"}",
+                        single.data);
+        result = call(clay_fs_tool_write, huge_args.data);
+        assert(ok(result));
+        clay_json_free(result);
+        result = call(clay_fs_tool_read, "{\"path\":\"huge.txt\"}");
+        assert(ok(result));
+        const char *cut =
+            clay_json_string_value(clay_json_object_get(result, "output"));
+        assert(strstr(cut, "[... line cut]"));
+        assert(strlen(cut) < 3000);
+        clay_json_free(result);
+        assert(unlink("big.txt") == 0);
+        assert(unlink("huge.txt") == 0);
+        clay_str_free(&big);
+        clay_str_free(&arguments);
+        clay_str_free(&single);
+        clay_str_free(&huge_args);
+    }
+
 #ifdef __linux__
     char walk_template[] = "/tmp/clay_glob_outside_XXXXXX";
     walk_outside = mkdtemp(walk_template); assert(walk_outside);

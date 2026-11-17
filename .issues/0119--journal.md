@@ -1,7 +1,7 @@
 ---
 id: 119
 title: 压缩结果写入 journal 并可重放
-status: in-progress
+status: closed
 priority: high
 labels:
     - type:task
@@ -16,6 +16,7 @@ relations:
         - 118
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：src/commands/compact.c:159-160 增加持久化（复用 chat.c 的 turn 记录或新增 compaction 记录类型）；/resume 加载时复用压缩结果。

@@ -32,6 +32,10 @@
 #endif
 
 #define CLAY_FS_READ_LIMIT (256 * 1024)
+/* A whole file is rarely what the model needs, and one huge line (a minified
+   bundle, a base64 blob) is never useful: page it and cut the line. */
+#define CLAY_FS_READ_DEFAULT_LINES 2000
+#define CLAY_FS_READ_LINE_LIMIT 2000
 #define CLAY_FS_GREP_LIMIT (64 * 1024)      /* shown inline to the model */
 #define CLAY_FS_GREP_CAPTURE_LIMIT (4 * 1024 * 1024) /* captured, for the scratch dump */
 #define CLAY_FS_GREP_MAX_FILES 4096
@@ -504,8 +508,11 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
     clay_str_init(&line);
     size_t line_no = 0;
     size_t emitted = 0;
+    size_t first_emitted = 0;
     int truncated = 0;
     int at_line_start = 1;
+    int line_cut = 0;
+    long page = limit > 0 ? limit : CLAY_FS_READ_DEFAULT_LINES;
     int ch;
     while ((ch = fgetc(file)) != EOF) {
         if (at_line_start) {
@@ -513,11 +520,14 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
             at_line_start = 0;
         }
         if (ch == '\n') {
-            if (line_no > (size_t)(offset > 0 ? offset - 1 : 0) && (limit <= 0 || emitted < (size_t)limit)) {
-                clay_str_printf(&formatted, "%5zu\t%s\n", line_no, line.data);
+            if (line_no > (size_t)(offset > 0 ? offset - 1 : 0) && emitted < (size_t)page) {
+                if (!first_emitted) first_emitted = line_no;
+                clay_str_printf(&formatted, "%5zu\t%s%s\n", line_no, line.data,
+                                line_cut ? " [... line cut]" : "");
                 emitted++;
             }
             clay_str_clear(&line);
+            line_cut = 0;
             at_line_start = 1;
             if (formatted.len > CLAY_FS_READ_LIMIT) {
                 truncated = 1;
@@ -525,15 +535,28 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
             }
             continue;
         }
-        clay_str_push_char(&line, (char)ch);
+        /* Keep counting after the page is full so the total and the next
+           offset stay right, but stop growing the line. */
+        if (line.len < CLAY_FS_READ_LINE_LIMIT) clay_str_push_char(&line, (char)ch);
+        else line_cut = 1;
     }
     if (!truncated && !at_line_start && line.len > 0 &&
-        line_no > (size_t)(offset > 0 ? offset - 1 : 0) && (limit <= 0 || emitted < (size_t)limit)) {
-        clay_str_printf(&formatted, "%5zu\t%s\n", line_no, line.data);
+        line_no > (size_t)(offset > 0 ? offset - 1 : 0) && emitted < (size_t)page) {
+        if (!first_emitted) first_emitted = line_no;
+        clay_str_printf(&formatted, "%5zu\t%s%s\n", line_no, line.data,
+                        line_cut ? " [... line cut]" : "");
+        emitted++;
     }
     clay_str_free(&line);
     fclose(file);
 
+    if (emitted > 0 && emitted == (size_t)page && first_emitted + emitted <= line_no) {
+        clay_str_printf(
+            &formatted,
+            "\n[Showing lines %zu-%zu of %zu. Use offset=%zu to continue.]\n",
+            first_emitted, first_emitted + emitted - 1, line_no,
+            first_emitted + emitted);
+    }
     clay_json_object_set(result, "ok", clay_json_bool(1));
     clay_json_object_set(result, "output", clay_json_string(formatted.data));
     clay_json_object_set(result, "output_truncated", clay_json_bool(truncated));

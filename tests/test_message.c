@@ -13,6 +13,8 @@
 
 static int completion_result;
 static int fail_save;
+static int collapse_during_turn; /* armed */
+static int collapsed_once;
 static int sse_error;
 static int usage_reports;
 static const char *partial_saved;
@@ -21,6 +23,50 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
                         const ClayToolSet *tools, int max_rounds,
                         const char *cache_key, const ClayOpenAICallbacks *callbacks) {
   (void)messages; (void)tools; (void)max_rounds; (void)cache_key; (void)callbacks;
+  /* Pretend the provider reported a nearly full window, then let the
+     request hook shrink the live array: a single turn's own tool results must
+     be reachable, which is what the old per-turn check could not do. */
+  if (collapse_during_turn && !collapsed_once) {
+    commands->last_prompt_tokens = 120000;
+    commands->input_tokens = 120000;
+    commands->accounted_messages = 1;
+    for (int round = 0; round < 3; round++) {
+      ClayJson *tool = clay_openai_message("tool", "old result");
+      ClayJson *blob = clay_json_object();
+      clay_json_object_set(blob, "role", clay_json_string("tool"));
+      ClayStr big;
+      clay_str_init(&big);
+      for (int i = 0; i < 1000; i++) clay_str_push_char(&big, 'z');
+      clay_json_object_set(blob, "content", clay_json_string(big.data));
+      clay_str_free(&big);
+      (void)tool;
+      clay_json_array_push(messages, blob);
+    }
+    /* Older than the last six user turns, which is what makes a tool result
+       eligible for collapsing at all. */
+    for (int turn = 0; turn < 6; turn++) {
+      ClayJson *user = clay_openai_message("user", "next");
+      ClayJson *assistant = clay_openai_message("assistant", "ok");
+      clay_json_array_push(messages, user);
+      clay_json_array_push(messages, assistant);
+    }
+    if (callbacks->before_request)
+      callbacks->before_request(messages, callbacks->userdata);
+    /* The turn's own trailing results are the ones that could never be
+       reached before: check they were collapsed in the array being sent. */
+    int collapsed_blobs = 0;
+    for (size_t i = 0; i < clay_json_array_count(messages); i++) {
+      ClayJson *message = clay_json_array_get(messages, i);
+      if (strcmp(clay_json_string_value(clay_json_object_get(message, "role")),
+                 "tool") != 0)
+        continue;
+      const char *text =
+          clay_json_string_value(clay_json_object_get(message, "content"));
+      if (text && strncmp(text, "[collapsed", 10) == 0) collapsed_blobs++;
+    }
+    assert(collapsed_blobs == 3);
+    collapsed_once = 1;
+  }
   /* One usage event per provider request. */
   for (int i = 0; i < usage_reports; i++) {
     ClayTokenUsage usage = {.input_tokens = 1000 + i, .output_tokens = 10,
@@ -153,6 +199,31 @@ int main(void) {
     }
   }
   sse_error = 0;
+  usage_reports = 0;
+  collapse_during_turn = 1;
+  collapsed_once = 0;
+  commands->chat = clay_chat_create("test");
+  assert(commands->chat);
+  clay_commands_run_message(commands, "hello");
+  assert(collapsed_once == 1);
+  collapse_during_turn = 0;
+  {
+    ClayStr path;
+    clay_str_init(&path);
+    clay_str_printf(&path, "%s/.clay/chats/%s/requests.jsonl", home,
+                    clay_chat_id(commands->chat));
+    remove(path.data);
+    clay_str_clear(&path);
+    clay_str_printf(&path, "%s/.clay/chats/%s/chat.json", home,
+                    clay_chat_id(commands->chat));
+    remove(path.data);
+    clay_str_clear(&path);
+    clay_str_printf(&path, "%s/.clay/chats/%s", home, clay_chat_id(commands->chat));
+    rmdir(path.data);
+    clay_str_free(&path);
+  }
+  clay_chat_destroy(commands->chat);
+  commands->chat = NULL;
   const char *partials[] = {"before", "fore"};
   for (size_t i = 0; i < 2; i++) {
     fail_save = 0;

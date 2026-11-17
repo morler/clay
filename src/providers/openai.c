@@ -715,6 +715,8 @@ int clay_openai_run_with_refresh(ClayOpenAI *client, ClayJson *messages,
     ClayProviderRetry retry;
     int retry_enabled = clay_provider_retry_init(&retry, &clock);
 retry_request:;
+    if (callbacks && callbacks->before_request)
+      callbacks->before_request(messages, callbacks->userdata);
     ClayStr body = build_request_body(client, messages, tools, tool_count);
 
     ClayStr url;

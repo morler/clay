@@ -29,6 +29,13 @@
   "the job needs to know. No preamble, no markdown headings, just the facts "  \
   "it would otherwise have to rediscover."
 
+/* Per-run budget, so a subagent folds its own old tool results instead of
+   reading the parent's counters or touching the parent's history. */
+typedef struct {
+  long last_prompt_tokens;
+  size_t accounted_messages;
+} SubagentBudget;
+
 typedef struct ClaySubagentBatch ClaySubagentBatch;
 
 typedef struct {
@@ -44,6 +51,7 @@ typedef struct {
   long input_tokens;
   long output_tokens;
   int request_round;
+  SubagentBudget budget;
   char *transcript;
   pthread_t thread;
 } ClaySubagentRun;
@@ -75,8 +83,16 @@ static void on_tool_call(const char *name, const char *arguments_json,
   pthread_mutex_unlock(&run->batch->lock);
 }
 
+static void before_request(ClayJson *messages, void *userdata) {
+  ClaySubagentRun *run = userdata;
+  clay_commands_compact_history(messages, run->budget.last_prompt_tokens,
+                                run->budget.accounted_messages);
+  run->budget.accounted_messages = clay_json_array_count(messages);
+}
+
 static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   ClaySubagentRun *run = userdata;
+  run->budget.last_prompt_tokens = usage->input_tokens;
   run->input_tokens += usage->input_tokens;
   run->output_tokens += usage->output_tokens;
   clay_commands_record_request_usage(run->batch->commands, "subagent",
@@ -162,6 +178,7 @@ static void *run_subagent(void *argument) {
   callbacks.on_token = on_token;
   callbacks.on_tool_call = on_tool_call;
   callbacks.on_usage_details = on_usage_details;
+  callbacks.before_request = before_request;
   callbacks.should_abort = should_abort;
   callbacks.userdata = run;
 

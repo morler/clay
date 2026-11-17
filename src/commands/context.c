@@ -1806,12 +1806,38 @@ static int collapse_tool_content(ClayJson *message) {
   return 1;
 }
 
-int clay_commands_maybe_compact(ClayCommands *commands) {
+/* Characters per token for the estimate below: the same 2 bytes/token the
+   scope admits requests with (scope.c). */
+#define CLAY_CONTEXT_BYTES_PER_TOKEN 2
+/* Fixed per-message overhead the provider bills: role, JSON punctuation. */
+#define CLAY_CONTEXT_MESSAGE_OVERHEAD 4
+
+/* Bytes still to be paid for: everything after the point the last reported
+   prompt already covered. */
+static long unaccounted_tokens(const ClayJson *conversation, size_t from) {
+  size_t total = clay_json_array_count(conversation);
+  if (from > total) from = total;
+  long bytes = 0;
+  for (size_t i = from; i < total; i++) {
+    ClayStr text;
+    clay_str_init(&text);
+    clay_json_stringify(clay_json_array_get(conversation, i), &text);
+    bytes += (long)text.len;
+    clay_str_free(&text);
+  }
+  return bytes / CLAY_CONTEXT_BYTES_PER_TOKEN +
+         (long)((total - from) * CLAY_CONTEXT_MESSAGE_OVERHEAD);
+}
+
+/* The one collapse implementation, over whichever array the caller is about
+   to send: the session's conversation, or a subagent's own history. */
+int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
+                                  size_t accounted_messages) {
   long token_budget = clay_config_context_token_budget();
-  if (commands->input_tokens <
+  if (billed_tokens + unaccounted_tokens(conversation, accounted_messages) <
       (long)(token_budget * CLAY_CONTEXT_COMPACT_RATIO))
     return 0;
-  size_t count = clay_json_array_count(commands->conversation);
+  size_t count = clay_json_array_count(conversation);
   if (count < 2)
     return 0;
 
@@ -1821,7 +1847,7 @@ int clay_commands_maybe_compact(ClayCommands *commands) {
   size_t cutoff = 1;
   int turns_seen = 0;
   for (size_t i = count; i-- > 1;) {
-    if (is_user_message(clay_json_array_get(commands->conversation, i))) {
+    if (is_user_message(clay_json_array_get(conversation, i))) {
       turns_seen++;
       if (turns_seen == CLAY_CONTEXT_KEEP_TURNS) {
         cutoff = i;
@@ -1832,13 +1858,20 @@ int clay_commands_maybe_compact(ClayCommands *commands) {
 
   int collapsed = 0;
   for (size_t i = 1; i < cutoff; i++) {
-    ClayJson *message = clay_json_array_get(commands->conversation, i);
+    ClayJson *message = clay_json_array_get(conversation, i);
     if (strcmp(clay_json_string_value(clay_json_object_get(message, "role")),
                "tool") == 0) {
       collapsed += collapse_tool_content(message);
     }
   }
   return collapsed;
+}
+
+int clay_commands_maybe_compact(ClayCommands *commands) {
+  long billed = commands->last_prompt_tokens > 0 ? commands->last_prompt_tokens
+                                                : commands->input_tokens;
+  return clay_commands_compact_history(commands->conversation, billed,
+                                      commands->accounted_messages);
 }
 
 void clay_plan_clear(ClayPlan *plan) {

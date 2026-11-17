@@ -841,6 +841,8 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
     ClayProviderRetry retry;
     int retry_enabled = clay_provider_retry_init(&retry, &clock);
   retry_request:;
+    if (callbacks && callbacks->before_request)
+      callbacks->before_request(messages, callbacks->userdata);
     ClayStr body = request_body(client, messages, tools, tool_count), auth;
     clay_str_init(&auth);
     clay_str_printf(&auth, "Bearer %s", client->credentials.access_token);

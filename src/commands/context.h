@@ -137,13 +137,18 @@ struct ClayCommands {
   ClayJson *conversation;
   char *system_prompt; /* text currently at conversation[0]; frozen per-chat
                           once one exists */
-  long input_tokens;
+  long input_tokens; /* every round of the turn so far, summed */
   long output_tokens;
   long cached_input_tokens;
   int cached_input_tokens_known;
   long total_input_tokens;
   long total_output_tokens;
   long messages_sent;
+  /* What the next request costs: the last request's prompt, and the message
+     index that prompt already billed. Rounds accumulate into input_tokens,
+     so a turn with three tool rounds reads three times the cost of one. */
+  long last_prompt_tokens;
+  size_t accounted_messages;
   ClayChat *chat;
   ClayArray providers;
   uint64_t provider_generation; /* last issued; not reset on logout */
@@ -244,11 +249,17 @@ char *clay_commands_find_git_branch(void);
 /* Comma-separated, sorted, capped names of `dir`'s direct entries. Malloc'd;
    NULL if the directory can't be listed. */
 char *clay_commands_list_top_level(const char *dir);
-/* Deterministic context compaction (no LLM call): once the last request's
-   input tokens crossed ~90% of the context budget, collapses tool-result
-   content older than the last few turns to a short preview, in place on
+/* Deterministic context compaction (no LLM call): once the next request is
+   about to cross ~90% of the context budget - the last request's prompt plus
+   an estimate of what was appended since - collapses tool-result content
+   older than the last few turns to a short preview, in place on
    commands->conversation. Returns how many results it collapsed. */
 int clay_commands_maybe_compact(ClayCommands *commands);
+/* The same collapse applied to any history being sent, with its own billed
+   prompt and accounted boundary. A subagent calls this on its own array, so
+   it never reads or folds the session's conversation. */
+int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
+                                  size_t accounted_messages);
 /* Frees every item and empties `plan` in place (keeping the array, ready
    for more steps). A rendered plan also clears its row. */
 void clay_plan_clear(ClayPlan *plan);

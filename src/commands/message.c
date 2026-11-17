@@ -29,6 +29,7 @@ typedef struct {
   long cached_input_tokens;
   int cached_input_tokens_known;
   int has_usage;
+  long last_prompt_tokens; /* the last request's prompt, not the turn's sum */
   ClayTask *tool_task;
   ClayStr response;
   ClayWrap wrap; /* word wrap for the streamed answer */
@@ -1348,8 +1349,31 @@ static void on_http_error(const ClayOpenAIError *error, void *userdata) {
     ((ClayConversationStream *)userdata)->sse_rate_limit = 1;
 }
 
+/* Called by the provider before each round's request. This is the only point
+   where the array being sent is reachable: the turn works on a copy and the
+   session's conversation only learns about it at the end. */
+static void before_request(ClayJson *messages, void *userdata) {
+  ClayConversationStream *stream = userdata;
+  ClayCommands *commands = stream->commands;
+  if (!commands->chat || !messages) return;
+  ClayJson *saved = commands->conversation;
+  commands->conversation = messages;
+  /* accounted_messages still indexes this array: it grows at the end only,
+     and the clone preserved every index the last usage report covered. */
+  int collapsed = clay_commands_maybe_compact(commands);
+  commands->conversation = saved;
+  if (collapsed > 0)
+    clay_sayc(CLAY_GRAY,
+              "Compacted %d old tool result%s to stay within the context "
+              "budget.",
+              collapsed, collapsed == 1 ? "" : "s");
+}
+
 static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   ClayConversationStream *stream = userdata;
+  /* The next request repeats this one plus whatever follows it, so the last
+     round is the cost and the sum is only the bill. */
+  stream->last_prompt_tokens = usage->input_tokens;
   stream->input_tokens += usage->input_tokens;
   stream->output_tokens += usage->output_tokens;
   if (usage->cached_input_tokens_known) {
@@ -1556,6 +1580,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   callbacks.on_tool_call = on_tool_call;
   callbacks.on_tool_result = on_tool_result;
   callbacks.on_usage_details = on_usage_details;
+  callbacks.before_request = before_request;
   callbacks.on_reasoning = on_reasoning;
   callbacks.on_error = on_error;
   callbacks.on_http_error = on_http_error;
@@ -1624,6 +1649,8 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
     set_status(seconds, rc == 0);
     if (stream.has_usage) {
       commands->input_tokens = stream.input_tokens;
+      commands->last_prompt_tokens = stream.last_prompt_tokens;
+      commands->accounted_messages = clay_json_array_count(messages);
       commands->output_tokens = stream.output_tokens;
       commands->cached_input_tokens = stream.cached_input_tokens;
       commands->cached_input_tokens_known = stream.cached_input_tokens_known;

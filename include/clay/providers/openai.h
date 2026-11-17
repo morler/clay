@@ -106,6 +106,10 @@ typedef struct {
     void (*on_reasoning)(const char *text, void *userdata);
     /* Optional structured HTTP error; invoked in addition to on_error. */
     void (*on_http_error)(const ClayOpenAIError *error, void *userdata);
+    /* Optional, once before every round's request body is built: the moment
+       a caller can shrink the history it is about to send. `messages` is the
+       live array, so what it changes is what goes out. */
+    void (*before_request)(ClayJson *messages, void *userdata);
 } ClayOpenAICallbacks;
 
 /* Per-request replay boundary. Tool fragments are not committed side effects. */

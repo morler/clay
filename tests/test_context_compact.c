@@ -46,6 +46,40 @@ static void test_utf8_preview(const char *character, int prefix, int included) {
     clay_str_free(&output);
 }
 
+/* Two providers report usage per request: with the same history and three
+   rounds, the sum of the rounds is three times one round's prompt. The
+   budget is about what the next request costs, so three rounds at 40k must
+   not read as 120k and force a collapse of a conversation that still fits. */
+static void test_multi_round_accumulation(void) {
+    ClayCommands commands;
+    memset(&commands, 0, sizeof(commands));
+    commands.conversation = clay_json_array();
+    push_message(commands.conversation, "system", "you are clay");
+    ClayStr long_output;
+    clay_str_init(&long_output);
+    for (int i = 0; i < 900; i++) clay_str_push_char(&long_output, 'x');
+    for (int turn = 0; turn < 8; turn++) {
+        push_message(commands.conversation, "user", "do something");
+        push_message(commands.conversation, "tool", long_output.data);
+        push_message(commands.conversation, "assistant", "done");
+    }
+
+    /* 120k of billed input across three rounds of one turn, but the next
+       request is 40k: under the 115.2k trigger, nothing to collapse. */
+    long budget = clay_config_context_token_budget();
+    assert(budget >= 128000);
+    commands.input_tokens = (long)(budget * 0.94); /* three rounds summing */
+    commands.last_prompt_tokens = (long)(budget * 0.31); /* the last one */
+    assert(clay_commands_maybe_compact(&commands) == 0);
+
+    /* One round really at the limit still collapses. */
+    commands.last_prompt_tokens = (long)(budget * 0.94);
+    assert(clay_commands_maybe_compact(&commands) == 2);
+
+    clay_json_free(commands.conversation);
+    clay_str_free(&long_output);
+}
+
 int main(void) {
     test_utf8_preview("é", 199, 0);
     test_utf8_preview("中", 198, 0);
@@ -103,6 +137,7 @@ int main(void) {
 
     clay_json_free(commands.conversation);
     clay_str_free(&long_output);
+    test_multi_round_accumulation();
     printf("context compact tests passed\n");
     return 0;
 }

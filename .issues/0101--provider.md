@@ -1,7 +1,7 @@
 ---
 id: 101
 title: 全 provider 回归与实测记录
-status: in-progress
+status: closed
 priority: high
 labels:
     - type:task
@@ -15,6 +15,7 @@ relations:
         - 100
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：make test-openai-codex test-subagent test-grok；用 mock 记录改动前后首个请求 prompt_tokens 与第二次命中；写入 #79。

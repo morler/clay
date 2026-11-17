@@ -1,0 +1,20 @@
+---
+id: 140
+title: 子代理 cached tokens 记账
+status: open
+priority: medium
+labels:
+    - type:task
+    - area:subagent
+    - parent:91
+    - step
+relations:
+    blocks:
+        - 91
+        - 142
+created: "2026-11-17"
+updated: "2026-11-17"
+---
+
+改动：src/commands/subagent.c:77-81、345 计入 cached；字段与 #92 的记录一致。
+验证：双分支测试断言父会话 cached 总数正确。

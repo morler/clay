@@ -467,10 +467,70 @@ const ClayProviderType *clay_commands_provider_types(size_t *count) {
 
 /* Provider state uses a short lock; the gate serializes replacement with active completions. */
 static pthread_mutex_t codex_credentials_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t credential_save_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t codex_refresh_cond = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t grok_refresh_cond = PTHREAD_COND_INITIALIZER;
 
 #define UNPERSISTED_RETRY_SECONDS 5
+
+static ClayProviderConfig *config_clone(const ClayProviderConfig *config) {
+  if (!config) return NULL;
+  ClayProviderConfig *copy = calloc(1, sizeof(*copy));
+  if (!copy) return NULL;
+  copy->id = config->id ? strdup(config->id) : NULL;
+  copy->apikey = config->apikey ? strdup(config->apikey) : NULL;
+  copy->base_url = config->base_url ? strdup(config->base_url) : NULL;
+  copy->auth_mode = config->auth_mode ? strdup(config->auth_mode) : NULL;
+  copy->access_token = config->access_token ? strdup(config->access_token) : NULL;
+  copy->refresh_token = config->refresh_token ? strdup(config->refresh_token) : NULL;
+  copy->id_token = config->id_token ? strdup(config->id_token) : NULL;
+  copy->account_id = config->account_id ? strdup(config->account_id) : NULL;
+  copy->expires_at = config->expires_at;
+  copy->tpm = config->tpm;
+  if ((config->id && !copy->id) || (config->apikey && !copy->apikey) ||
+      (config->base_url && !copy->base_url) ||
+      (config->auth_mode && !copy->auth_mode) ||
+      (config->access_token && !copy->access_token) ||
+      (config->refresh_token && !copy->refresh_token) ||
+      (config->id_token && !copy->id_token) ||
+      (config->account_id && !copy->account_id)) {
+    clay_config_free(copy);
+    return NULL;
+  }
+  return copy;
+}
+
+/* Caller holds codex_credentials_lock. Releases it for the disk write and
+   returns with it held again. The save lock keeps older snapshots from
+   landing after newer ones. */
+static int persist_config(ClayConnectedProvider *provider,
+                          ClayProviderConfig *snapshot, int codex,
+                          uint64_t version, int *flag, time_t *next_try) {
+  pthread_mutex_unlock(&codex_credentials_lock);
+  pthread_mutex_lock(&credential_save_lock);
+  pthread_mutex_lock(&codex_credentials_lock);
+  uint64_t current = codex ? provider->codex_version : provider->grok_version;
+  int write = current == version;
+  int rc = 0;
+  if (write) {
+    pthread_mutex_unlock(&codex_credentials_lock);
+    rc = clay_config_save(snapshot);
+    pthread_mutex_lock(&codex_credentials_lock);
+  }
+  pthread_mutex_unlock(&credential_save_lock);
+  current = codex ? provider->codex_version : provider->grok_version;
+  if (current != version) {
+    *flag = 0;
+    *next_try = 0;
+  } else if (rc != 0) {
+    *flag = 1;
+    *next_try = time(NULL) + UNPERSISTED_RETRY_SECONDS;
+  } else {
+    *flag = 0;
+    *next_try = 0;
+  }
+  return rc;
+}
 
 static int codex_flight_usable(const ClayConnectedProvider *provider) {
   return provider->codex_version != UINT64_MAX &&
@@ -639,9 +699,9 @@ void clay_commands_load_provider(ClayCommands *commands,
   provider_replace_end(commands);
 }
 
-/* Caller holds codex_credentials_lock. Environment credentials are never persisted, so the flag is simply dropped.
-   shortcut: a failing save runs under the lock at most once per UNPERSISTED_RETRY_SECONDS; move the write outside the lock, upgrade if slow disks block requests. */
-static int retry_unpersisted(ClayConnectedProvider *provider, int *flag, time_t *next_try, int force) {
+/* Caller holds codex_credentials_lock. Environment credentials are never persisted, so the flag is simply dropped. */
+static int retry_unpersisted(ClayConnectedProvider *provider, int *flag,
+                             time_t *next_try, int force, int codex) {
   if (!*flag) return 0;
   if (provider->environment_override) {
     *flag = 0;
@@ -649,35 +709,64 @@ static int retry_unpersisted(ClayConnectedProvider *provider, int *flag, time_t 
   }
   time_t now = time(NULL);
   if (!force && now < *next_try) return -1;
-  if (clay_config_save(provider->config) == 0) {
-    *flag = 0;
-    return 0;
+  ClayProviderConfig *snapshot = config_clone(provider->config);
+  if (!snapshot) {
+    *next_try = now + UNPERSISTED_RETRY_SECONDS;
+    return -1;
   }
-  *next_try = now + UNPERSISTED_RETRY_SECONDS;
-  return -1;
+  uint64_t version = codex ? provider->codex_version : provider->grok_version;
+  int rc = persist_config(provider, snapshot, codex, version, flag, next_try);
+  clay_config_free(snapshot);
+  return rc == 0 ? 0 : -1;
 }
 
 static int retry_codex_unpersisted(ClayConnectedProvider *provider, int force) {
   return retry_unpersisted(provider, &provider->codex_refresh_unpersisted,
-                           &provider->codex_retry_at, force);
+                           &provider->codex_retry_at, force, 1);
 }
 
 static int retry_grok_unpersisted(ClayConnectedProvider *provider, int force) {
   return retry_unpersisted(provider, &provider->grok_refresh_unpersisted,
-                           &provider->grok_retry_at, force);
+                           &provider->grok_retry_at, force, 0);
 }
 
 static int save_config_tracked(ClayConnectedProvider *provider, int *flag,
-                               time_t *next_try) {
+                               time_t *next_try, int codex) {
   if (provider->environment_override) return 0;
-  int rc = clay_config_save(provider->config);
-  if (rc != 0) {
+  ClayProviderConfig *snapshot = config_clone(provider->config);
+  if (!snapshot) {
     *flag = 1;
     *next_try = time(NULL) + UNPERSISTED_RETRY_SECONDS;
-  } else {
-    *flag = 0;
-    *next_try = 0;
+    return -1;
   }
+  uint64_t version = codex ? provider->codex_version : provider->grok_version;
+  int rc = persist_config(provider, snapshot, codex, version, flag, next_try);
+  clay_config_free(snapshot);
+  return rc;
+}
+
+static int remove_config_tracked(ClayConnectedProvider *provider,
+                                 const char *id, int codex,
+                                 uint64_t version) {
+  if (provider->environment_override) return 0;
+  char *copy = id ? strdup(id) : NULL;
+  if (!copy) return -1;
+  pthread_mutex_unlock(&codex_credentials_lock);
+  pthread_mutex_lock(&credential_save_lock);
+  pthread_mutex_lock(&codex_credentials_lock);
+  uint64_t current = codex ? provider->codex_version : provider->grok_version;
+  int rc = 0;
+  if (current != version) {
+    if (codex) provider->codex_auth_invalid = 0;
+  } else {
+    pthread_mutex_unlock(&codex_credentials_lock);
+    if (clay_config_exists(copy) && clay_config_remove(copy) != 0) rc = -1;
+    pthread_mutex_lock(&codex_credentials_lock);
+    current = codex ? provider->codex_version : provider->grok_version;
+    if (codex && current != version) provider->codex_auth_invalid = 0;
+  }
+  pthread_mutex_unlock(&credential_save_lock);
+  free(copy);
   return rc;
 }
 
@@ -881,11 +970,11 @@ int clay_commands_save_grok_credentials(ClayConnectedProvider *provider,
       memset(&credentials, 0, sizeof(credentials));
       provider->grok_version++;
       rc = save_config_tracked(provider, &provider->grok_refresh_unpersisted,
-                               &provider->grok_retry_at);
+                               &provider->grok_retry_at, 0);
     }
   } else {
     rc = save_config_tracked(provider, &provider->grok_refresh_unpersisted,
-                             &provider->grok_retry_at);
+                             &provider->grok_retry_at, 0);
   }
   pthread_mutex_unlock(&codex_credentials_lock);
   clay_grok_credentials_free(&credentials);
@@ -903,9 +992,8 @@ static int save_codex_credentials(ClayConnectedProvider *provider,
     rc = 1;
   } else if (invalid || provider->codex_auth_invalid) {
     provider->codex_auth_invalid = 1;
-    if (!provider->environment_override && config->id &&
-        clay_config_exists(config->id) && clay_config_remove(config->id) != 0)
-      rc = -1;
+    uint64_t version = provider->codex_version;
+    rc = config->id ? remove_config_tracked(provider, config->id, 1, version) : 0;
     if (rc == 0) provider->codex_refresh_unpersisted = 0;
   } else if (clay_openai_codex_copy_credentials(client, &credentials) != 0) {
     rc = -1;
@@ -929,11 +1017,11 @@ static int save_codex_credentials(ClayConnectedProvider *provider,
       provider->codex_auth_invalid = 0;
       *version = provider->codex_version;
       rc = save_config_tracked(provider, &provider->codex_refresh_unpersisted,
-                               &provider->codex_retry_at);
+                               &provider->codex_retry_at, 1);
     }
   } else {
     rc = save_config_tracked(provider, &provider->codex_refresh_unpersisted,
-                             &provider->codex_retry_at);
+                             &provider->codex_retry_at, 1);
   }
   pthread_mutex_unlock(&codex_credentials_lock);
   clay_openai_codex_credentials_free(&credentials);
@@ -998,7 +1086,7 @@ static int save_codex_refresh(void *userdata, ClayOpenAICodex *client) {
   config->expires_at = credentials.expires_at;
   provider->codex_version++;
   int rc = save_config_tracked(provider, &provider->codex_refresh_unpersisted,
-                               &provider->codex_retry_at);
+                               &provider->codex_retry_at, 1);
   ClayOpenAICodex *copy = NULL;
   if (!rc) {
     ClayCodexCredentials published = {config->access_token, config->refresh_token,
@@ -1071,7 +1159,7 @@ static int save_grok_refresh(void *userdata, ClayGrok *client) {
   config->expires_at = credentials.expires_at;
   provider->grok_version++;
   int rc = save_config_tracked(provider, &provider->grok_refresh_unpersisted,
-                               &provider->grok_retry_at);
+                               &provider->grok_retry_at, 0);
   ClayGrok *copy = NULL;
   if (!rc) {
     ClayGrokCredentials published = {config->access_token, config->refresh_token,

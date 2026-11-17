@@ -338,7 +338,7 @@ test-fs-tools: $(FS_TOOLS_TEST_TARGET)
 	@./$<
 
 ifeq ($(shell uname -s),Linux)
-FS_TOOLS_TEST_WRAP := -Wl,--wrap=fstat -Wl,--wrap=clay_sandbox_exec_input -Wl,--wrap=clay_sandbox_exec
+FS_TOOLS_TEST_WRAP := -Wl,--wrap=fstat -Wl,--wrap=clay_sandbox_exec_input
 endif
 $(FS_TOOLS_TEST_TARGET): $(LIB_OBJ) $(FS_TOOLS_TEST_OBJ) | $(BIN_DIR)
 	$(CC) $(LIB_OBJ) $(FS_TOOLS_TEST_OBJ) -o $@ $(LDFLAGS) $(FS_TOOLS_TEST_WRAP) $(if $(filter Linux,$(shell uname -s)),-Xlinker --wrap=readdir)

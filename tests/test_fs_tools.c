@@ -94,17 +94,6 @@ int __wrap_fstat(int fd, struct stat *st) {
     return rc;
 }
 
-int __real_clay_sandbox_exec(const ClaySandboxConfig *, const char *, ClayStr *, size_t, const ClayExecOptions *, ClayExecResult *);
-int __wrap_clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, ClayStr *output, size_t output_limit, const ClayExecOptions *options, ClayExecResult *result) {
-    if (grep_dir_swap_armed) {
-        grep_dir_swap_armed = 0;
-        assert(rename("grep-dir-race", "grep-dir-saved") == 0);
-        assert(symlink(grep_dir_swap_outside, "grep-dir-race") == 0);
-        grep_dir_swap_done = 1;
-    }
-    return __real_clay_sandbox_exec(config, command, output, output_limit, options, result);
-}
-
 int __real_clay_sandbox_exec_input(const ClaySandboxConfig *, const char *, ClayStr *, size_t, const ClayExecOptions *, ClayExecResult *, int);
 int __wrap_clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *command, ClayStr *output, size_t output_limit, const ClayExecOptions *options, ClayExecResult *result, int input_fd) {
     if (grep_swap_armed) {
@@ -112,6 +101,12 @@ int __wrap_clay_sandbox_exec_input(const ClaySandboxConfig *config, const char *
         assert(rename("grep-race.txt", "grep-race-old.txt") == 0);
         assert(symlink(grep_swap_secret, "grep-race.txt") == 0);
         grep_swap_done = 1;
+    }
+    if (grep_dir_swap_armed) {
+        grep_dir_swap_armed = 0;
+        assert(rename("grep-dir-race", "grep-dir-saved") == 0);
+        assert(symlink(grep_dir_swap_outside, "grep-dir-race") == 0);
+        grep_dir_swap_done = 1;
     }
     return __real_clay_sandbox_exec_input(config, command, output, output_limit, options, result, input_fd);
 }
@@ -192,9 +187,14 @@ static void test_grep_race(ClayCommands *commands) {
 #endif
 
 static void test_grep_directory_race_baseline(ClayCommands *commands) {
-    char outside_template[] = "/tmp/clay_grep_dir_outside_XXXXXX";
+    char *scratch = clay_chat_scratch_dir(commands->chat);
+    assert(scratch);
+    char outside_template[512];
+    snprintf(outside_template, sizeof(outside_template),
+             "%s/clay_grep_dir_outside_XXXXXX", scratch);
     char *outside = mkdtemp(outside_template);
     assert(outside);
+    free(scratch);
     char secret[512];
     snprintf(secret, sizeof(secret), "%s/secret", outside);
     FILE *file = fopen(secret, "w");
@@ -747,6 +747,7 @@ int main(void) {
         commands.sandbox_mode = CLAY_SANDBOX_MODE_SANDBOX;
 #ifdef __linux__
         test_grep_race(&commands);
+        test_grep_directory_race_baseline(&commands);
 #endif
         result = clay_fs_tool_grep(grep_args, &commands);
         assert(ok(result));

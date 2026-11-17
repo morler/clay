@@ -1,7 +1,7 @@
 ---
 id: 23
 title: 加固 Linux grep 的 FD 读取
-status: in-progress
+status: closed
 priority: medium
 labels:
     - source:lif
@@ -17,6 +17,7 @@ relations:
         - 15
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 修改 src/commands/fs_tools.c、src/commands/workspace_fd.c、include/clay/workspace_fd.h 及 tests/test_fs_tools.c；避免检查后按路径重开，兼顾 sandbox/unleashed、正则、过滤和性能。验收：保留基线；正常和强制回退交换诱饵不越过契约，记录性能及限制。
@@ -49,7 +50,10 @@ updated: "2026-11-17"
 
 ## 安全断言红测（仍未修复）在 tests/test_fs_tools.c 的现有 PATH 替换复现上增加 CLAY_ASSERT_GREP_RACE_SAFETY=1 可选断言：确认起始目录已替换为符号链接，再断言输出不含 race-secret。默认测试仅保留基线输出。make test-fs-tools test-fs-fallback 和 git diff --check 通过；分别运行 CLAY_ASSERT_GREP_RACE_SAFETY=1 bin/test_fs_tools 与 bin-fs-fallback/test_fs_tools 均以 134 退出，泄漏断言失败。此红测仍依赖 PATH 包装器和 /usr/bin/grep，不能覆盖将来不调用外部 grep 的实现、sandbox 或中间目录交换；必须用独立于 PATH 的同步测试替换，缺少 grep 时不得跳过安全验收。当前没有安全生产修复：回退 parent_fd 可在固定的中间目录被移出根目录后继续打开文件；sandbox 的 FD 继承、混合 stderr、全局超时和输出预算仍须完整解决。为避免改变 grep 功能或削弱 sandbox，没有加入不完整生产补丁。
 
-## 不依赖 PATH 的确定性红测（仍未修复）新增 __wrap_clay_sandbox_exec，在 grep 真正执行前把检查过的起始目录换成指向工作区外目录的符号链接；tests/test_fs_tools.c 的 test_grep_directory_race_baseline 断言交换已发生，并在 CLAY_ASSERT_GREP_RACE_SAFETY=1 时要求输出不含外部秘密。默认 make test-fs-tools 与 make test-fs-fallback 均通过并打印两条 baseline；开启断言后两构建都在新红测处失败，证明修复尚未落地。沙箱与中间目录交换仍未覆盖。生产阻塞不变：目录候选需安全枚举并逐文件固定 FD，执行器需定向继承白名单、分离 stderr、共享超时/输出预算，且 CLAY_NO_OPENAT2 回退的目录移出边界必须定义；在这些完成前不把不完整补丁接入生产路径。
+## 生产修复与验证（已完成）
+Linux 目录 grep 不再把检查后的路径交给递归外部 grep：从固定 root FD 逐组件重新解析并只接受普通文件，每个候选文件先固定描述符，再经 stdin 交给 grep，输出用 --label 保留相对路径；single-file 路径保持原有语义。共享 120 秒期限、4 MiB 捕获上限和 64 KiB 预览/scratch 预算，空目录或全被 glob 排除时仍执行一次 grep 以验证正则。
+
+tests/test_fs_tools.c 的起始目录/打开文件后路径交换红测已改为在 clay_sandbox_exec_input 边界触发，覆盖 unleashed 与实际可用的 sandbox；正常构建与 CLAY_NO_OPENAT2 强制回退构建均在 CLAY_ASSERT_GREP_RACE_SAFETY=1 下通过，三条 baseline 均显示 outside content not observed。make -j4 test、make test-fs-tools、make test-fs-fallback、git diff --check 均通过。README.md 已记录逐文件进程的开销、共享预算、强制回退中间目录移出窗口、硬链接与挂载边界。未做真实大仓库性能基准；已知代价是每个候选文件一次 grep 进程。
 
 ---
 

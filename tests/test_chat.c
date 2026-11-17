@@ -1,5 +1,7 @@
 #include "clay/chat.h"
 
+#include "clay/providers/openai.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,6 +63,61 @@ int main(void) {
     clay_json_free(history);
     clay_chat_destroy(chat);
 
+    /* A compaction replaces what came before it in the replay, while the
+       journal keeps the old turns for anyone reading the file. */
+    chat = clay_chat_create("you are clay");
+    assert(chat);
+    char *compacted_id = strdup(clay_chat_id(chat));
+    assert(clay_chat_begin_turn(chat, "first") == 0);
+    ClayJson *first_turn = clay_json_array();
+    clay_json_array_push(first_turn, clay_openai_message("user", "first"));
+    clay_json_array_push(first_turn, clay_openai_message("assistant", "one"));
+    assert(clay_chat_finish_turn(chat, first_turn, 0, "completed") == 0);
+    clay_json_free(first_turn);
+
+    ClayJson *replacement = clay_json_array();
+    clay_json_array_push(replacement, clay_openai_message(
+        "user", "What the user asked for, word for word"));
+    clay_json_array_push(replacement,
+                         clay_openai_message("system", "summary of the rest"));
+    assert(clay_chat_record_compaction(chat, replacement) == 0);
+    clay_json_free(replacement);
+
+    ClayJson *replayed = clay_chat_openai_messages(chat);
+    assert(clay_json_array_count(replayed) == 2);
+    assert(strcmp(clay_json_string_value(clay_json_object_get(
+                      clay_json_array_get(replayed, 0), "content")),
+                  "What the user asked for, word for word") == 0);
+    assert(!strstr(clay_json_string_value(clay_json_object_get(
+                       clay_json_array_get(replayed, 1), "content")),
+                   "one"));
+    clay_json_free(replayed);
+
+    /* And it survives a save/load round trip. */
+    clay_chat_destroy(chat);
+    chat = clay_chat_load(compacted_id);
+    assert(chat);
+    replayed = clay_chat_openai_messages(chat);
+    assert(clay_json_array_count(replayed) == 2);
+    clay_json_free(replayed);
+    /* The replay has two messages; the first turn's are replaced. */
+    assert(clay_chat_message_count(chat) == 2);
+    clay_chat_destroy(chat);
+    free(compacted_id);
+    /* Remove the compacted chat's directory too. */
+    {
+        ClayStr path;
+        clay_str_init(&path);
+        clay_str_printf(&path, "%s/.clay/chats/%s", home, compacted_id);
+        char *json = malloc(strlen(path.data) + 16);
+        assert(json);
+        snprintf(json, strlen(path.data) + 16, "%s/chat.json", path.data);
+        assert(remove(json) == 0);
+        free(json);
+        assert(rmdir(path.data) == 0);
+        clay_str_free(&path);
+    }
+
     ClayArray summaries;
     assert(clay_chat_list(&summaries) == 0);
     assert(summaries.count == 1);
@@ -74,6 +131,9 @@ int main(void) {
     clay_str_clear(&path);
     clay_str_printf(&path, "%s/.clay/chats/%s", home, id);
     assert(rmdir(path.data) == 0);
+    clay_str_clear(&path);
+    clay_str_printf(&path, "%s/.clay/chats/index.json", home);
+    remove(path.data);
     clay_str_clear(&path);
     clay_str_printf(&path, "%s/.clay/chats", home);
     assert(rmdir(path.data) == 0);

@@ -59,8 +59,12 @@ static size_t journal_message_count(const ClayJson *journal) {
     size_t count = 0;
     for (size_t i = 0; i < clay_json_array_count(turns); i++) {
         ClayJson *turn = clay_json_array_get(turns, i);
-        if (strcmp(clay_json_string_value(clay_json_object_get(turn, "state")),
-                   "completed") != 0) continue;
+        const char *state =
+            clay_json_string_value(clay_json_object_get(turn, "state"));
+        /* A compaction replaced what came before it, so it counts as these
+           messages only. */
+        if (state && strcmp(state, "compaction") == 0) count = 0;
+        else if (!state || strcmp(state, "completed") != 0) continue;
         ClayJson *records = clay_json_object_get(turn, "messages");
         for (size_t j = 0; j < clay_json_array_count(records); j++) {
             ClayJson *record = clay_json_array_get(records, j);
@@ -658,21 +662,48 @@ int clay_chat_list(ClayArray *summaries) {
     return 0;
 }
 
+/* A turn with state "compaction" replaced every turn before it: the journal
+   stays append-only (old turns are still there for anyone reading the file),
+   but a replay starts from the replacement. */
+static int turn_replaces_history(const ClayJson *turn) {
+    const char *state =
+        clay_json_string_value(clay_json_object_get(turn, "state"));
+    return state && strcmp(state, "compaction") == 0;
+}
+
 ClayJson *clay_chat_openai_messages(const ClayChat *chat) {
     ClayJson *messages = clay_json_array();
     ClayJson *turns = clay_json_object_get(chat->journal, "turns");
     for (size_t i = 0; i < clay_json_array_count(turns); i++) {
         ClayJson *turn = clay_json_array_get(turns, i);
-        if (strcmp(clay_json_string_value(clay_json_object_get(turn, "state")), "completed") != 0) continue;
-        ClayJson *records = clay_json_object_get(turn, "messages");
-        for (size_t j = 0; j < clay_json_array_count(records); j++) {
-            ClayJson *record = clay_json_array_get(records, j);
-            if (strcmp(clay_json_string_value(clay_json_object_get(record, "kind")), "message") == 0) {
-                clay_json_array_push(messages, openai_message(record));
-            }
+        if (turn_replaces_history(turn)) {
+            clay_json_free(messages);
+            messages = clay_json_array();
+        } else if (strcmp(clay_json_string_value(clay_json_object_get(turn, "state")),
+                          "completed") != 0) {
+            continue;
         }
+        ClayJson *records = clay_json_object_get(turn, "messages");
+        for (size_t j = 0; j < clay_json_array_count(records); j++)
+            clay_json_array_push(messages,
+                                 openai_message(clay_json_array_get(records, j)));
     }
     return messages;
+}
+
+int clay_chat_record_compaction(ClayChat *chat, const ClayJson *new_history) {
+    if (!chat || !new_history) return -1;
+    if (chat->active_turn) return -1;
+    ClayJson *records = clay_json_array();
+    for (size_t i = 0; i < clay_json_array_count(new_history); i++)
+        clay_json_array_push(records,
+                             journal_message(clay_json_array_get(new_history, i)));
+    ClayJson *turn = clay_json_object();
+    clay_json_object_set(turn, "id", clay_json_number(chat->next_turn_id++));
+    clay_json_object_set(turn, "state", clay_json_string("compaction"));
+    clay_json_object_set(turn, "messages", records);
+    clay_json_array_push(messages_array(chat), turn);
+    return save(chat);
 }
 
 ClayJson *clay_chat_recent_messages(const ClayChat *chat, size_t count) {

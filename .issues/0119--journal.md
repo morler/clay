@@ -1,7 +1,7 @@
 ---
 id: 119
 title: 压缩结果写入 journal 并可重放
-status: open
+status: in-progress
 priority: high
 labels:
     - type:task

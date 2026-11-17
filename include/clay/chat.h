@@ -122,4 +122,10 @@ int clay_chat_begin_turn(ClayChat *chat, const char *content);
    and records its final state. start is the suffix's first array index. */
 int clay_chat_finish_turn(ClayChat *chat, const ClayJson *messages, size_t start, const char *state);
 
+/* Records that `new_history` (the conversation after the frozen system
+   prompt) replaced everything before it. A replay drops the older turns, so
+   resuming a compacted chat costs what the compaction left, not what it
+   replaced. Requires no pending turn. */
+int clay_chat_record_compaction(ClayChat *chat, const ClayJson *new_history);
+
 #endif /* CLAY_CHAT_H */

@@ -383,6 +383,10 @@ void clay_cmd_compact(const char *args, void *user_data) {
   clay_str_free(&note);
   clay_str_free(&accounting.summary);
 
+  /* Recorded before the swap so /resume replays the compacted history
+     instead of the one it replaced. */
+  if (clay_chat_record_compaction(commands->chat, new_conversation) != 0)
+    clay_sayc(CLAY_RED, "Could not save the compaction to the chat journal.");
   clay_json_free(commands->conversation);
   commands->conversation = new_conversation;
   /* The environment and notes are no longer in this history: send them

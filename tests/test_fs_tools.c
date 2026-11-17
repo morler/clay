@@ -758,6 +758,10 @@ int main(void) {
     result = clay_fs_tool_grep(large_args, &commands);
     assert(ok(result)); assert(clay_json_bool_value(clay_json_object_get(result, "output_truncated")));
     assert(clay_json_string_value(clay_json_object_get(result, "scratch_path")));
+    /* A cut result names the way out instead of just stopping. */
+    assert(clay_json_string_value(clay_json_object_get(result, "hint")));
+    assert(strstr(clay_json_string_value(clay_json_object_get(result, "hint")),
+                  "narrow the pattern"));
     clay_json_free(result); clay_json_free(large_args); assert(unlink("grep-large") == 0);
 #ifdef __linux__
     test_grep_directory_race_baseline(&commands);

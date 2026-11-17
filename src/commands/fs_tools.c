@@ -1129,8 +1129,11 @@ static int grep_walk_files(int root, const char *relative, GrepFileFn visit,
     return rc < 0 ? -1 : 0;
 }
 
+/* One place both grep paths leave through, so a result that hit its ceiling
+   says so and names the way out instead of just stopping. */
 static ClayJson *grep_result(ClayStr *output, int rc, int exit_code,
-                             int truncated, ClayCommands *commands) {
+                             int truncated, int max_matches,
+                             ClayCommands *commands) {
     ClayJson *result = clay_json_object();
     int ok = rc == 0 && exit_code <= 1;
     clay_json_object_set(result, "ok", clay_json_bool(ok));
@@ -1153,6 +1156,17 @@ static ClayJson *grep_result(ClayStr *output, int rc, int exit_code,
         clay_json_object_set(result, "output", clay_json_string(output->data));
         clay_json_object_set(result, "output_truncated", clay_json_bool(truncated));
     }
+    /* Either ceiling counts: too many matches for the capture limit, or more
+       matches than the inline window. */
+    int cut = truncated || output->len > CLAY_FS_GREP_LIMIT;
+    if (cut && !clay_json_object_get(result, "output_truncated"))
+        clay_json_object_set(result, "output_truncated", clay_json_bool(1));
+    if (cut)
+        clay_json_object_set(
+            result, "hint",
+            clay_json_string("Only the first matches are shown: narrow the "
+                             "pattern, pass glob, or read the full output from "
+                             "scratch_path."));
     if (!ok) clay_json_object_set(result, "error", clay_json_string(rc != 0 ? "failed to start grep" : "grep failed"));
     return result;
 }
@@ -1251,7 +1265,7 @@ static ClayJson *grep_linux_run(ClayCommands *commands, const char *pattern,
     free(workspace_dir);
     clay_str_free(&base);
     ClayJson *result = grep_result(&output, files.rc, files.exit_code,
-                                   files.truncated, commands);
+                                   files.truncated, files.files_seen, commands);
     clay_str_free(&output);
     return result;
 }
@@ -1348,11 +1362,7 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
     /* grep exits 1 for "no matches", which is a normal empty result, and
        >1 for a real error (bad pattern, missing path, ...). */
     int ok = rc == 0 && exit_code <= 1;
-    clay_json_object_set(result, "ok", clay_json_bool(ok));
-    if (exit_code == 1) {
-        clay_json_object_set(result, "output", clay_json_string(""));
-        clay_json_object_set(result, "output_truncated", clay_json_bool(0));
-    } else if (output.len > CLAY_FS_GREP_LIMIT) {
+    if (output.len > CLAY_FS_GREP_LIMIT) {
         char *scratch_path = clay_chat_dump_scratch(commands->chat, "grep", output.data);
         ClayStr preview;
         clay_str_init(&preview);
@@ -1368,6 +1378,12 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
         clay_json_object_set(result, "output", clay_json_string(output.data));
         clay_json_object_set(result, "output_truncated", clay_json_bool(truncated));
     }
+    if (truncated || output.len > CLAY_FS_GREP_LIMIT)
+        clay_json_object_set(
+            result, "hint",
+            clay_json_string("Only the first matches are shown: narrow the "
+                             "pattern, pass glob, or read the full output from "
+                             "scratch_path."));
     if (!ok) clay_json_object_set(result, "error", clay_json_string(rc != 0 ? "failed to start grep" : "grep failed"));
     clay_str_free(&output);
     return result;

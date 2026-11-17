@@ -19,6 +19,7 @@ typedef struct {
 
 typedef struct {
   const ClayProviderType *type;
+  ClayCommands *commands; /* owning session for the provider lifecycle gate */
   uint64_t generation; /* session-local configuration identity */
   /* Credential versions and refresh epochs are monotonic; replacement bumps them. */
   uint64_t codex_version; /* protected by the credential mutex */
@@ -26,7 +27,7 @@ typedef struct {
   uint64_t codex_refresh_failure_epoch;
   uint64_t codex_refresh_start_version;
   int codex_refresh_unpersisted;
-  int codex_auth_invalid; /* confirmed invalid_grant for the current generation */
+  int codex_auth_invalid; /* Codex-specific; Grok keeps its existing refresh-failure policy. */
   int codex_refresh_active;
   uint64_t grok_version; /* protected by the credential mutex */
   uint64_t grok_refresh_epoch, grok_refresh_failure_epoch, grok_refresh_start_version;
@@ -146,7 +147,8 @@ struct ClayCommands {
   ClayChat *chat;
   ClayArray providers;
   uint64_t provider_generation; /* last issued; not reset on logout */
-  /* Readers are active completions/model fetches; a writer replaces or removes a provider. */
+  /* Readers are active completions and model fetches; a writer replaces or removes a provider.
+     Replacement waits until readers drain, then blocks new readers. */
   pthread_mutex_t provider_gate_lock;
   pthread_cond_t provider_gate_cond;
   int provider_gate_readers;

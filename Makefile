@@ -251,13 +251,16 @@ $(BUILD_DIR)/tests/workspace_fd_test_impl.o: src/commands/workspace_fd.c
 $(BIN_DIR)/test_workspace_fd: $(BUILD_DIR)/tests/workspace_fd_test_impl.o $(WORKSPACE_FD_TEST_OBJ) | $(BIN_DIR)
 	$(CC) $^ -o $@
 
-test-fs-fallback:
-	$(MAKE) BUILD_DIR=build-fs-fallback BIN_DIR=bin-fs-fallback CFLAGS="$(CFLAGS) -DCLAY_NO_OPENAT2" test-workspace-fd test-fs-tools test-undo test-repo-map
+FS_FALLBACK_BUILD_DIR := build-fs-fallback
+FS_FALLBACK_BIN_DIR := bin-fs-fallback
 
-test-fs-matrix: test-workspace-fd test-fs-tools test-undo test-repo-map
-	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./$(BIN_DIR)/test_fs_tools
+test-fs-fallback:
+	$(MAKE) BUILD_DIR=$(FS_FALLBACK_BUILD_DIR) BIN_DIR=$(FS_FALLBACK_BIN_DIR) CFLAGS="$(CFLAGS) -DCLAY_NO_OPENAT2" test-workspace-fd test-fs-tools test-undo test-repo-map
+
+test-fs-matrix: test-workspace-fd $(FS_TOOLS_TEST_TARGET) test-undo test-repo-map
+	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./$(FS_TOOLS_TEST_TARGET)
 	$(MAKE) test-fs-fallback
-	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./bin-fs-fallback/test_fs_tools
+	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./$(FS_FALLBACK_BIN_DIR)/test_fs_tools
 
 test-openai: $(TEST_TARGET)
 	@./$<

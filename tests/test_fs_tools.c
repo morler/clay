@@ -184,7 +184,6 @@ static void test_grep_race(ClayCommands *commands) {
     assert(unlink("grep-race.txt") == 0 && unlink("grep-race-old.txt") == 0);
     assert(unlink(race_secret) == 0);
 }
-#endif
 
 static void test_grep_directory_race_baseline(ClayCommands *commands) {
     char *scratch = clay_chat_scratch_dir(commands->chat);
@@ -233,6 +232,7 @@ static void test_grep_directory_race_baseline(ClayCommands *commands) {
     assert(unlink(secret) == 0 && rmdir(outside) == 0);
     grep_dir_swap_outside = NULL;
 }
+#endif
 
 int main(void) {
     test_windows_paths();

@@ -586,6 +586,7 @@ void clay_commands_load_provider(ClayCommands *commands,
     ClayProviderConfig *old_config = existing->config;
     provider_models_free(existing);
     existing->config = config;
+    existing->commands = commands;
     existing->generation = generation;
     existing->codex_version++;
     existing->grok_version++;
@@ -621,6 +622,7 @@ void clay_commands_load_provider(ClayCommands *commands,
 
   ClayConnectedProvider provider = {0};
   provider.type = type;
+  provider.commands = commands;
   provider.generation = generation;
   provider.config = config;
   provider.environment_override = environment_override;
@@ -672,6 +674,9 @@ static int save_config_tracked(ClayConnectedProvider *provider, int *flag,
   if (rc != 0) {
     *flag = 1;
     *next_try = time(NULL) + UNPERSISTED_RETRY_SECONDS;
+  } else {
+    *flag = 0;
+    *next_try = 0;
   }
   return rc;
 }
@@ -1776,6 +1781,8 @@ int clay_commands_select_model(ClayCommands *commands, const char *provider,
 
 int clay_commands_fetch_models(void *ctx, ClayArray *out) {
   ClayConnectedProvider *provider = ctx;
+  ClayCommands *commands = provider->commands;
+  if (commands) provider_use_begin(commands);
   if (!provider->models_fetched) {
     ClayTask *task =
         clay_task_start("Retrieving %s models", provider->type->label);
@@ -1823,6 +1830,7 @@ int clay_commands_fetch_models(void *ctx, ClayArray *out) {
     ClayModelItem item = {*(char **)clay_array_get(&provider->models, i), NULL};
     clay_array_push_val(out, &item);
   }
+  if (commands) provider_use_end(commands);
   return provider->models_rc;
 }
 

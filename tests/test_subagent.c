@@ -5,6 +5,7 @@
 #include "clay/json.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -418,6 +419,8 @@ static void test_codex_invalid_grant_removes_config(void) {
     clay_array_init(&provider.models, sizeof(char *));
     clay_array_push_val(&commands.providers, &provider);
 
+    network_release = 1;
+    network_cancel = 0;
     review_mock = 10;
     ClayJson *messages = clay_json_array();
     assert(clay_commands_run_completion(&commands, messages, NULL, 1, NULL, NULL) == -1);
@@ -1859,13 +1862,17 @@ static void *logout_gate_run(void *arg) {
 
 typedef struct {
     ClayCommands *commands;
+    LogoutGate *gate;
     int rc, done;
 } LogoutRun;
 
 static void *logout_gate_logout(void *arg) {
     LogoutRun *run = arg;
     run->rc = clay_commands_logout_provider(run->commands, "openai-codex");
+    pthread_mutex_lock(&run->gate->lock);
     run->done = 1;
+    pthread_cond_broadcast(&run->gate->cond);
+    pthread_mutex_unlock(&run->gate->lock);
     return NULL;
 }
 
@@ -1895,10 +1902,23 @@ static void test_logout_waits_for_workers(void) {
     while (!gate.entered) pthread_cond_wait(&gate.cond, &gate.lock);
     pthread_mutex_unlock(&gate.lock);
 
-    LogoutRun run = {&c, -99, 0};
+    LogoutRun run = {&c, &gate, -99, 0};
     assert(!pthread_create(&logout_thread, NULL, logout_gate_logout, &run));
-    usleep(50000);
+    pthread_mutex_lock(&gate.lock);
+    struct timespec deadline;
+    assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_nsec += 50000000;
+    if (deadline.tv_nsec >= 1000000000) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000;
+    }
+    while (!run.done) {
+        int rc = pthread_cond_timedwait(&gate.cond, &gate.lock, &deadline);
+        if (rc == ETIMEDOUT) break;
+        assert(rc == 0);
+    }
     assert(!run.done);
+    pthread_mutex_unlock(&gate.lock);
     pthread_mutex_lock(&gate.lock);
     gate.release = 1;
     pthread_cond_broadcast(&gate.cond);

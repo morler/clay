@@ -34,6 +34,7 @@
 #define CLAY_FS_READ_LIMIT (256 * 1024)
 #define CLAY_FS_GREP_LIMIT (64 * 1024)      /* shown inline to the model */
 #define CLAY_FS_GREP_CAPTURE_LIMIT (4 * 1024 * 1024) /* captured, for the scratch dump */
+#define CLAY_FS_GREP_MAX_FILES 4096
 #define CLAY_FS_GLOB_MAX_MATCHES 500
 #define CLAY_FS_READ_SUGGESTION_LIMIT 5
 
@@ -1012,28 +1013,31 @@ typedef struct {
     int exit_code;
     int ran;
     int truncated;
+    int files_seen;
     time_t deadline;
 } GrepFiles;
 
 static int grep_include_matches(const char *include, const char *label) {
-    if (fnmatch(include, label, 0) == 0) return 1;
-    const char *base = strrchr(label, '/');
-    return fnmatch(include, base ? base + 1 : label, 0) == 0;
+    for (const char *part = label; part; ) {
+        if (fnmatch(include, part, 0) == 0) return 1;
+        part = strchr(part, '/');
+        if (part) part++;
+    }
+    return 0;
 }
 
 static int grep_run_fd(int fd, const char *label, void *userdata) {
     GrepFiles *files = userdata;
-    if (time(NULL) >= files->deadline) {
-        files->rc = -1;
-        return -1;
+    if (time(NULL) >= files->deadline || files->files_seen >= CLAY_FS_GREP_MAX_FILES) {
+        files->truncated = 1;
+        return 1;
     }
     if (files->include && !grep_include_matches(files->include, label)) return 0;
-    size_t remaining = files->output->len < files->limit
-                           ? files->limit - files->output->len : 0;
-    if (!remaining) {
+    if (files->output->len >= files->limit) {
         files->truncated = 1;
-        return -1;
+        return 1;
     }
+    files->files_seen++;
     ClayStr invocation;
     clay_str_init(&invocation);
     clay_str_push(&invocation, files->base);
@@ -1042,7 +1046,7 @@ static int grep_run_fd(int fd, const char *label, void *userdata) {
     clay_str_push(&invocation, " -- -");
     ClayExecResult exec = {0};
     int rc = clay_sandbox_exec_input(files->sandbox, invocation.data, files->output,
-                                     remaining, NULL, &exec, fd);
+                                     files->limit, NULL, &exec, fd);
     clay_str_free(&invocation);
     files->ran = 1;
     if (rc != 0) files->rc = -1;
@@ -1053,7 +1057,10 @@ static int grep_run_fd(int fd, const char *label, void *userdata) {
 
 static int grep_walk_files(int root, const char *relative, GrepFileFn visit,
                            void *userdata, int depth) {
-    if (depth > 24) return -1;
+    if (depth > 24) {
+        ((GrepFiles *)userdata)->truncated = 1;
+        return 0;
+    }
     int probe = read_open_beneath(root, relative, O_PATH);
     int dirfd = read_open_beneath(root, relative, O_RDONLY | O_DIRECTORY);
     struct stat probe_st, dir_st;
@@ -1063,13 +1070,15 @@ static int grep_walk_files(int root, const char *relative, GrepFileFn visit,
     if (probe >= 0) close(probe);
     if (!same) {
         if (dirfd >= 0) close(dirfd);
-        return -1;
+        ((GrepFiles *)userdata)->truncated = 1;
+        return 0;
     }
     DIR *dir = fdopendir(dirfd);
     if (!dir) { close(dirfd); return -1; }
     int rc = 0;
+    int stop = 0;
     struct dirent *entry;
-    while (!rc && (entry = readdir(dir))) {
+    while (!rc && !stop && (entry = readdir(dir))) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         ClayStr child;
         clay_str_init(&child);
@@ -1080,9 +1089,13 @@ static int grep_walk_files(int root, const char *relative, GrepFileFn visit,
         int stat_ok = fd >= 0 && fstat(fd, &st) == 0;
         if (stat_ok && S_ISDIR(st.st_mode)) {
             close(fd);
-            rc = grep_walk_files(root, child.data, visit, userdata, depth + 1);
+            int child_rc = grep_walk_files(root, child.data, visit, userdata, depth + 1);
+            if (child_rc < 0) rc = -1;
+            else if (child_rc > 0) stop = 1;
         } else if (stat_ok && S_ISREG(st.st_mode)) {
-            rc = visit(fd, child.data, userdata);
+            int visit_rc = visit(fd, child.data, userdata);
+            if (visit_rc < 0) rc = -1;
+            else if (visit_rc > 0) stop = 1;
             close(fd);
         } else if (fd >= 0) {
             close(fd);
@@ -1090,7 +1103,7 @@ static int grep_walk_files(int root, const char *relative, GrepFileFn visit,
         clay_str_free(&child);
     }
     closedir(dir);
-    return rc;
+    return rc < 0 ? -1 : 0;
 }
 
 static ClayJson *grep_result(ClayStr *output, int rc, int exit_code,
@@ -1268,6 +1281,7 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
                                                 relative_copy, workspace_dir);
         free(relative_copy);
         clay_json_object_set(linux_result, "pattern", clay_json_string(pattern));
+        clay_json_free(result);
         return linux_result;
     }
 #else
@@ -1279,10 +1293,14 @@ ClayJson *clay_fs_tool_grep(const ClayJson *arguments, void *userdata) {
         clay_str_push(&invocation, " --include=");
         clay_term_shell_quote(&invocation, include);
     }
+#ifdef _WIN32
     ClayStr normalized_workspace;
     win_normalize(workspace_dir, &normalized_workspace);
     const char *relative_target = target.data + normalized_workspace.len;
     clay_str_free(&normalized_workspace);
+#else
+    const char *relative_target = target.data + strlen(workspace_dir);
+#endif
     clay_str_push(&invocation, " -- ");
     clay_term_shell_quote(&invocation, *relative_target ? relative_target : ".");
     clay_str_free(&target);

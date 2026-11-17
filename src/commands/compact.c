@@ -21,7 +21,9 @@
   "transcript below and write a concise summary that preserves: what the "     \
   "user asked for, key decisions "                                             \
   "made, files touched and why, the current state of the task, and anything "  \
-  "still pending. Tool call "                                                  \
+  "still pending. The user's own requests are kept word for word outside "     \
+  "your summary, so do not repeat them - say what came of them. Keep it "      \
+  "under about 1500 tokens and leave out command transcripts. Tool call "                                                  \
   "results were stripped to short previews to save space - if an important "   \
   "detail seems to be missing "                                                \
   "because of that, say so explicitly instead of guessing. Plain prose, no "   \
@@ -154,6 +156,44 @@ char *clay_commands_build_compact_transcript(ClayJson *conversation) {
   return out.data;
 }
 
+/* The user's own words, which the summary must not paraphrase: they are the
+   requirements. Cut per request so one pasted file cannot crowd out the
+   summary, and say what was cut. */
+#define CLAY_COMPACT_PROMPT_BYTES 4000
+#define CLAY_COMPACT_PROMPTS_TOTAL_BYTES (80 * 1024)
+
+char *clay_commands_collect_user_requests(const ClayJson *conversation) {
+    ClayStr out;
+    clay_str_init(&out);
+    for (size_t i = 1; i < clay_json_array_count(conversation); i++) {
+        ClayJson *message = clay_json_array_get(conversation, i);
+        const char *role =
+            clay_json_string_value(clay_json_object_get(message, "role"));
+        if (!role || strcmp(role, "user") != 0) continue;
+        const char *content =
+            clay_json_string_value(clay_json_object_get(message, "content"));
+        if (!content || !*content) continue;
+        if (out.len >= CLAY_COMPACT_PROMPTS_TOTAL_BYTES) break;
+        size_t length = strlen(content);
+        size_t room = CLAY_COMPACT_PROMPT_BYTES;
+        size_t remaining =
+            out.len < CLAY_COMPACT_PROMPTS_TOTAL_BYTES
+                ? CLAY_COMPACT_PROMPTS_TOTAL_BYTES - out.len
+                : 0;
+        if (room > remaining) room = remaining;
+        size_t shown = length < room ? length : room;
+        clay_str_printf(&out, "- %.*s", (int)shown, content);
+        if (shown < length)
+            clay_str_printf(&out, " [... %zu characters cut]", length - shown);
+        clay_str_push_char(&out, '\n');
+    }
+    if (out.len == 0) {
+        clay_str_free(&out);
+        return NULL;
+    }
+    return out.data;
+}
+
 typedef struct {
   ClayCommands *commands;
   int round;
@@ -234,9 +274,22 @@ void clay_cmd_compact(const char *args, void *user_data) {
   clay_app_task_success(commands->app, task, "%zu messages -> summary",
                         before_count);
 
+  char *requests = clay_commands_collect_user_requests(commands->conversation);
   ClayJson *new_conversation = clay_json_array();
   clay_json_array_push(new_conversation, clay_json_clone(clay_json_array_get(
                                              commands->conversation, 0)));
+  if (requests) {
+    ClayStr block;
+    clay_str_init(&block);
+    clay_str_printf(&block,
+                    "What the user asked for, word for word (this is the "
+                    "requirement; the summary below is context):\n%s",
+                    requests);
+    clay_json_array_push(new_conversation,
+                         clay_openai_message("user", block.data));
+    clay_str_free(&block);
+    free(requests);
+  }
   ClayStr note;
   clay_str_init(&note);
   clay_str_printf(

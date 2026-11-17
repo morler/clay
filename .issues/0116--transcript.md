@@ -1,7 +1,7 @@
 ---
 id: 116
 title: 摘要 transcript 的工具参数截断
-status: in-progress
+status: closed
 priority: high
 labels:
     - type:task
@@ -15,6 +15,7 @@ relations:
         - 118
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：src/commands/compact.c:59-69 工具调用只保留 name + 关键字段（path/pattern/command 首行）+ 参数字节数；write/edit 只保留路径与行数统计，正文不进摘要请求。

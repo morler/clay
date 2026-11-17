@@ -15,6 +15,32 @@ static void push_message(ClayJson *conversation, const char *role, const char *c
     clay_json_array_push(conversation, message);
 }
 
+/* The requirement survives a compaction: the summarizer's prose is context,
+   the user's own words are the spec, and a long paste is cut with a note. */
+static void test_user_requests_kept(void) {
+    ClayJson *conversation = clay_json_array();
+    push_message(conversation, "system", "you are clay");
+    push_message(conversation, "user", "Keep every public API stable.");
+    push_message(conversation, "assistant", "Understood.");
+    ClayStr huge;
+    clay_str_init(&huge);
+    for (int i = 0; i < 6000; i++) clay_str_push_char(&huge, 'p');
+    ClayJson *pasted = clay_json_object();
+    clay_json_object_set(pasted, "role", clay_json_string("user"));
+    clay_json_object_set(pasted, "content", clay_json_string(huge.data));
+    clay_json_array_push(conversation, pasted);
+
+    char *requests = clay_commands_collect_user_requests(conversation);
+    assert(requests);
+    assert(strstr(requests, "Keep every public API stable."));
+    /* 4,000 of the 6,000 pasted characters survive, and the cut is named. */
+    assert(strstr(requests, "2000 characters cut"));
+    assert(strlen(requests) < 6000);
+    free(requests);
+    clay_str_free(&huge);
+    clay_json_free(conversation);
+}
+
 int main(void) {
     ClayJson *conversation = clay_json_array();
     push_message(conversation, "system", "you are clay"); /* skipped by the transcript builder */
@@ -107,6 +133,7 @@ int main(void) {
     free(empty_transcript);
     clay_json_free(empty);
 
+    test_user_requests_kept();
     printf("compact tests passed\n");
     return 0;
 }

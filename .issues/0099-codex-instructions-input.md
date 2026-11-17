@@ -1,7 +1,7 @@
 ---
 id: 99
 title: Codex 解包测试先行：instructions 与 input 分离断言
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -14,6 +14,7 @@ relations:
         - 100
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：tests/test_openai_codex.c 增加红测试——给定 system + 两条尾部 context 块，断言 instructions 只含冻结提示、后续块在 input 里按序出现；当前实现下失败。

@@ -31,3 +31,16 @@ killi 对照：system prompt 会话内冻结，变化只作为尾部 user 消息
 3. 红测试先行：构造 system + 两条尾部 context 块，断言第二次序列化后 instructions 与第一次逐字节相同。
 
 验收：环境块变化后 codex 请求的 instructions 不变；现有 codex 测试与 make test 通过；测试加入 UNIT_TEST_TARGETS。
+
+## 2026-11-17 实现与验证
+
+改动：src/providers/openai_codex.c 的 responses_input 只把 index 0 的 system 放进 instructions，后续 system 块（环境、notes）按原顺序留在 input。
+
+测试：新增 tests/test_openai_codex_prefix.c（#99 红测试，已转绿），断言
+- instructions 逐字节等于冻结的系统提示，不含环境/notes；
+- 两个 context 块仍在 input 中按序出现；
+- 同一历史两次序列化的请求体逐字节相同。
+实测：instructions 12 B（拆分前 82 B，即每次环境/notes 变化都会改写这 70 B 的请求开头）。
+
+验证：make test（34 个测试全部通过）、make test-openai-codex、test-subagent、test-grok 通过。
+未验证：真实 Codex 端点的命中率——需要 OAuth 凭据，属 #75 一类真实网络验证；离线部分只能证明前缀不再变化。

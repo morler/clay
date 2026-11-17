@@ -1,7 +1,7 @@
 ---
 id: 101
 title: 全 provider 回归与实测记录
-status: open
+status: in-progress
 priority: high
 labels:
     - type:task

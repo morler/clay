@@ -1,7 +1,7 @@
 ---
 id: 78
 title: 离线 token 基线基准与固定预算测试
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -22,6 +22,7 @@ relations:
         - 98
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 现状：仓库没有任何 token 基准或预算断言。CHANGELOG.md:87-95 只说“第三个 turn 97%”，代码无测量（只有 tests/test_chat.c、test_grok.c 的 usage 解析级断言）。killi 对照：crates/killi/src/tests.rs:5-16 断言 prompt + 工具 <= 12,000 字符；scripts/eval.py 比每任务 input/cached；scripts/bench.py 取 first_prompt_tokens。

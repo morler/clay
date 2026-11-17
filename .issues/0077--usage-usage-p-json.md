@@ -1,7 +1,7 @@
 ---
 id: 77
 title: 逐请求 usage 记录、/usage 与 -p --json
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -19,6 +19,7 @@ relations:
         - 95
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 现状：usage 只在每轮结束时汇总（src/commands/message.c:1342-1350 on_usage_details、1604-1612 写回 commands），没有逐请求记录、没有 provider/模型/窗口归因，也没有 /usage 命令或 --json 输出；CHANGELOG.md:87-95 的 97% 是手工观察值。

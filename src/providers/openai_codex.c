@@ -641,6 +641,11 @@ static int stream_abort(void *userdata) {
   return s->cancelled;
 }
 
+/* Index 0 is the frozen system prompt and belongs in `instructions`, where
+   every request starts with the same bytes. System blocks appended later
+   (the environment, the notes) are conversation content: folding them into
+   `instructions` made one changed block rewrite the request's start and the
+   provider's prefix cache went with it. */
 static ClayJson *responses_input(const ClayJson *messages,
                                  ClayStr *instructions) {
   ClayJson *input = clay_json_array();
@@ -649,12 +654,9 @@ static ClayJson *responses_input(const ClayJson *messages,
     const char *role = string_at(m, "role"), *content = string_at(m, "content");
     if (!role)
       continue;
-    if (strcmp(role, "system") == 0) {
-      if (content && *content) {
-        if (instructions->len)
-          clay_str_push(instructions, "\n\n");
+    if (strcmp(role, "system") == 0 && i == 0) {
+      if (content && *content)
         clay_str_push(instructions, content);
-      }
       continue;
     }
     if (strcmp(role, "tool") == 0) {

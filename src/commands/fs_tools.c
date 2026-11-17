@@ -696,6 +696,88 @@ static void push_prefixed_lines(ClayStr *out, const char *text, const char *pref
     }
 }
 
+/* Why an edit did not apply, as precisely as the file allows: the model can
+   then send the next call at the line that differs instead of reading the
+   whole file again. Pure and string-only. */
+static void push_line_number(ClayStr *out, size_t line) {
+    clay_str_printf(out, "line %zu", line);
+}
+
+/* The first line where `needle` and the file's block stop matching. Both are
+   scanned line by line; -1 pieces when nothing shares even the first line. */
+static long closest_line(const char *content, const char *needle,
+                          size_t *matches) {
+    if (matches) *matches = 0;
+    if (!content || !needle || !*needle) return 0;
+    size_t needle_len = strcspn(needle, "\n");
+    size_t line_no = 0, found_line = 0;
+    const char *cursor = content;
+    while (cursor && *cursor) {
+        line_no++;
+        size_t item = strcspn(cursor, "\n");
+        if (item == needle_len && strncmp(cursor, needle, needle_len) == 0) {
+            if (matches) (*matches)++;
+            if (!found_line) found_line = line_no;
+        }
+        cursor = cursor[item] == '\n' ? cursor + item + 1 : NULL;
+    }
+    return found_line ? (long)found_line : -1;
+}
+
+/* The file's own text at `line`, quoted so the model can compare it with
+   what it sent. Empty when the line is past the end. */
+static void quote_line(ClayStr *out, const char *content, size_t line,
+                       size_t max_bytes) {
+    size_t line_no = 0;
+    const char *cursor = content;
+    while (cursor && *cursor) {
+        line_no++;
+        size_t item = strcspn(cursor, "\n");
+        if (line_no == line) {
+            size_t shown = item < max_bytes ? item : max_bytes;
+            clay_str_printf(out, "the file has \"%.*s%s\"", (int)shown, cursor,
+                            shown < item ? "..." : "");
+            return;
+        }
+        cursor = cursor[item] == '\n' ? cursor + item + 1 : NULL;
+    }
+    clay_str_push(out, "the line is past the end of the file");
+}
+
+/* The first line of `needle` that differs from the file's block starting at
+   `line`, with the file's actual text. */
+static void describe_mismatch(ClayStr *out, const char *content,
+                              const char *needle, size_t line) {
+    size_t line_no = 0, needle_line = 0;
+    const char *cursor = content, *expected = needle;
+    while (cursor && *cursor) {
+        line_no++;
+        size_t item = strcspn(cursor, "\n");
+        needle_line++;
+        size_t want = expected ? strcspn(expected, "\n") : 0;
+        int same = expected && want == item &&
+                   strncmp(cursor, expected, item) == 0;
+        if (line_no < line || same) {
+            if (line_no >= line) expected = expected && expected[want] == '\n'
+                                              ? expected + want + 1
+                                              : NULL;
+            cursor = cursor[item] == '\n' ? cursor + item + 1 : NULL;
+            continue;
+        }
+        clay_str_printf(out, "oldString diverges at ");
+        push_line_number(out, line_no);
+        clay_str_printf(out, ": ");
+        quote_line(out, content, line_no, 160);
+        if (expected && *expected)
+            clay_str_printf(out, " where oldString has \"%.*s\"",
+                            (int)strcspn(expected, "\n"), expected);
+        return;
+    }
+    if (needle_line > 0 && cursor == NULL) return;
+    clay_str_printf(out, "oldString runs past the end of the file after ");
+    push_line_number(out, line);
+}
+
 ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
     (void)userdata;
     const char *old_string = clay_json_string_value(clay_json_object_get(arguments, "oldString"));
@@ -732,19 +814,58 @@ ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
 
     size_t occurrences = count_occurrences(content.data, old_string);
     if (occurrences == 0) {
+        ClayStr error;
+        clay_str_init(&error);
+        size_t same_lines = 0;
+        long line = closest_line(content.data, old_string, &same_lines);
+        if (line > 0) {
+            clay_str_printf(&error,
+                            "oldString was not found in the file; the closest "
+                            "match starts at ");
+            push_line_number(&error, (size_t)line);
+            clay_str_push(&error, ", ");
+            describe_mismatch(&error, content.data, old_string, (size_t)line);
+        } else {
+            clay_str_printf(&error,
+                            "oldString was not found in the file, and none of "
+                            "its lines appear in it: read the file before "
+                            "editing");
+        }
         clay_str_free(&abs);
         clay_str_free(&content);
         clay_json_object_set(result, "ok", clay_json_bool(0));
-        clay_json_object_set(result, "error", clay_json_string("oldString was not found in the file"));
+        clay_json_object_set(result, "error", clay_json_string(error.data));
+        clay_str_free(&error);
         return result;
     }
     if (occurrences > 1 && !replace_all) {
+        ClayStr error;
+        clay_str_init(&error);
+        clay_str_printf(&error,
+                        "oldString is not unique in the file (%zu matches",
+                        occurrences);
+        /* Name the lines, up to five: the model can then include the next
+           line of context without another search. */
+        size_t line_no = 0, named = 0;
+        const char *cursor = content.data;
+        while (cursor && *cursor && named < 5) {
+            line_no++;
+            if (strncmp(cursor, old_string, strcspn(old_string, "\n")) == 0) {
+                if (named) clay_str_push(&error, ",");
+                clay_str_push(&error, " line ");
+                clay_str_printf(&error, "%zu", line_no);
+                named++;
+            }
+            size_t item = strcspn(cursor, "\n");
+            cursor = cursor[item] == '\n' ? cursor + item + 1 : NULL;
+        }
+        clay_str_printf(&error,
+                        "): include more context, or pass replaceAll");
         clay_str_free(&abs);
         clay_str_free(&content);
         clay_json_object_set(result, "ok", clay_json_bool(0));
-        clay_json_object_set(
-            result, "error",
-            clay_json_string("oldString is not unique in the file - include more context, or pass replaceAll"));
+        clay_json_object_set(result, "error", clay_json_string(error.data));
+        clay_str_free(&error);
         return result;
     }
 

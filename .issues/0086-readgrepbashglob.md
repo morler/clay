@@ -1,7 +1,7 @@
 ---
 id: 86
 title: 工具输出上限与续读提示对齐（read/grep/bash/glob）
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -17,7 +17,8 @@ relations:
         - 125
         - 126
 created: "2026-11-17"
-updated: "2026-11-17"
+updated: "2026-11-18"
+closed: "2026-11-18"
 ---
 
 现状：

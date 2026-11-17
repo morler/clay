@@ -283,6 +283,48 @@ int main(void) {
         assert(rmdir("glob-many") == 0);
     }
 
+    /* Neither an unfound nor an ambiguous oldString is a dead end: the error
+       names the line where the file diverges, or where the matches are. */
+    {
+        result = call(clay_fs_tool_write,
+                      "{\"path\":\"a.c\",\"content\":\"int main(void) {\\n  int retry_count = 3;\\n  return 0;\\n}\\n\"}");
+        assert(ok(result));
+        clay_json_free(result);
+        result = call(clay_fs_tool_edit,
+                      "{\"path\":\"a.c\",\"oldString\":\"int main(void) {\\n  int retry_counter = 3;\\n\",\"newString\":\"x\"}");
+        assert(!ok(result));
+        const char *error =
+            clay_json_string_value(clay_json_object_get(result, "error"));
+        assert(strstr(error, "closest match starts at line 1"));
+        assert(strstr(error, "line 2"));
+        assert(strstr(error, "retry_count = 3"));
+        clay_json_free(result);
+
+        result = call(clay_fs_tool_write,
+                      "{\"path\":\"both.c\",\"content\":\"int main(void) {\\n  return 0;\\n}\\nint other(void) {\\n  return 0;\\n}\\n\"}");
+        assert(ok(result));
+        clay_json_free(result);
+        result = call(clay_fs_tool_edit,
+                      "{\"path\":\"both.c\",\"oldString\":\"  return 0;\",\"newString\":\"  return 1;\"}");
+        assert(!ok(result));
+        error = clay_json_string_value(clay_json_object_get(result, "error"));
+        assert(strstr(error, "(2 matches"));
+        assert(strstr(error, "line 2"));
+        assert(strstr(error, "line 5"));
+        assert(strstr(error, "include more context"));
+        clay_json_free(result);
+        assert(unlink("both.c") == 0);
+
+        /* Nothing shared at all: say so instead of guessing. */
+        result = call(clay_fs_tool_edit,
+                      "{\"path\":\"a.c\",\"oldString\":\"void unrelated(void);\",\"newString\":\"y\"}");
+        assert(!ok(result));
+        error = clay_json_string_value(clay_json_object_get(result, "error"));
+        assert(strstr(error, "none of its lines appear"));
+        clay_json_free(result);
+        assert(unlink("a.c") == 0);
+    }
+
     result = call(clay_fs_tool_read, "{\"path\":\"a.txt\"}");
     assert(ok(result));
     const char *output = clay_json_string_value(clay_json_object_get(result, "output"));

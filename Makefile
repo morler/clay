@@ -192,7 +192,7 @@ UNIT_TEST_TARGETS := $(BIN_DIR)/test_openai_codex_refresh $(BIN_DIR)/test_grok_r
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
 	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
-.PHONY: test-fs-matrix test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
+.PHONY: test-fs-matrix test-tsan test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
 
 all: build
 
@@ -253,6 +253,10 @@ $(BIN_DIR)/test_workspace_fd: $(BUILD_DIR)/tests/workspace_fd_test_impl.o $(WORK
 
 FS_FALLBACK_BUILD_DIR := build-fs-fallback
 FS_FALLBACK_BIN_DIR := bin-fs-fallback
+TSAN_BUILD_DIR := build-tsan
+TSAN_BIN_DIR := bin-tsan
+TSAN_CFLAGS := $(STD) $(WARN) -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Iinclude -MMD -MP $(CURL_CFLAGS)
+TSAN_LDFLAGS := -fsanitize=thread -lpthread $(CURL_LDFLAGS)
 
 test-fs-fallback:
 	$(MAKE) BUILD_DIR=$(FS_FALLBACK_BUILD_DIR) BIN_DIR=$(FS_FALLBACK_BIN_DIR) CFLAGS="$(CFLAGS) -DCLAY_NO_OPENAT2" test-workspace-fd test-fs-tools test-undo test-repo-map
@@ -261,6 +265,9 @@ test-fs-matrix: test-workspace-fd $(FS_TOOLS_TEST_TARGET) test-undo test-repo-ma
 	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./$(FS_TOOLS_TEST_TARGET)
 	$(MAKE) test-fs-fallback
 	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./$(FS_FALLBACK_BIN_DIR)/test_fs_tools
+
+test-tsan:
+	TSAN_OPTIONS=halt_on_error=1 $(MAKE) CC=clang BUILD_DIR=$(TSAN_BUILD_DIR) BIN_DIR=$(TSAN_BIN_DIR) CFLAGS="$(TSAN_CFLAGS)" LDFLAGS="$(TSAN_LDFLAGS)" test-subagent test-openai-codex test-grok
 
 test-openai: $(TEST_TARGET)
 	@./$<
@@ -491,7 +498,7 @@ debug: CFLAGS += -g -O0 -DDEBUG
 debug: clean build
 
 clean:
-	rm -rf $(BUILD_DIR) $(BIN_DIR) $(BUILD_DIR_WIN) $(BIN_DIR_WIN) $(BUILD_DIR_RELEASE) $(BIN_DIR_RELEASE) build-fs-fallback bin-fs-fallback
+	rm -rf $(BUILD_DIR) $(BIN_DIR) $(BUILD_DIR_WIN) $(BIN_DIR_WIN) $(BUILD_DIR_RELEASE) $(BIN_DIR_RELEASE) build-fs-fallback bin-fs-fallback $(TSAN_BUILD_DIR) $(TSAN_BIN_DIR)
 
 -include $(DEP)
 -include $(DEP_WIN)

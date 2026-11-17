@@ -1,7 +1,7 @@
 ---
 id: 79
 title: Codex 不再把可变 system 块提升到 instructions 顶部
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -17,6 +17,7 @@ relations:
         - 101
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 现状：src/providers/openai_codex.c:645-659 把所有 role=system 的消息按顺序拼进顶层 instructions；而 src/commands/context.c:1690-1717 的环境块（日期、cwd、git 分支、顶层文件列表）和 notes 块是“变了就在对话尾部追加一条 system”。在 Codex 上每追加一次就改写请求开头，整个前缀缓存失效。这是本计划里影响最大的一处，应最先做。

@@ -1713,24 +1713,195 @@ done:
   return rc;
 }
 
+/* The environment is re-read before every turn; the listing alone can run to
+   50 names. Sending the whole block again for each change grows the history
+   quadratically in the number of turns, so after the first block only what
+   actually changed is appended. Pure and string-only, so it is testable
+   without a session. */
+#define CLAY_ENV_LISTING_MARKER "\nTop-level entries as of this message: "
+#define CLAY_ENV_DELTA_MAX_ENTRIES 20
+
+static const char *listing_part(const char *block, const char **start) {
+  const char *marker_at = strstr(block, CLAY_ENV_LISTING_MARKER);
+  if (!marker_at) {
+    *start = NULL;
+    return NULL;
+  }
+  *start = marker_at + strlen(CLAY_ENV_LISTING_MARKER);
+  return *start;
+}
+
+/* Whether `entries` (comma-separated) contains `name` of `length`. */
+static int listing_has(const char *entries, const char *name, size_t length) {
+  const char *cursor = entries;
+  while (cursor && *cursor) {
+    const char *comma = strstr(cursor, ", ");
+    size_t item = comma ? (size_t)(comma - cursor) : strlen(cursor);
+    if (item == length && strncmp(cursor, name, length) == 0) return 1;
+    cursor = comma ? comma + 2 : NULL;
+  }
+  return 0;
+}
+
+/* Whether `block` holds `line` as a whole line. */
+static int line_in_block(const char *block, const char *line) {
+  size_t length = strlen(line);
+  const char *cursor = block;
+  while (cursor && *cursor) {
+    size_t item = strcspn(cursor, "\n");
+    if (item == length && strncmp(cursor, line, length) == 0) return 1;
+    cursor = cursor[item] == '\n' ? cursor + item + 1 : NULL;
+  }
+  return 0;
+}
+
+/* One side of a listing difference, capped so one mass rename cannot cost
+   more than the block it replaces. */
+static void push_listing_diff(ClayStr *out, const char *from, const char *to) {
+  const char *cursor = to;
+  size_t added = 0, named = 0;
+  while (cursor && *cursor) {
+    const char *comma = strstr(cursor, ", ");
+    size_t item = comma ? (size_t)(comma - cursor) : strlen(cursor);
+    if (item > 0 && !listing_has(from, cursor, item)) {
+      added++;
+      if (named < CLAY_ENV_DELTA_MAX_ENTRIES) {
+        clay_str_printf(out, " +%.*s", (int)item, cursor);
+        named++;
+      }
+    }
+    cursor = comma ? comma + 2 : NULL;
+  }
+  cursor = from;
+  size_t removed = 0;
+  while (cursor && *cursor) {
+    const char *comma = strstr(cursor, ", ");
+    size_t item = comma ? (size_t)(comma - cursor) : strlen(cursor);
+    if (item > 0 && !listing_has(to, cursor, item)) {
+      removed++;
+      if (named < CLAY_ENV_DELTA_MAX_ENTRIES) {
+        clay_str_printf(out, " -%.*s", (int)item, cursor);
+        named++;
+      }
+    }
+    cursor = comma ? comma + 2 : NULL;
+  }
+  if (added + removed > named)
+    clay_str_printf(out, " (%zu more unfinished)", added + removed - named);
+}
+
+/* NULL when nothing changed. Otherwise a block that says only what moved. */
+char *clay_commands_environment_delta(const char *previous,
+                                      const char *current) {
+  if (!previous || !current) return NULL;
+  ClayStr out;
+  clay_str_init(&out);
+  const char *previous_start = NULL, *current_start = NULL;
+  const char *previous_listing = listing_part(previous, &previous_start);
+  const char *current_listing = listing_part(current, &current_start);
+  size_t previous_header = previous_start ? (size_t)(previous_start - previous) -
+                                               strlen(CLAY_ENV_LISTING_MARKER)
+                                         : strlen(previous);
+  size_t current_header = current_start ? (size_t)(current_start - current) -
+                                             strlen(CLAY_ENV_LISTING_MARKER)
+                                       : strlen(current);
+  if (previous_header != current_header ||
+      strncmp(previous, current, current_header) != 0) {
+    clay_str_printf(&out, "Environment changed: %.*s", (int)current_header,
+                    current);
+  }
+  if (previous_listing && current_listing &&
+      strcmp(previous_listing, current_listing) != 0) {
+    ClayStr difference;
+    clay_str_init(&difference);
+    push_listing_diff(&difference, previous_listing, current_listing);
+    if (difference.len) {
+      clay_str_printf(&out, "%sTop-level entries changed:%s",
+                      out.len ? "\n" : "Top-level entries:",
+                      difference.data);
+    }
+    clay_str_free(&difference);
+  } else if (!previous_listing && current_listing) {
+    clay_str_printf(&out, "%sTop-level entries as of this message: %s",
+                    out.len ? "\n" : "", current_listing);
+  }
+  if (out.len == 0) {
+    clay_str_free(&out);
+    return NULL;
+  }
+  return out.data;
+}
+
+/* Line-level difference for the notes scratchpad, which is replaced whole on
+   every write: re-sending all of it each time is what accumulated copies in
+   the first place. NULL when nothing changed. */
+char *clay_commands_text_delta(const char *previous, const char *current) {
+  if (!previous || !current) return NULL;
+  if (strcmp(previous, current) == 0) return NULL;
+  ClayStr out;
+  clay_str_init(&out);
+  const char *cursor = current;
+  while (cursor && *cursor) {
+    const char *newline = strchr(cursor, '\n');
+    size_t length = newline ? (size_t)(newline - cursor) : strlen(cursor);
+    ClayStr line;
+    clay_str_init(&line);
+    clay_str_push_n(&line, cursor, length);
+    if (!line_in_block(previous, line.data)) {
+      if (out.len)
+        clay_str_push_char(&out, '\n');
+      clay_str_printf(&out, "+ %s", line.data);
+    }
+    clay_str_free(&line);
+    cursor = newline ? newline + 1 : NULL;
+  }
+  cursor = previous;
+  while (cursor && *cursor) {
+    const char *newline = strchr(cursor, '\n');
+    size_t length = newline ? (size_t)(newline - cursor) : strlen(cursor);
+    ClayStr line;
+    clay_str_init(&line);
+    clay_str_push_n(&line, cursor, length);
+    if (!line_in_block(current, line.data)) {
+      if (out.len)
+        clay_str_push_char(&out, '\n');
+      clay_str_printf(&out, "- %s", line.data);
+    }
+    clay_str_free(&line);
+    cursor = newline ? newline + 1 : NULL;
+  }
+  if (out.len == 0) {
+    clay_str_free(&out);
+    return NULL;
+  }
+  return out.data;
+}
+
 /* Appends `text` as a system message the first time it differs from what
-   `slot` last held. Deliberately kept in the conversation rather than
-   injected per request and removed: the provider's prefix cache only holds
-   while the message array grows at the end, and a block that appears and
-   disappears in the middle invalidates every turn after it. */
+   `slot` last held, and only the difference after that. Deliberately kept in
+   the conversation rather than injected per request and removed: the
+   provider's prefix cache only holds while the message array grows at the
+   end, and a block that appears and disappears in the middle invalidates
+   every turn after it. `delta` computes what to send given the previous
+   block, or NULL when what would be sent is the whole block again. */
 static void append_context_block(ClayCommands *commands, char **slot,
-                                 const char *text) {
+                                 const char *text,
+                                 char *(*delta)(const char *, const char *)) {
   if (*slot && strcmp(*slot, text) == 0)
     return;
+  char *pending = *slot ? delta(*slot, text) : NULL;
   free(*slot);
   *slot = strdup(text);
   clay_json_array_push(commands->conversation,
-                       clay_openai_message("system", text));
+                       clay_openai_message("system",
+                                           pending ? pending : text));
+  free(pending);
 }
 
 void clay_commands_sync_context_blocks(ClayCommands *commands) {
   char *environment = clay_commands_environment_block();
-  append_context_block(commands, &commands->environment_block, environment);
+  append_context_block(commands, &commands->environment_block, environment,
+                       clay_commands_environment_delta);
   free(environment);
 
   const char *notes = clay_chat_notes(commands->chat);
@@ -1739,7 +1910,8 @@ void clay_commands_sync_context_blocks(ClayCommands *commands) {
   ClayStr block;
   clay_str_init(&block);
   clay_str_printf(&block, "Notes from earlier in this conversation:\n%s", notes);
-  append_context_block(commands, &commands->notes_block, block.data);
+  append_context_block(commands, &commands->notes_block, block.data,
+                       clay_commands_text_delta);
   clay_str_free(&block);
 }
 

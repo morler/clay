@@ -23,6 +23,60 @@ static char *joined_path(const char *dir, const char *name) {
     return path.data;
 }
 
+/* What the append-only history gets: after the first full block, only the
+   fields that moved. */
+static void test_environment_delta(void) {
+    const char *first =
+        "Environment right now: Linux. Today's date (UTC): 2026-11-17. "
+        "Working directory: /w. Git branch: main.\n"
+        "Top-level entries as of this message: a.txt, b.txt, c.txt";
+
+    /* Nothing moved. */
+    assert(!clay_commands_environment_delta(first, first));
+    assert(!clay_commands_text_delta("x\ny", "x\ny"));
+
+    /* A file added and one removed: named, not the whole 50-entry listing. */
+    const char *second =
+        "Environment right now: Linux. Today's date (UTC): 2026-11-17. "
+        "Working directory: /w. Git branch: main.\n"
+        "Top-level entries as of this message: a.txt, c.txt, d.txt";
+    char *delta = clay_commands_environment_delta(first, second);
+    assert(delta);
+    assert(strstr(delta, "+d.txt"));
+    assert(strstr(delta, "-b.txt"));
+    assert(!strstr(delta, "+a.txt"));
+    assert(!strstr(delta, "+c.txt"));
+    /* It is shorter than the block it replaces, which is the whole point. */
+    assert(strlen(delta) < strlen(second));
+    free(delta);
+
+    /* A branch switch is a header change and is sent as such. */
+    const char *branch =
+        "Environment right now: Linux. Today's date (UTC): 2026-11-17. "
+        "Working directory: /w. Git branch: feature/x.\n"
+        "Top-level entries as of this message: a.txt, c.txt, d.txt";
+    char *moved = clay_commands_environment_delta(second, branch);
+    assert(moved);
+    assert(strstr(moved, "feature/x"));
+    assert(!strstr(moved, "+d.txt"));
+    free(moved);
+
+    /* Notes: the scratchpad is replaced whole, so the delta lists lines. */
+    const char *notes_before = "port is 8080\ntests run with make test";
+    const char *notes_after =
+        "port is 8080\ntests run with make test\nuser prefers tabs";
+    char *notes = clay_commands_text_delta(notes_before, notes_after);
+    assert(notes);
+    assert(strstr(notes, "+ user prefers tabs"));
+    assert(!strstr(notes, "+ port is 8080"));
+    free(notes);
+
+    char *dropped = clay_commands_text_delta(notes_before, "port is 8080");
+    assert(dropped);
+    assert(strstr(dropped, "- tests run with make test"));
+    free(dropped);
+}
+
 int main(void) {
     char template[] = "/tmp/clay_test_env_block_XXXXXX";
     char *workspace = mkdtemp(template);
@@ -89,6 +143,7 @@ int main(void) {
     free(git_dir);
     free(sub);
 
+    test_environment_delta();
     printf("environment block tests passed\n");
     return 0;
 }

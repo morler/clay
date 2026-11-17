@@ -172,6 +172,9 @@ void clay_cmd_compact(const char *args, void *user_data) {
 
   clay_json_free(commands->conversation);
   commands->conversation = new_conversation;
+  /* The environment and notes are no longer in this history: send them
+     again next turn instead of diffing against what was dropped. */
+  clay_commands_forget_context_blocks(commands);
 
   clay_sayc(CLAY_GREEN,
             "Compacted. The conversation now starts from a summary.");

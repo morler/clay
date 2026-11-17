@@ -239,6 +239,11 @@ char *clay_commands_environment_block(void);
    conversation, but only when they differ from the last ones appended, so
    the message array only ever grows and the provider's prefix cache holds. */
 void clay_commands_sync_context_blocks(ClayCommands *commands);
+/* Drops what the blocks last held, so the next sync appends the current
+   environment and notes whole instead of a difference against history that
+   no longer exists. Call this after replacing the conversation (a
+   compaction, /new, /resume). */
+void clay_commands_forget_context_blocks(ClayCommands *commands);
 /* What changed between two environment blocks, as a shorter system message,
    or NULL when nothing did. The first block is always sent whole. */
 char *clay_commands_environment_delta(const char *previous,

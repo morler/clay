@@ -1,7 +1,7 @@
 ---
 id: 104
 title: 压缩后重新追加当前环境与 notes
-status: open
+status: in-progress
 priority: high
 labels:
     - type:task

@@ -207,6 +207,31 @@ int main(void) {
   clay_commands_run_message(commands, "hello");
   assert(collapsed_once == 1);
   collapse_during_turn = 0;
+  /* A compaction drops the blocks; the next sync must send them whole, not
+     as a difference against history that is gone. */
+  {
+    char *before = clay_commands_environment_block();
+    assert(before);
+    commands->environment_block = before;
+    commands->notes_block = strdup("Notes from earlier in this conversation:\nport is 8080");
+    clay_commands_forget_context_blocks(commands);
+    assert(commands->environment_block == NULL);
+    assert(commands->notes_block == NULL);
+    clay_commands_sync_context_blocks(commands);
+    size_t blocks = 0;
+    for (size_t i = 0; i < clay_json_array_count(commands->conversation); i++) {
+      ClayJson *message = clay_json_array_get(commands->conversation, i);
+      if (strcmp(clay_json_string_value(clay_json_object_get(message, "role")),
+                 "system") != 0)
+        continue;
+      blocks++;
+    }
+    assert(blocks == 3); /* frozen prompt + environment + notes */
+    /* An unchanged environment appends nothing. */
+    size_t count = clay_json_array_count(commands->conversation);
+    clay_commands_sync_context_blocks(commands);
+    assert(clay_json_array_count(commands->conversation) == count);
+  }
   {
     ClayStr path;
     clay_str_init(&path);

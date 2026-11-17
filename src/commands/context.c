@@ -1915,13 +1915,19 @@ void clay_commands_sync_context_blocks(ClayCommands *commands) {
   clay_str_free(&block);
 }
 
-void clay_commands_reset_conversation(ClayCommands *commands) {
-  clay_json_free(commands->conversation);
-  commands->conversation = clay_json_array();
+void clay_commands_forget_context_blocks(ClayCommands *commands) {
   free(commands->environment_block);
   commands->environment_block = NULL;
   free(commands->notes_block);
   commands->notes_block = NULL;
+}
+
+void clay_commands_reset_conversation(ClayCommands *commands) {
+  clay_json_free(commands->conversation);
+  commands->conversation = clay_json_array();
+  /* The blocks just left the history; the next sync appends them afresh
+     rather than as a difference against a block that is gone. */
+  clay_commands_forget_context_blocks(commands);
   free(commands->system_prompt);
   const char *persisted =
       commands->chat ? clay_chat_system_prompt(commands->chat) : "";

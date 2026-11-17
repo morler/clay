@@ -296,6 +296,10 @@ void clay_cmd_compact(const char *args, void *user_data);
    input and output tokens, cache share and the longest run of requests with
    no cached input. */
 void clay_cmd_usage(const char *args, void *user_data);
+/* How much of a command's output reaches the model, and which end: the tail
+   on success, both ends on failure, always with the total size named. */
+void clay_commands_clip_output(const char *text, size_t limit, int keep_tail,
+                               ClayStr *out);
 /* Flattens `conversation` (skipping the system prompt at index 0) into a
    plain-text transcript for /compact's summarization request: user/
    assistant text verbatim, tool calls as "called name(args)", tool

@@ -295,6 +295,34 @@ static int authorize_shell_command(char *const argv[], void *user_data) {
   return allowed;
 }
 
+/* A command's output is read for its tail: a build's last lines, a test
+   run's summary, the error at the end. When it fails, the head is where the
+   invocation and the first error are, so a failure keeps both ends. Pure and
+   byte-based, with one test of its own. */
+void clay_commands_clip_output(const char *text, size_t limit, int keep_tail,
+                               ClayStr *out) {
+  clay_str_init(out);
+  if (!text) return;
+  size_t length = strlen(text);
+  if (length <= limit) {
+    clay_str_push_n(out, text, length);
+    return;
+  }
+  if (!keep_tail) {
+    /* Success: the summary or the last error is what the caller needs. */
+    clay_str_printf(out, "... (%zu bytes total, showing the last %zu) ...\n",
+                    length, limit);
+    clay_str_push_n(out, text + (length - limit), limit);
+    return;
+  }
+  size_t head = limit / 2, tail = limit - head;
+  clay_str_push_n(out, text, head);
+  clay_str_printf(out, "\n... (%zu bytes total, showing the first %zu and the "
+                       "last %zu) ...\n",
+                  length, head, tail);
+  clay_str_push_n(out, text + (length - tail), tail);
+}
+
 static ClayJson *shell_exec_tool(const ClayJson *arguments, void *userdata) {
   ClayCommands *commands = userdata;
   /* A command can change anything; parallel subagents take turns. */
@@ -392,8 +420,9 @@ static ClayJson *shell_exec_tool(const ClayJson *arguments, void *userdata) {
     char *scratch_path =
         clay_chat_dump_scratch(commands->chat, "shell", output.data);
     ClayStr preview;
-    clay_str_init(&preview);
-    clay_str_push_n(&preview, output.data, CLAY_SHELL_OUTPUT_LIMIT);
+    /* A failed command's first error is at the top, so both ends stay. */
+    clay_commands_clip_output(output.data, CLAY_SHELL_OUTPUT_LIMIT,
+                              exit_code != 0, &preview);
     if (scratch_path)
       clay_str_printf(&preview, "\n... (%zu bytes total, full output at %s)",
                       output.len, scratch_path);

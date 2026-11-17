@@ -1132,8 +1132,7 @@ static int grep_walk_files(int root, const char *relative, GrepFileFn visit,
 /* One place both grep paths leave through, so a result that hit its ceiling
    says so and names the way out instead of just stopping. */
 static ClayJson *grep_result(ClayStr *output, int rc, int exit_code,
-                             int truncated, int max_matches,
-                             ClayCommands *commands) {
+                             int truncated, ClayCommands *commands) {
     ClayJson *result = clay_json_object();
     int ok = rc == 0 && exit_code <= 1;
     clay_json_object_set(result, "ok", clay_json_bool(ok));
@@ -1265,7 +1264,7 @@ static ClayJson *grep_linux_run(ClayCommands *commands, const char *pattern,
     free(workspace_dir);
     clay_str_free(&base);
     ClayJson *result = grep_result(&output, files.rc, files.exit_code,
-                                   files.truncated, files.files_seen, commands);
+                                   files.truncated, commands);
     clay_str_free(&output);
     return result;
 }

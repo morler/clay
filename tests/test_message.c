@@ -98,6 +98,37 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
   return completion_result;
 }
 
+/* What reaches the model from a long output: its tail when the command
+   succeeded, both ends when it failed, and always the total size. */
+static void test_clip_output(void) {
+  ClayStr text;
+  clay_str_init(&text);
+  for (int i = 0; i < 1000; i++) clay_str_printf(&text, "line %d\n", i);
+
+  ClayStr tail;
+  clay_commands_clip_output(text.data, 200, 0, &tail);
+  assert(strstr(tail.data, "showing the last 200"));
+  assert(strstr(tail.data, "line 999"));
+  assert(!strstr(tail.data, "line 0\n"));
+  assert(strlen(tail.data) < 300);
+  clay_str_free(&tail);
+
+  ClayStr both;
+  clay_commands_clip_output(text.data, 200, 1, &both);
+  assert(strstr(both.data, "the first 100 and the last 100"));
+  assert(strstr(both.data, "line 0\n"));
+  assert(strstr(both.data, "line 999"));
+  assert(strlen(both.data) < 350);
+  clay_str_free(&both);
+
+  /* Short output is untouched. */
+  ClayStr short_text;
+  clay_commands_clip_output("ok\n", 200, 1, &short_text);
+  assert(strcmp(short_text.data, "ok\n") == 0);
+  clay_str_free(&short_text);
+  clay_str_free(&text);
+}
+
 int main(void) {
   ClayJson *saved_messages = clay_json_array();
   clay_json_array_push(saved_messages, clay_openai_message("user", "hi"));
@@ -289,6 +320,7 @@ int main(void) {
     clay_chat_destroy(commands->chat);
     commands->chat = NULL;
   }
+  test_clip_output();
   partial_saved = NULL;
   fflush(stdout);
   assert(dup2(original_stdout, STDOUT_FILENO) >= 0);

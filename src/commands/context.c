@@ -1582,6 +1582,32 @@ char *clay_commands_environment_block(void) {
   return text.data;
 }
 
+/* Where the bytes of the fixed system prompt go. Reported by the budget
+   test and, with CLAY_PROMPT_BREAKDOWN=1, by the session itself, so a
+   regression can be traced to one section instead of a total. */
+void clay_commands_system_prompt_sections(ClayCommandsPromptSections *out) {
+  if (!out) return;
+  memset(out, 0, sizeof(*out));
+  out->base = strlen(CLAY_SYSTEM_PROMPT_BASE);
+  char *index = clay_memory_index();
+  if (*index) out->memory = strlen(index) + strlen("\n\nLong-term memory index:\n");
+  free(index);
+  char *skills = clay_skill_index();
+  if (*skills)
+    out->skills = strlen(skills) +
+                  strlen("\n\nAvailable skills (call the skill tool with one "
+                         "name to load its full instructions):\n");
+  free(skills);
+  char *project_instructions = clay_commands_load_project_instructions();
+  if (project_instructions) {
+    out->instructions =
+        strlen(project_instructions) +
+        strlen("\n\nProject instructions (AGENTS.md/CLAY.md):\n");
+    free(project_instructions);
+  }
+  out->total = out->base + out->memory + out->skills + out->instructions;
+}
+
 static char *build_fresh_system_prompt(void) {
   ClayStr text;
   clay_str_init(&text);
@@ -1607,6 +1633,15 @@ static char *build_fresh_system_prompt(void) {
     free(project_instructions);
   }
 
+  if (getenv("CLAY_PROMPT_BREAKDOWN")) {
+    ClayCommandsPromptSections sections;
+    clay_commands_system_prompt_sections(&sections);
+    fprintf(stderr,
+            "clay: system prompt %zu B = base %zu + memory %zu + skills %zu "
+            "+ instructions %zu\n",
+            sections.total, sections.base, sections.memory, sections.skills,
+            sections.instructions);
+  }
   return text.data;
 }
 

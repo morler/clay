@@ -231,6 +231,16 @@ void clay_commands_reset_conversation(ClayCommands *commands);
 /* The build's fixed system prompt, without memory, skills or project
    instructions. Borrowed; the budget test measures it. */
 const char *clay_commands_system_prompt_base(void);
+/* Where a fresh system prompt's bytes go. `total` is the sum of the parts,
+   which is what the fixed cost of every request is made of. */
+typedef struct {
+  size_t base;
+  size_t memory;
+  size_t skills;
+  size_t instructions;
+  size_t total;
+} ClayCommandsPromptSections;
+void clay_commands_system_prompt_sections(ClayCommandsPromptSections *out);
 /* Platform, date, working directory, git branch and the workspace's
    top-level entries, as they are at this instant. Malloc'd; sent with each
    message rather than frozen into the system prompt. */

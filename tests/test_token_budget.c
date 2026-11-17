@@ -57,6 +57,20 @@ int main(void) {
     assert(prompt > 0 && tools > 0);
     assert(prompt + tools <= CLAY_PROMPT_AND_TOOL_BUDGET);
 
+    /* The breakdown is what #89 acts on: a section that grows shows up on
+       its own line instead of in the total. */
+    ClayCommandsPromptSections sections;
+    clay_commands_system_prompt_sections(&sections);
+    printf("sections: base %zu, memory %zu, skills %zu, instructions %zu\n",
+           sections.base, sections.memory, sections.skills,
+           sections.instructions);
+    assert(sections.base == prompt);
+    assert(sections.total == sections.base + sections.memory +
+                                 sections.skills + sections.instructions);
+    /* With no memory, skills or AGENTS.md in this HOME, only the base is
+       left - and a section that appears must land in the total. */
+    assert(sections.total >= sections.base);
+
     clay_commands_destroy(commands);
     clay_app_destroy(app);
     return 0;

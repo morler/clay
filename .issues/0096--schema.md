@@ -1,7 +1,7 @@
 ---
 id: 96
 title: 固定预算测试：系统提示与工具 schema
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -15,6 +15,7 @@ relations:
         - 134
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：新增 tests/test_token_budget.c：序列化 CLAY_SYSTEM_PROMPT_BASE + 工具 schema（src/commands/message.c:1361-1443），断言总字节 <= 常量上限，失败打印实测总值与逐项字节。

@@ -223,6 +223,9 @@ void clay_commands_set_tokens_below_with_cache(
     ClayCommands *commands, long input_tokens, long output_tokens,
     long cached_input_tokens, int cached_input_tokens_known);
 void clay_commands_reset_conversation(ClayCommands *commands);
+/* The build's fixed system prompt, without memory, skills or project
+   instructions. Borrowed; the budget test measures it. */
+const char *clay_commands_system_prompt_base(void);
 /* Platform, date, working directory, git branch and the workspace's
    top-level entries, as they are at this instant. Malloc'd; sent with each
    message rather than frozen into the system prompt. */

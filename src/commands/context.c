@@ -1297,6 +1297,10 @@ void clay_commands_set_tokens_below_with_cache(
   clay_str_free(&text);
 }
 
+const char *clay_commands_system_prompt_base(void) {
+  return CLAY_SYSTEM_PROMPT_BASE;
+}
+
 /* FNV-1a over the build's base prompt: a cache written by a different build
    describes a clay that no longer exists. */
 static double base_prompt_fingerprint(void) {

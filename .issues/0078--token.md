@@ -34,3 +34,27 @@ updated: "2026-11-17"
 3. 把基线数字写进本项进展，供后续子项对比。
 
 验收：预算断言在 make test 中生效（测试加入 UNIT_TEST_TARGETS）；基准三次运行同值；#86/#89 改动后能看到差值。
+
+## 2026-11-17 基线（#96 已落地）
+
+make test-token-budget 实测（HEAD 含 25508a5）：
+
+- 系统提示基座 9,657 字节
+- 主代理 18 个工具 schema 8,535 字节（name + description + parameters JSON）
+- 合计 18,192 字节，预算上限先锁 22,000（tests/test_token_budget.c）
+- 子代理 16 个工具 6,721 字节
+
+按 4 字节/token 折算约 4.5k tokens；killi 的同类数字是 11,714 字符 ≈ 2.9k tokens。
+#89 的目标是把这 18,192 压下去，预算上限随每次削减同步收紧。
+
+## 2026-11-17 请求体基线（#97/#98 已落地）
+
+`make test-tokens`（离线，不联网，同值可复现）：
+
+| 场景 | messages | tools | 合计 | 按 clay 口径估算 |
+| --- | --- | --- | --- | --- |
+| fresh chat | 9,817 B | 8,535 B | 18,352 B | ~13,272 tokens |
+| 一次工具往返 | 10,385 B | 8,535 B | 18,920 B | ~13,556 tokens |
+
+估算口径沿用 src/commands/scope.c:343-346：请求字节 ÷ 2 + 4096 输出预留；
+这是准入时的上限估计，不是账单。后续改动用 `make test-tokens` 对比。

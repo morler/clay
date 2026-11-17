@@ -510,6 +510,7 @@ void clay_commands_load_provider(ClayCommands *commands,
     existing->config = config;
     existing->generation = generation;
     existing->codex_refresh_unpersisted = 0;
+    existing->codex_auth_invalid = 0;
     existing->grok_refresh_unpersisted = 0;
     existing->codex_retry_at = existing->grok_retry_at = 0;
     existing->environment_override = environment_override;
@@ -599,12 +600,27 @@ static int retry_grok_unpersisted(ClayConnectedProvider *provider, int force) {
                            &provider->grok_retry_at, force);
 }
 
+static int save_config_tracked(ClayConnectedProvider *provider, int *flag,
+                               time_t *next_try) {
+  if (provider->environment_override) return 0;
+  int rc = clay_config_save(provider->config);
+  if (rc != 0) {
+    *flag = 1;
+    *next_try = time(NULL) + UNPERSISTED_RETRY_SECONDS;
+  }
+  return rc;
+}
+
 int clay_commands_codex_refresh_begin(ClayConnectedProvider *provider,
     uint64_t version, int (*should_abort)(void *), void *userdata) {
   if (!provider) return -1;
   pthread_mutex_lock(&codex_credentials_lock);
   uint64_t epoch = provider->codex_refresh_epoch;
   for (;;) {
+    if (provider->codex_auth_invalid) {
+      pthread_mutex_unlock(&codex_credentials_lock);
+      return -1;
+    }
     retry_codex_unpersisted(provider, 0);
     if (provider->codex_refresh_failure_epoch > epoch ||
         provider->codex_refresh_unpersisted) {
@@ -788,10 +804,12 @@ int clay_commands_save_grok_credentials(ClayConnectedProvider *provider,
       config->expires_at = credentials.expires_at;
       memset(&credentials, 0, sizeof(credentials));
       provider->grok_version++;
-      if (!provider->environment_override) rc = clay_config_save(config);
+      rc = save_config_tracked(provider, &provider->grok_refresh_unpersisted,
+                               &provider->grok_retry_at);
     }
-  } else if (!provider->environment_override) {
-    rc = clay_config_save(config);
+  } else {
+    rc = save_config_tracked(provider, &provider->grok_refresh_unpersisted,
+                             &provider->grok_retry_at);
   }
   pthread_mutex_unlock(&codex_credentials_lock);
   clay_grok_credentials_free(&credentials);
@@ -807,8 +825,11 @@ static int save_codex_credentials(ClayConnectedProvider *provider,
   ClayProviderConfig *config = provider->config;
   if (provider->codex_version != *version) {
     rc = 1;
-  } else if (invalid) {
-    if (!provider->environment_override) rc = clay_config_remove(config->id);
+  } else if (invalid || provider->codex_auth_invalid) {
+    provider->codex_auth_invalid = 1;
+    if (!provider->environment_override && config->id &&
+        clay_config_exists(config->id) && clay_config_remove(config->id) != 0)
+      rc = -1;
     if (rc == 0) provider->codex_refresh_unpersisted = 0;
   } else if (clay_openai_codex_copy_credentials(client, &credentials) != 0) {
     rc = -1;
@@ -829,11 +850,14 @@ static int save_codex_credentials(ClayConnectedProvider *provider,
       config->expires_at = credentials.expires_at;
       memset(&credentials, 0, sizeof(credentials));
       provider->codex_version++;
+      provider->codex_auth_invalid = 0;
       *version = provider->codex_version;
-      if (!provider->environment_override) rc = clay_config_save(config);
+      rc = save_config_tracked(provider, &provider->codex_refresh_unpersisted,
+                               &provider->codex_retry_at);
     }
-  } else if (!provider->environment_override) {
-    rc = clay_config_save(config);
+  } else {
+    rc = save_config_tracked(provider, &provider->codex_refresh_unpersisted,
+                             &provider->codex_retry_at);
   }
   pthread_mutex_unlock(&codex_credentials_lock);
   clay_openai_codex_credentials_free(&credentials);
@@ -892,7 +916,8 @@ static int save_codex_refresh(void *userdata, ClayOpenAICodex *client) {
   config->account_id = credentials.account_id;
   config->expires_at = credentials.expires_at;
   provider->codex_version++;
-  int rc = provider->environment_override ? 0 : clay_config_save(config);
+  int rc = save_config_tracked(provider, &provider->codex_refresh_unpersisted,
+                               &provider->codex_retry_at);
   ClayOpenAICodex *copy = NULL;
   if (!rc) {
     ClayCodexCredentials published = {config->access_token, config->refresh_token,
@@ -907,6 +932,7 @@ static int save_codex_refresh(void *userdata, ClayOpenAICodex *client) {
     clay_openai_codex_swap_credentials(client, &old);
     clay_openai_codex_credentials_free(&old);
     save->version = provider->codex_version;
+    provider->codex_auth_invalid = 0;
   }
   clay_openai_codex_destroy(copy);
   pthread_mutex_unlock(&codex_credentials_lock);
@@ -958,7 +984,8 @@ static int save_grok_refresh(void *userdata, ClayGrok *client) {
   config->id_token = credentials.id_token;
   config->expires_at = credentials.expires_at;
   provider->grok_version++;
-  int rc = provider->environment_override ? 0 : clay_config_save(config);
+  int rc = save_config_tracked(provider, &provider->grok_refresh_unpersisted,
+                               &provider->grok_retry_at);
   ClayGrok *copy = NULL;
   if (!rc) {
     ClayGrokCredentials published = {config->access_token, config->refresh_token,
@@ -1673,8 +1700,8 @@ int clay_commands_fetch_models(void *ctx, ClayArray *out) {
       }
       provider->models_rc = codex ? clay_openai_codex_list_models(codex, &provider->models) : -1;
       provider->models_status = codex ? clay_openai_codex_last_status(codex) : 0;
-      if (provider->models_rc == 0 &&
-          save_codex_credentials(provider, codex, &save.version) < 0)
+      /* Save even on failure: invalid_grant cleanup lives in save_codex_credentials. */
+      if (codex && save_codex_credentials(provider, codex, &save.version) < 0)
         provider->models_rc = -1;
       clay_openai_codex_destroy(codex);
     } else if (strcmp(provider->type->id, "grok") == 0 &&

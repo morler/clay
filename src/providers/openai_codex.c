@@ -369,7 +369,6 @@ static int refresh(ClayOpenAICodex *client) {
   if (rc != 0) return -1;
   /* Once sent, receive and publish rotation even if the caller cancels. */
   rc = refresh_request(client);
-  if (rc) client->authentication_invalid = 0;
   client->refresh_end(client->refresh_coordination_userdata, rc);
   return rc;
 }

@@ -395,6 +395,58 @@ int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp)
     }
     return 0;
 }
+static void test_codex_invalid_grant_removes_config(void) {
+    char id[] = "codex-invalid-grant-review";
+    ClayProviderConfig config = {0};
+    config.id = id;
+    config.access_token = strdup("old");
+    config.refresh_token = strdup("old-refresh");
+    config.account_id = strdup("account");
+    config.expires_at = 1;
+    assert(clay_config_save(&config) == 0);
+    assert(clay_config_exists(id));
+
+    ClayCommands commands = {0};
+    clay_array_init(&commands.providers, sizeof(ClayConnectedProvider));
+    commands.scopes = clay_scope_registry_create();
+    commands.selected_provider = "openai-codex";
+    commands.selected_model = "model";
+    ClayConnectedProvider provider = {0};
+    provider.config = &config;
+    provider.type = clay_commands_find_provider_type("openai-codex");
+    provider.generation = 1;
+    clay_array_init(&provider.models, sizeof(char *));
+    clay_array_push_val(&commands.providers, &provider);
+
+    review_mock = 10;
+    ClayJson *messages = clay_json_array();
+    assert(clay_commands_run_completion(&commands, messages, NULL, 1, NULL, NULL) == -1);
+    clay_json_free(messages);
+    review_mock = 0;
+    ClayConnectedProvider *saved = clay_array_get(&commands.providers, 0);
+    assert(saved->codex_auth_invalid);
+    assert(!clay_config_exists(id));
+    assert(!strcmp(config.refresh_token, "old-refresh"));
+
+    ClayCodexCredentials stale = {config.access_token, config.refresh_token,
+                                  NULL, config.account_id, config.expires_at};
+    ClayOpenAICodex *client = clay_openai_codex_create(&stale, "model");
+    assert(client);
+    assert(clay_commands_save_codex_credentials(saved, client,
+                                                 saved->codex_version) == 0);
+    clay_openai_codex_destroy(client);
+    assert(!clay_config_exists(id));
+
+    for (size_t i = 0; i < saved->models.count; i++)
+        free(*(char **)clay_array_get(&saved->models, i));
+    clay_array_free(&saved->models);
+    clay_scope_registry_destroy(commands.scopes);
+    clay_array_free(&commands.providers);
+    free(config.access_token);
+    free(config.refresh_token);
+    free(config.account_id);
+}
+
 typedef struct { ClayCommands *commands; int result; } ReviewRun;
 static void *review_run(void *arg) {
     ReviewRun *run = arg;
@@ -892,6 +944,30 @@ static void test_unpersisted_retry(void) {
     clay_config_free(loaded);
     snprintf(path, sizeof(path), "%s/.clay/providers/retry-test.json", ok);
     assert(!access(path, F_OK));
+
+    /* A direct save failure marks the generation, so exit retries the write. */
+    ClayCommands *direct_commands = calloc(1, sizeof(*direct_commands));
+    assert(direct_commands);
+    clay_array_init(&direct_commands->providers, sizeof(ClayConnectedProvider));
+    ClayConnectedProvider direct = {0};
+    direct.config = retry_config();
+    clay_array_push_val(&direct_commands->providers, &direct);
+    assert(!setenv("HOME", blocked, 1));
+    ClayCodexCredentials rotated = {"rotated-access", "rotated-r", NULL,
+                                    "account", 4102444800LL};
+    ClayOpenAICodex *codex_client = clay_openai_codex_create(&rotated, "model");
+    assert(codex_client);
+    ClayConnectedProvider *direct_saved =
+        clay_array_get(&direct_commands->providers, 0);
+    assert(clay_commands_save_codex_credentials(direct_saved, codex_client, 0) < 0);
+    assert(direct_saved->codex_refresh_unpersisted &&
+           direct_saved->codex_retry_at > time(NULL));
+    clay_openai_codex_destroy(codex_client);
+    assert(!setenv("HOME", ok, 1));
+    clay_commands_destroy(direct_commands);
+    loaded = clay_config_load("retry-test");
+    assert(loaded && !strcmp(loaded->access_token, "rotated-access"));
+    clay_config_free(loaded);
 
     if (saved_home) assert(!setenv("HOME", saved_home, 1));
     else assert(!unsetenv("HOME"));
@@ -2019,6 +2095,7 @@ int main(void) {
     test_codex_refresh_ownership();
     test_grok_catalog_refresh_failure();
     test_grok_invalid_grant_preserves_config();
+    test_codex_invalid_grant_removes_config();
 
     test_scope_wait();
     test_scope_wakeup();

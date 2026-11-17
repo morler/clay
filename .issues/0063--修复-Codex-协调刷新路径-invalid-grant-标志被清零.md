@@ -1,7 +1,7 @@
 ---
 id: 63
 title: 修复 Codex 协调刷新路径 invalid_grant 标志被清零
-status: open
+status: closed
 priority: high
 labels:
     - parent:60
@@ -12,6 +12,7 @@ relations:
         - 60
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 --label

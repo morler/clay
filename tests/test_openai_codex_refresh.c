@@ -45,6 +45,26 @@ static int reject_refresh(void *userdata, ClayOpenAICodex *client) {
   return -1;
 }
 
+typedef struct {
+  int begins;
+  int ends;
+  int end_result;
+} RefreshCoordination;
+
+static int coordinated_begin(void *userdata, ClayOpenAICodex *client,
+                             int (*should_abort)(void *), void *abort_userdata) {
+  RefreshCoordination *coordination = userdata;
+  (void)client; (void)should_abort; (void)abort_userdata;
+  coordination->begins++;
+  return 0;
+}
+
+static void coordinated_end(void *userdata, int result) {
+  RefreshCoordination *coordination = userdata;
+  coordination->ends++;
+  coordination->end_result = result;
+}
+
 int main(void) {
   ClayJson *string = clay_json_string("owned");
   char *owned = clay_json_take_string(string);
@@ -110,6 +130,24 @@ int main(void) {
   assert(client->refresh_failed && !client->authentication_invalid);
   assert(!strcmp(client->credentials.refresh_token, "new-refresh"));
   clay_openai_codex_destroy(client);
+
+  initial.access_token = "old-access";
+  initial.refresh_token = "old-refresh";
+  initial.expires_at = 1;
+  client = clay_openai_codex_create(&initial, "model");
+  assert(client);
+  status = 400; transport_failure = 0;
+  reply = "{\"error\":\"invalid_grant\"}";
+  RefreshCoordination coordination = {0};
+  clay_openai_codex_set_refresh_coordination(client, coordinated_begin,
+                                            coordinated_end, &coordination);
+  assert(refresh(client) != 0);
+  assert(coordination.begins == 1 && coordination.ends == 1);
+  assert(coordination.end_result != 0);
+  assert(client->authentication_invalid);
+  assert(!strcmp(client->credentials.refresh_token, "old-refresh"));
+  clay_openai_codex_destroy(client);
+
   puts("openai_codex refresh tests passed");
   return 0;
 }

@@ -25,6 +25,7 @@ typedef struct {
   uint64_t codex_refresh_failure_epoch;
   uint64_t codex_refresh_start_version;
   int codex_refresh_unpersisted;
+  int codex_auth_invalid; /* confirmed invalid_grant for the current generation */
   int codex_refresh_active;
   uint64_t grok_version; /* protected by the credential mutex */
   uint64_t grok_refresh_epoch, grok_refresh_failure_epoch, grok_refresh_start_version;

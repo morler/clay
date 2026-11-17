@@ -79,6 +79,8 @@ static struct stat swap_target;
 static int swap_armed, swap_done;
 static int grep_swap_armed, grep_swap_done;
 static const char *grep_swap_secret;
+static int grep_dir_swap_armed, grep_dir_swap_done;
+static const char *grep_dir_swap_outside;
 int __real_fstat(int fd, struct stat *st);
 int __wrap_fstat(int fd, struct stat *st) {
     int rc = __real_fstat(fd, st);
@@ -90,6 +92,17 @@ int __wrap_fstat(int fd, struct stat *st) {
         swap_done = 1;
     }
     return rc;
+}
+
+int __real_clay_sandbox_exec(const ClaySandboxConfig *, const char *, ClayStr *, size_t, const ClayExecOptions *, ClayExecResult *);
+int __wrap_clay_sandbox_exec(const ClaySandboxConfig *config, const char *command, ClayStr *output, size_t output_limit, const ClayExecOptions *options, ClayExecResult *result) {
+    if (grep_dir_swap_armed) {
+        grep_dir_swap_armed = 0;
+        assert(rename("grep-dir-race", "grep-dir-saved") == 0);
+        assert(symlink(grep_dir_swap_outside, "grep-dir-race") == 0);
+        grep_dir_swap_done = 1;
+    }
+    return __real_clay_sandbox_exec(config, command, output, output_limit, options, result);
 }
 
 int __real_clay_sandbox_exec_input(const ClaySandboxConfig *, const char *, ClayStr *, size_t, const ClayExecOptions *, ClayExecResult *, int);
@@ -177,6 +190,49 @@ static void test_grep_race(ClayCommands *commands) {
     assert(unlink(race_secret) == 0);
 }
 #endif
+
+static void test_grep_directory_race_baseline(ClayCommands *commands) {
+    char outside_template[] = "/tmp/clay_grep_dir_outside_XXXXXX";
+    char *outside = mkdtemp(outside_template);
+    assert(outside);
+    char secret[512];
+    snprintf(secret, sizeof(secret), "%s/secret", outside);
+    FILE *file = fopen(secret, "w");
+    assert(file && fputs("race-dir-secret\n", file) >= 0 && fclose(file) == 0);
+    assert(mkdir("grep-dir-race", 0700) == 0);
+    file = fopen("grep-dir-race/inside", "w");
+    assert(file && fputs("race-dir-inside\n", file) >= 0 && fclose(file) == 0);
+
+    grep_dir_swap_outside = outside;
+    grep_dir_swap_done = 0;
+    grep_dir_swap_armed = 1;
+    ClayJson *args = clay_json_parse(
+        "{\"pattern\":\"race-dir-\",\"path\":\"grep-dir-race\"}", NULL);
+    ClayJson *result = clay_fs_tool_grep(args, commands);
+    const char *output = clay_json_string_value(clay_json_object_get(result, "output"));
+    printf("grep directory race baseline: %s\n",
+           output && strstr(output, "race-dir-secret") ? "outside content exposed"
+                                                        : "outside content not observed");
+    if (getenv("CLAY_ASSERT_GREP_RACE_SAFETY")) {
+        assert(grep_dir_swap_done);
+        assert(!output || !strstr(output, "race-dir-secret"));
+    }
+    clay_json_free(result);
+    clay_json_free(args);
+
+    struct stat st;
+    assert(lstat("grep-dir-race", &st) == 0);
+    if (S_ISLNK(st.st_mode)) {
+        assert(unlink("grep-dir-race") == 0);
+        assert(unlink("grep-dir-saved/inside") == 0);
+        assert(rmdir("grep-dir-saved") == 0);
+    } else {
+        assert(unlink("grep-dir-race/inside") == 0);
+        assert(rmdir("grep-dir-race") == 0);
+    }
+    assert(unlink(secret) == 0 && rmdir(outside) == 0);
+    grep_dir_swap_outside = NULL;
+}
 
 int main(void) {
     test_windows_paths();
@@ -644,6 +700,7 @@ int main(void) {
     assert(clay_json_string_value(clay_json_object_get(result, "scratch_path")));
     clay_json_free(result); clay_json_free(large_args); assert(unlink("grep-large") == 0);
 #ifdef __linux__
+    test_grep_directory_race_baseline(&commands);
     /* Swap the checked start directory immediately before grep opens it. */
     if (access("/usr/bin/grep", X_OK) == 0) {
     char outside_template[] = "/tmp/clay_grep_outside_XXXXXX";

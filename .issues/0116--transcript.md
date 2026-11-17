@@ -1,7 +1,7 @@
 ---
 id: 116
 title: 摘要 transcript 的工具参数截断
-status: open
+status: in-progress
 priority: high
 labels:
     - type:task

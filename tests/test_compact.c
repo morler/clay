@@ -66,6 +66,37 @@ int main(void) {
     clay_str_free(&long_output);
     clay_json_free(conversation);
 
+    /* A write's arguments are a whole file: the transcript names the target
+       and its size instead of replaying it. */
+    {
+        ClayJson *writing = clay_json_array();
+        push_message(writing, "system", "you are clay");
+        push_message(writing, "user", "write it");
+        ClayJson *call_json = clay_json_object();
+        clay_json_object_set(call_json, "id", clay_json_string("call_w"));
+        ClayJson *fn = clay_json_object();
+        clay_json_object_set(fn, "name", clay_json_string("write"));
+        clay_json_object_set(
+            fn, "arguments",
+            clay_json_string("{\"path\":\"src/big.c\",\"content\":"
+                             "\"int a; int b; int c;\"}"));
+        clay_json_object_set(call_json, "function", fn);
+        ClayJson *calls = clay_json_array();
+        clay_json_array_push(calls, call_json);
+        ClayJson *assistant_call = clay_json_object();
+        clay_json_object_set(assistant_call, "role", clay_json_string("assistant"));
+        clay_json_object_set(assistant_call, "tool_calls", calls);
+        clay_json_array_push(writing, assistant_call);
+
+        char *wrote = clay_commands_build_compact_transcript(writing);
+        assert(wrote);
+        assert(strstr(wrote, "called write(src/big.c"));
+        assert(strstr(wrote, "bytes written"));
+        assert(!strstr(wrote, "int a; int b; int c;"));
+        free(wrote);
+        clay_json_free(writing);
+    }
+
     /* A conversation with nothing but the system prompt yields an empty
        transcript - the caller uses this to skip compacting. */
     ClayJson *empty = clay_json_array();

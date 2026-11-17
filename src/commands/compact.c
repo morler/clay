@@ -12,6 +12,9 @@
    the summarizer mostly needs to know what happened, not the raw output. */
 
 #define CLAY_COMPACT_TOOL_PREVIEW 300
+/* Arguments are bounded too: a write's are a whole file. */
+#define CLAY_COMPACT_ARGUMENTS_HEAD 120
+#define CLAY_COMPACT_ARGUMENTS_TAIL 240
 #define CLAY_COMPACT_SYSTEM_PROMPT                                             \
   "You are compacting a coding-assistant conversation so it can continue "     \
   "with less context. Read the "                                               \
@@ -35,6 +38,75 @@ static char *collapse_for_compact(const char *text) {
   clay_str_init(&out);
   clay_str_push_n(&out, text, CLAY_COMPACT_TOOL_PREVIEW);
   clay_str_printf(&out, "... (%zu bytes total, truncated)", len);
+  return out.data;
+}
+
+/* One tool call's arguments, as much as the summarizer needs to know what
+   was touched. Malloc'd; never NULL. */
+static char *summarize_arguments(const char *name, const char *arguments) {
+  if (!arguments || !*arguments) return strdup("");
+  ClayJson *parsed = clay_json_parse(arguments, NULL);
+  if (!parsed) {
+    /* Not JSON (a truncated frame): keep the head so the call is still
+       identifiable. */
+    size_t length = strlen(arguments);
+    if (length <= CLAY_COMPACT_ARGUMENTS_HEAD) return strdup(arguments);
+    ClayStr head;
+    clay_str_init(&head);
+    clay_str_push_n(&head, arguments, CLAY_COMPACT_ARGUMENTS_HEAD);
+    clay_str_printf(&head, "... (%zu bytes total)", length);
+    return head.data;
+  }
+  ClayStr out;
+  clay_str_init(&out);
+  const char *path = clay_json_string_value(clay_json_object_get(parsed, "path"));
+  if (path) clay_str_printf(&out, "%s", path);
+  const char *pattern =
+      clay_json_string_value(clay_json_object_get(parsed, "pattern"));
+  if (pattern) clay_str_printf(&out, "%s%s", out.len ? ", " : "", pattern);
+  const char *command =
+      clay_json_string_value(clay_json_object_get(parsed, "command"));
+  if (command) {
+    const char *newline = strchr(command, '\n');
+    clay_str_printf(&out, "%s%.*s%s", out.len ? ", " : "",
+                    (int)(newline ? (size_t)(newline - command) : strlen(command)),
+                    command,
+                    newline && newline[1] ? " [...]" : "");
+  }
+  if (name && strcmp(name, "write") == 0) {
+    const char *content =
+        clay_json_string_value(clay_json_object_get(parsed, "content"));
+    size_t bytes = content ? strlen(content) : 0;
+    clay_str_printf(&out, "%s%zu bytes written", out.len ? ", " : "", bytes);
+  }
+  if (name && strcmp(name, "edit") == 0) {
+    const char *old_text =
+        clay_json_string_value(clay_json_object_get(parsed, "oldString"));
+    const char *new_text =
+        clay_json_string_value(clay_json_object_get(parsed, "newString"));
+    clay_str_printf(&out, "%s%zu -> %zu bytes", out.len ? ", " : "",
+                    old_text ? strlen(old_text) : 0,
+                    new_text ? strlen(new_text) : 0);
+  }
+  if (!out.len) {
+    /* Something else: the first scalar value, or the key list. */
+    const char *keys[] = {"query", "url", "slug", "steps", "question", "name"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]) && !out.len; i++) {
+      const char *value =
+          clay_json_string_value(clay_json_object_get(parsed, keys[i]));
+      if (value)
+        clay_str_printf(&out, "%.*s", CLAY_COMPACT_ARGUMENTS_HEAD, value);
+    }
+  }
+  if (!out.len) {
+    /* Nothing we model knows: keep the head of the raw JSON. */
+    size_t length = strlen(arguments);
+    if (length > CLAY_COMPACT_ARGUMENTS_TAIL)
+      clay_str_printf(&out, "%.*s...", CLAY_COMPACT_ARGUMENTS_TAIL, arguments);
+    else
+      clay_str_printf(&out, "%s", arguments);
+  }
+  clay_json_free(parsed);
   return out.data;
 }
 
@@ -64,8 +136,14 @@ char *clay_commands_build_compact_transcript(ClayJson *conversation) {
             clay_json_string_value(clay_json_object_get(function, "name"));
         const char *arguments =
             clay_json_string_value(clay_json_object_get(function, "arguments"));
+        /* A write's arguments are the whole file and an edit's are both
+           versions of the lines: replaying those would cost more than the
+           summary saves, and the files themselves are still on disk. Name
+           the target and the size instead. */
+        char *summary = summarize_arguments(name, arguments);
         clay_str_printf(&out, "Assistant called %s(%s)\n",
-                        name && *name ? name : "?", arguments ? arguments : "");
+                        name && *name ? name : "?", summary ? summary : "");
+        free(summary);
       }
     } else if (strcmp(role, "tool") == 0) {
       char *preview = collapse_for_compact(content);

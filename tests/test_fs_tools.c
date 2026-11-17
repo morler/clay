@@ -382,8 +382,24 @@ int main(void) {
         const char *cut =
             clay_json_string_value(clay_json_object_get(result, "output"));
         assert(strstr(cut, "[... line cut]"));
+        assert(strstr(cut, "longer than 2000 characters"));
+        assert(strstr(cut, "shell_exec"));
         assert(strlen(cut) < 3000);
         clay_json_free(result);
+        /* A binary file is named as such instead of decoded as text. */
+        FILE *binary = fopen("blob.bin", "wb");
+        assert(binary);
+        for (int i = 0; i < 200; i++) assert(fputc(0, binary) != EOF);
+        assert(fclose(binary) == 0);
+        result = call(clay_fs_tool_read, "{\"path\":\"blob.bin\"}");
+        assert(!ok(result));
+        const char *binary_error =
+            clay_json_string_value(clay_json_object_get(result, "error"));
+        assert(strstr(binary_error, "binary file"));
+        assert(strstr(binary_error, "shell_exec"));
+        clay_json_free(result);
+        assert(unlink("blob.bin") == 0);
+
         assert(unlink("big.txt") == 0);
         assert(unlink("huge.txt") == 0);
         clay_str_free(&big);

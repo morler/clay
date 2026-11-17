@@ -405,6 +405,26 @@ static void read_suggestions(int root, const char *prefix, const char *pattern,
 }
 #endif
 
+/* A binary file read as text is noise in the context and tells the model
+   nothing: NUL bytes, or a high share of non-printable bytes, mean "this is
+   not source". Pure, so it is tested on buffers rather than files. */
+int clay_fs_looks_binary(const char *data, size_t length) {
+    if (!data) return 0;
+    if (length > 8000) length = 8000; /* the head decides */
+    size_t unprintable = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)data[i];
+        if (c == 0) return 1;
+        if (c < 0x09 || (c > 0x0d && c < 0x20) || c == 0x7f) unprintable++;
+    }
+    return length > 0 && unprintable * 10 > length; /* more than a tenth */
+}
+
+/* Characters per line above which a line is almost never source: a minified
+   bundle, a base64 blob. Reported rather than silently folded by the line
+   limit, so the model knows what it is looking at. */
+#define CLAY_FS_READ_WIDE_LINE 4000
+
 ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
     (void)userdata;
     ClayStr abs;
@@ -502,6 +522,24 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
         return result;
     }
 
+    {
+        /* The head decides, and the handle is rewound so the rest reads the
+           same way it always did. */
+        char head[8000];
+        size_t got = fread(head, 1, sizeof(head), file);
+        rewind(file);
+        if (clay_fs_looks_binary(head, got)) {
+            fclose(file);
+            clay_json_object_set(result, "ok", clay_json_bool(0));
+            clay_json_object_set(
+                result, "error",
+                clay_json_string("this looks like a binary file, not text: use "
+                                 "shell_exec (strings, xxd, or the tool that "
+                                 "handles this format) instead of read"));
+            return result;
+        }
+    }
+
     ClayStr formatted;
     clay_str_init(&formatted);
     ClayStr line;
@@ -557,6 +595,13 @@ ClayJson *clay_fs_tool_read(const ClayJson *arguments, void *userdata) {
             first_emitted, first_emitted + emitted - 1, line_no,
             first_emitted + emitted);
     }
+    if (line_cut)
+        clay_str_printf(
+            &formatted,
+            "\n[One line is longer than %d characters and was cut: it is "
+            "probably generated or binary, so read it with shell_exec instead "
+            "of a page of read.]\n",
+            CLAY_FS_READ_LINE_LIMIT);
     clay_json_object_set(result, "ok", clay_json_bool(1));
     clay_json_object_set(result, "output", clay_json_string(formatted.data));
     clay_json_object_set(result, "output_truncated", clay_json_bool(truncated));

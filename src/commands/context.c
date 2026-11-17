@@ -1365,6 +1365,11 @@ static void save_system_prompt_cache(const char *text, long long built_at,
 }
 
 #define CLAY_PROJECT_INSTRUCTIONS_MAX_DEPTH 32
+/* The whole set of AGENTS.md/CLAY.md files rides in every chat's system
+   prompt, so it has a ceiling of its own: 32 KB is roughly eight thousand
+   tokens, more than the entire base prompt. A path that gets cut says so and
+   names the file, so the model can read the rest instead of guessing. */
+#define CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES (32 * 1024)
 
 static char *read_file_if_exists(const char *path) {
   ClayStr text;
@@ -1391,7 +1396,9 @@ static char *read_level_instructions(const char *dir) {
 /* Walks up from the cwd to the repo root (a directory holding .git),
    reading AGENTS.md/CLAY.md at each level - same mechanism as Codex CLI.
    Concatenated root-first, so more specific instructions near the cwd
-   follow more general ones. Malloc'd; NULL if none found. */
+   follow more general ones, and capped at CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES
+   root-first, so the most general instructions survive. Malloc'd; NULL if
+   none found. */
 char *clay_commands_load_project_instructions(void) {
   char *dir = clay_term_cwd();
   if (!dir)
@@ -1430,13 +1437,35 @@ char *clay_commands_load_project_instructions(void) {
   }
   ClayStr combined;
   clay_str_init(&combined);
+  size_t cut = 0;
   for (size_t i = levels.count; i-- > 0;) {
     char *content = *(char **)clay_array_get(&levels, i);
-    if (combined.len > 0)
-      clay_str_push(&combined, "\n\n");
-    clay_str_push(&combined, content);
+    size_t length = strlen(content);
+    size_t separator = combined.len > 0 ? 2 : 0;
+    size_t room = CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES > combined.len + separator
+                      ? CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES -
+                            combined.len - separator
+                      : 0;
+    if (length > room) {
+      /* Keep what fits of this file, then stop: the rest is one read away. */
+      if (separator) clay_str_push(&combined, "\n\n");
+      if (room > 0) clay_str_push_n(&combined, content, room);
+      cut += length - room;
+      free(content);
+      for (size_t j = i; j-- > 0;)
+        cut += strlen(*(char **)clay_array_get(&levels, j));
+      break;
+    }
+    if (separator) clay_str_push(&combined, "\n\n");
+    clay_str_push_n(&combined, content, length);
     free(content);
   }
+  if (cut > 0)
+    clay_str_printf(&combined,
+                    "\n\n[%zu bytes of project instructions cut to stay "
+                    "within the %d byte limit; read the AGENTS.md/CLAY.md "
+                    "files for the rest]",
+                    cut, (int)CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES);
   clay_array_free(&levels);
   return combined.data;
 }

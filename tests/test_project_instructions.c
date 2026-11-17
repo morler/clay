@@ -77,6 +77,24 @@ int main(void) {
     free(instructions);
     assert(remove(git_dir) == 0);
 
+    /* A 40 KB root file is cut to the 32 KB limit, says so, and names where
+       the rest is; the more specific file near the cwd is what gets lost. */
+    {
+        ClayStr huge;
+        clay_str_init(&huge);
+        for (int i = 0; i < 40 * 1024; i++)
+            clay_str_push_char(&huge, 'r');
+        write_file(agents_path, huge.data);
+        clay_str_free(&huge);
+        instructions = clay_commands_load_project_instructions();
+        assert(instructions);
+        assert(strlen(instructions) < 40 * 1024);
+        assert(strstr(instructions, "bytes of project instructions cut"));
+        assert(strstr(instructions, "AGENTS.md/CLAY.md"));
+        assert(!strstr(instructions, "Sub instructions."));
+        free(instructions);
+    }
+
     remove(outside_agents);
     remove(clay_md_path);
     remove(agents_path);

@@ -20,6 +20,7 @@ typedef struct {
 typedef struct {
   const ClayProviderType *type;
   uint64_t generation; /* session-local configuration identity */
+  /* Credential versions and refresh epochs are monotonic; replacement bumps them. */
   uint64_t codex_version; /* protected by the credential mutex */
   uint64_t codex_refresh_epoch;
   uint64_t codex_refresh_failure_epoch;

@@ -1831,6 +1831,69 @@ static void test_provider_tpm_config(void) {
     assert(clay_config_remove("tpm-check") == 0);
 }
 
+static void test_provider_replacement_isolation(void) {
+    assert(setenv("OPENAI_CODEX_ACCESS_TOKEN", "old-access", 1) == 0);
+    assert(setenv("OPENAI_CODEX_REFRESH_TOKEN", "old-refresh", 1) == 0);
+    assert(setenv("OPENAI_CODEX_ACCOUNT_ID", "account", 1) == 0);
+    ClayCommands c = {0};
+    clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+    c.scopes = clay_scope_registry_create();
+    const ClayProviderType *type = clay_commands_find_provider_type("openai-codex");
+    clay_commands_load_provider(&c, type);
+    ClayConnectedProvider *provider = clay_commands_find_provider(&c, type->id);
+    assert(provider);
+
+    provider->codex_version = 7;
+    provider->grok_version = 3;
+    provider->codex_refresh_epoch = 5;
+    provider->grok_refresh_epoch = 4;
+    provider->codex_refresh_active = 1;
+    provider->grok_refresh_active = 1;
+    provider->codex_refresh_failure_epoch = 5;
+    provider->grok_refresh_failure_epoch = 4;
+    provider->codex_refresh_start_version = 7;
+    provider->grok_refresh_start_version = 3;
+    provider->codex_refresh_unpersisted = 1;
+    provider->grok_refresh_unpersisted = 1;
+    provider->codex_auth_invalid = 1;
+    provider->codex_retry_at = provider->grok_retry_at = time(NULL) + 3600;
+    uint64_t generation = provider->generation;
+    ClayCodexCredentials stale = {"stale", "stale-r", NULL, "account", 1};
+    ClayOpenAICodex *client = clay_openai_codex_create(&stale, "model");
+    assert(client);
+
+    clay_commands_load_provider(&c, type);
+    assert(provider->generation > generation);
+    assert(provider->codex_version == 8 && provider->grok_version == 4);
+    assert(provider->codex_refresh_epoch == 6 && provider->grok_refresh_epoch == 5);
+    assert(!provider->codex_refresh_active && !provider->grok_refresh_active);
+    assert(!provider->codex_refresh_failure_epoch && !provider->grok_refresh_failure_epoch);
+    assert(!provider->codex_refresh_unpersisted && !provider->grok_refresh_unpersisted);
+    assert(!provider->codex_auth_invalid);
+    assert(!provider->codex_retry_at && !provider->grok_retry_at);
+    assert(clay_commands_save_codex_credentials(provider, client, 7) == 1);
+    assert(strcmp(provider->config->refresh_token, "stale-r") != 0);
+    clay_openai_codex_destroy(client);
+
+    provider->codex_version = UINT64_MAX;
+    provider->codex_refresh_epoch = UINT64_MAX;
+    generation = provider->generation;
+    ClayProviderConfig *config = provider->config;
+    assert(clay_commands_codex_refresh_begin(provider, UINT64_MAX, NULL, NULL) == -1);
+    clay_commands_codex_refresh_end(provider, -1);
+    assert(provider->codex_refresh_epoch == UINT64_MAX);
+    clay_commands_load_provider(&c, type);
+    assert(provider->generation == generation && provider->config == config);
+
+    while (c.providers.count) {
+        ClayConnectedProvider *p = clay_array_get(&c.providers, 0);
+        assert(clay_config_save(p->config) == 0);
+        assert(clay_commands_logout_provider(&c, p->type->id) == 0);
+    }
+    clay_array_free(&c.providers);
+    clay_scope_registry_destroy(c.scopes);
+}
+
 static void test_provider_generations(void) {
     ClayCommands c = {0};
     clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
@@ -2103,6 +2166,7 @@ int main(void) {
     test_scopes();
     test_concurrent_scope_failure();
     test_provider_generations();
+    test_provider_replacement_isolation();
     test_completion_scopes();
     test_scope_admission_limits_http();
     test_scope_cooldown_and_pacing();

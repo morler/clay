@@ -1831,6 +1831,93 @@ static void test_provider_tpm_config(void) {
     assert(clay_config_remove("tpm-check") == 0);
 }
 
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    int entered, release;
+} LogoutGate;
+
+static int logout_gate_hook(ClayScope *scope, const ClayOpenAICallbacks *callbacks,
+                            void *userdata) {
+    LogoutGate *gate = userdata;
+    (void)scope; (void)callbacks;
+    pthread_mutex_lock(&gate->lock);
+    gate->entered = 1;
+    pthread_cond_broadcast(&gate->cond);
+    while (!gate->release) pthread_cond_wait(&gate->cond, &gate->lock);
+    pthread_mutex_unlock(&gate->lock);
+    return 0;
+}
+
+static void *logout_gate_run(void *arg) {
+    ClayCommands *commands = arg;
+    ClayJson *messages = clay_json_array();
+    int rc = clay_commands_run_completion(commands, messages, NULL, 1, NULL, NULL);
+    clay_json_free(messages);
+    return (void *)(intptr_t)rc;
+}
+
+typedef struct {
+    ClayCommands *commands;
+    int rc, done;
+} LogoutRun;
+
+static void *logout_gate_logout(void *arg) {
+    LogoutRun *run = arg;
+    run->rc = clay_commands_logout_provider(run->commands, "openai-codex");
+    run->done = 1;
+    return NULL;
+}
+
+static void test_logout_waits_for_workers(void) {
+    assert(setenv("OPENAI_CODEX_ACCESS_TOKEN", "old-access", 1) == 0);
+    assert(setenv("OPENAI_CODEX_REFRESH_TOKEN", "old-refresh", 1) == 0);
+    assert(setenv("OPENAI_CODEX_ACCOUNT_ID", "account", 1) == 0);
+    ClayCommands c = {0};
+    clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
+    c.scopes = clay_scope_registry_create();
+    c.selected_provider = strdup("openai-codex");
+    c.selected_model = strdup("model");
+    const ClayProviderType *type = clay_commands_find_provider_type("openai-codex");
+    clay_commands_load_provider(&c, type);
+    ClayConnectedProvider *provider = clay_commands_find_provider(&c, type->id);
+    assert(provider && clay_config_save(provider->config) == 0);
+
+    LogoutGate gate = {0};
+    assert(!pthread_mutex_init(&gate.lock, NULL));
+    assert(!pthread_cond_init(&gate.cond, NULL));
+    c.completion_test_hook = logout_gate_hook;
+    c.completion_test_userdata = &gate;
+
+    pthread_t worker, logout_thread;
+    assert(!pthread_create(&worker, NULL, logout_gate_run, &c));
+    pthread_mutex_lock(&gate.lock);
+    while (!gate.entered) pthread_cond_wait(&gate.cond, &gate.lock);
+    pthread_mutex_unlock(&gate.lock);
+
+    LogoutRun run = {&c, -99, 0};
+    assert(!pthread_create(&logout_thread, NULL, logout_gate_logout, &run));
+    usleep(50000);
+    assert(!run.done);
+    pthread_mutex_lock(&gate.lock);
+    gate.release = 1;
+    pthread_cond_broadcast(&gate.cond);
+    pthread_mutex_unlock(&gate.lock);
+
+    void *worker_rc = NULL;
+    assert(!pthread_join(worker, &worker_rc));
+    assert(!pthread_join(logout_thread, NULL));
+    assert(worker_rc == 0 && run.rc == 0 && run.done);
+    assert(!clay_commands_find_provider(&c, type->id));
+
+    pthread_cond_destroy(&gate.cond);
+    pthread_mutex_destroy(&gate.lock);
+    clay_array_free(&c.providers);
+    clay_scope_registry_destroy(c.scopes);
+    free(c.selected_provider);
+    free(c.selected_model);
+}
+
 static void test_provider_replacement_isolation(void) {
     assert(setenv("OPENAI_CODEX_ACCESS_TOKEN", "old-access", 1) == 0);
     assert(setenv("OPENAI_CODEX_REFRESH_TOKEN", "old-refresh", 1) == 0);
@@ -2167,6 +2254,7 @@ int main(void) {
     test_concurrent_scope_failure();
     test_provider_generations();
     test_provider_replacement_isolation();
+    test_logout_waits_for_workers();
     test_completion_scopes();
     test_scope_admission_limits_http();
     test_scope_cooldown_and_pacing();

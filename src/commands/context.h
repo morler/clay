@@ -146,6 +146,11 @@ struct ClayCommands {
   ClayChat *chat;
   ClayArray providers;
   uint64_t provider_generation; /* last issued; not reset on logout */
+  /* Readers are active completions/model fetches; a writer replaces or removes a provider. */
+  pthread_mutex_t provider_gate_lock;
+  pthread_cond_t provider_gate_cond;
+  int provider_gate_readers;
+  int provider_gate_writer;
   ClayScopeRegistry *scopes;
   ClayCompletionTestHook completion_test_hook;
   void *completion_test_userdata;

@@ -465,7 +465,7 @@ const ClayProviderType *clay_commands_provider_types(size_t *count) {
   return PROVIDER_TYPES;
 }
 
-/* Provider replacement/logout remains owner-serialized with all workers joined. */
+/* Provider state uses a short lock; the gate serializes replacement with active completions. */
 static pthread_mutex_t codex_credentials_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t codex_refresh_cond = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t grok_refresh_cond = PTHREAD_COND_INITIALIZER;
@@ -482,16 +482,52 @@ static int grok_flight_usable(const ClayConnectedProvider *provider) {
          provider->grok_refresh_epoch != UINT64_MAX;
 }
 
+static void provider_use_begin(ClayCommands *commands) {
+  pthread_mutex_lock(&commands->provider_gate_lock);
+  while (commands->provider_gate_writer)
+    pthread_cond_wait(&commands->provider_gate_cond,
+                      &commands->provider_gate_lock);
+  commands->provider_gate_readers++;
+  pthread_mutex_unlock(&commands->provider_gate_lock);
+}
+
+static void provider_use_end(ClayCommands *commands) {
+  pthread_mutex_lock(&commands->provider_gate_lock);
+  if (--commands->provider_gate_readers == 0)
+    pthread_cond_broadcast(&commands->provider_gate_cond);
+  pthread_mutex_unlock(&commands->provider_gate_lock);
+}
+
+static void provider_replace_begin(ClayCommands *commands) {
+  pthread_mutex_lock(&commands->provider_gate_lock);
+  while (commands->provider_gate_writer || commands->provider_gate_readers)
+    pthread_cond_wait(&commands->provider_gate_cond,
+                      &commands->provider_gate_lock);
+  commands->provider_gate_writer = 1;
+  pthread_mutex_unlock(&commands->provider_gate_lock);
+}
+
+static void provider_replace_end(ClayCommands *commands) {
+  pthread_mutex_lock(&commands->provider_gate_lock);
+  commands->provider_gate_writer = 0;
+  pthread_cond_broadcast(&commands->provider_gate_cond);
+  pthread_mutex_unlock(&commands->provider_gate_lock);
+}
+
 void clay_commands_load_provider(ClayCommands *commands,
                                  const ClayProviderType *type) {
+  provider_replace_begin(commands);
   ClayProviderConfig *config = clay_config_load(type->id);
   int environment_override = apply_environment_credentials(type, &config);
   if (environment_override < 0) {
     clay_config_free(config);
+    provider_replace_end(commands);
     return;
   }
-  if (!config)
+  if (!config) {
+    provider_replace_end(commands);
     return;
+  }
   int is_codex = strcmp(type->id, "openai-codex") == 0;
   int is_grok_subscription = strcmp(type->id, "grok") == 0 &&
                              config->auth_mode &&
@@ -507,6 +543,7 @@ void clay_commands_load_provider(ClayCommands *commands,
       (is_grok_subscription &&
        (!config->access_token || !config->refresh_token))) {
     clay_config_free(config);
+    provider_replace_end(commands);
     return;
   }
 
@@ -538,6 +575,7 @@ void clay_commands_load_provider(ClayCommands *commands,
     clay_openai_codex_destroy(codex_client);
     clay_grok_destroy(grok_client);
     clay_config_free(config);
+    provider_replace_end(commands);
     return;
   }
   uint64_t generation = ++commands->provider_generation;
@@ -577,6 +615,7 @@ void clay_commands_load_provider(ClayCommands *commands,
     clay_openai_codex_destroy(old_codex_client);
     clay_grok_destroy(old_grok_client);
     clay_config_free(old_config);
+    provider_replace_end(commands);
     return;
   }
 
@@ -595,6 +634,7 @@ void clay_commands_load_provider(ClayCommands *commands,
   else
     provider_free(&provider);
   pthread_mutex_unlock(&codex_credentials_lock);
+  provider_replace_end(commands);
 }
 
 /* Caller holds codex_credentials_lock. Environment credentials are never persisted, so the flag is simply dropped.
@@ -1047,6 +1087,8 @@ static int save_grok_refresh(void *userdata, ClayGrok *client) {
 }
 
 int clay_commands_logout_provider(ClayCommands *commands, const char *id) {
+  int rc = -1;
+  provider_replace_begin(commands);
   for (size_t i = 0; i < commands->providers.count; i++) {
     ClayConnectedProvider *provider = clay_array_get(&commands->providers, i);
     if (strcmp(provider->type->id, id) != 0)
@@ -1055,9 +1097,9 @@ int clay_commands_logout_provider(ClayCommands *commands, const char *id) {
     int selected = commands->selected_provider &&
                    strcmp(commands->selected_provider, id) == 0;
     if (selected && clay_config_selection_save(NULL, NULL) != 0)
-      return -1;
+      goto done;
     if (clay_config_remove(provider->config->id) != 0)
-      return -1;
+      goto done;
 
     provider_free(provider);
     clay_array_remove(&commands->providers, i);
@@ -1068,9 +1110,12 @@ int clay_commands_logout_provider(ClayCommands *commands, const char *id) {
       commands->selected_model = NULL;
       clay_commands_update_selected_below(commands);
     }
-    return 0;
+    rc = 0;
+    break;
   }
-  return -1;
+done:
+  provider_replace_end(commands);
+  return rc;
 }
 
 void clay_commands_update_selected_below(ClayCommands *commands) {
@@ -1456,14 +1501,16 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
                                  const ClayToolSet *tools, int max_rounds,
                                  const char *cache_key,
                                  const ClayOpenAICallbacks *callbacks) {
+  int rc = -1;
+  provider_use_begin(commands);
   ClayConnectedProvider *provider =
       clay_commands_find_provider(commands, commands->selected_provider);
   if (!provider)
-    return -1;
+    goto done;
   ClayScope *scope = clay_scope_get(commands->scopes, provider->generation,
                                     provider->config->base_url, commands->selected_model);
   if (!scope)
-    return -1;
+    goto done;
   clay_scope_set_tpm(scope, provider->config->tpm > 0 ? (uint64_t)provider->config->tpm : 0);
   const ClayTool *tool_list = tools ? tools->tools.data : NULL;
   size_t tool_count = tools ? tools->tools.count : 0;
@@ -1478,59 +1525,58 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
     ClayOpenAICodex *codex =
         clay_commands_codex_snapshot(provider, commands->selected_model, &version);
     if (!codex)
-      return -1;
+      goto done;
     clay_openai_codex_set_scope(codex, scope);
     if (commands->completion_test_hook) {
-      int rc = commands->completion_test_hook(clay_openai_codex_scope(codex), callbacks, commands->completion_test_userdata);
+      rc = commands->completion_test_hook(clay_openai_codex_scope(codex), callbacks, commands->completion_test_userdata);
       clay_openai_codex_destroy(codex);
-      return rc;
+      goto done;
     }
     CodexRefreshSave save = {provider, provider->generation, version};
     clay_openai_codex_set_refresh_observer(codex, save_codex_refresh, &save);
     clay_openai_codex_set_refresh_coordination(codex, begin_codex_refresh, end_codex_refresh, &save);
     clay_openai_codex_set_reasoning_effort(codex, effort);
     clay_openai_codex_set_prompt_cache_key(codex, cache_key);
-    int rc = clay_openai_codex_run(codex, messages, tool_list, tool_count,
-                                   max_rounds, callbacks);
+    rc = clay_openai_codex_run(codex, messages, tool_list, tool_count,
+                               max_rounds, callbacks);
     /* Save a refresh or rotated refresh token before discarding the client. */
     if (save_codex_credentials(provider, codex, &save.version) < 0)
       rc = -1;
     clay_openai_codex_destroy(codex);
-    return rc;
+    goto done;
   }
   if (is_grok_subscription) {
     uint64_t version;
     ClayGrok *grok = clay_commands_grok_snapshot(provider, commands->selected_model, &version);
     if (!grok)
-      return -1;
+      goto done;
     clay_grok_set_scope(grok, scope);
     if (commands->completion_test_hook) {
-      int rc = commands->completion_test_hook(clay_grok_scope(grok), callbacks, commands->completion_test_userdata);
+      rc = commands->completion_test_hook(clay_grok_scope(grok), callbacks, commands->completion_test_userdata);
       clay_grok_destroy(grok);
-      return rc;
+      goto done;
     }
     GrokRefreshSave save = {provider, provider->generation, version};
     clay_grok_set_refresh_observer(grok, save_grok_refresh, &save);
     clay_grok_set_refresh_coordination(grok, begin_grok_refresh, end_grok_refresh, &save);
     clay_grok_set_reasoning_effort(grok, effort);
     clay_grok_set_conversation_id(grok, cache_key);
-    int rc =
-        clay_grok_run(grok, messages, tool_list, tool_count, max_rounds, callbacks);
+    rc = clay_grok_run(grok, messages, tool_list, tool_count, max_rounds, callbacks);
     if (clay_commands_save_grok_credentials(provider, grok, save.version) < 0)
       rc = -1;
     clay_grok_destroy(grok);
-    return rc;
+    goto done;
   }
   ClayOpenAI *client =
       clay_openai_create(provider->config->base_url, provider->config->apikey,
                          commands->selected_model);
   if (!client)
-    return -1;
+    goto done;
   clay_openai_set_scope(client, scope);
   if (commands->completion_test_hook) {
-    int rc = commands->completion_test_hook(clay_openai_scope(client), callbacks, commands->completion_test_userdata);
+    rc = commands->completion_test_hook(clay_openai_scope(client), callbacks, commands->completion_test_userdata);
     clay_openai_destroy(client);
-    return rc;
+    goto done;
   }
   if (is_openrouter && effort && strcmp(effort, "max") == 0)
     clay_openai_set_openrouter_max_reasoning(client);
@@ -1540,9 +1586,11 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
     clay_openai_set_prompt_cache_key(client, cache_key);
   else if (strcmp(provider->type->id, "grok") == 0)
     clay_openai_set_extra_header(client, "x-grok-conv-id", cache_key);
-  int rc = clay_openai_run(client, messages, tool_list, tool_count, max_rounds,
-                           callbacks);
+  rc = clay_openai_run(client, messages, tool_list, tool_count, max_rounds,
+                       callbacks);
   clay_openai_destroy(client);
+done:
+  provider_use_end(commands);
   return rc;
 }
 
@@ -1809,6 +1857,8 @@ ClayCommands *clay_commands_create(ClayApp *app) {
   ClayCommands *commands = calloc(1, sizeof(ClayCommands));
   if (!commands)
     return NULL;
+  pthread_mutex_init(&commands->provider_gate_lock, NULL);
+  pthread_cond_init(&commands->provider_gate_cond, NULL);
   commands->scopes = clay_scope_registry_create();
   if (!commands->scopes) {
     free(commands);
@@ -1930,6 +1980,8 @@ void clay_commands_destroy(ClayCommands *commands) {
   clay_scope_registry_destroy(commands->scopes);
   clay_sandbox_namespaces_destroy(commands->sandbox_namespaces);
   pthread_mutex_destroy(&commands->tool_lock);
+  pthread_cond_destroy(&commands->provider_gate_cond);
+  pthread_mutex_destroy(&commands->provider_gate_lock);
   free(commands->environment_block);
   free(commands->notes_block);
   pthread_mutex_lock(&codex_credentials_lock);

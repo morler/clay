@@ -14,7 +14,6 @@ relations:
         - 78
         - 105
         - 106
-        - 107
 created: "2026-11-17"
 updated: "2026-11-17"
 ---
@@ -24,6 +23,6 @@ updated: "2026-11-17"
 任务：
 1. 为项目指令设总量上限（如 32KB）并在截断时写明 “N bytes cut, read the file for the rest”，按 root-first 保留靠前的层级。
 2. memory 索引按条数与总字节设上限，超出时按最近更新保留并提示用 memory_read 查看其余。
-3. skill 索引只保留 name: one-line description，限制条数。
-4. 在系统提示末尾输出各段字节数（仅在调试开关下），便于 #78 的预算断言定位。
-验收：构造超长 AGENTS.md/超多 skill 的测试，断言系统提示不超过预算且截断说明存在；make test 通过。
+3. skill 索引已经是 name: description（src/skill.c:373-391），只加条数上限，不要重写格式。
+验收：构造超长 AGENTS.md/超多 skill 的测试，断言系统提示不超过预算且截断说明存在；测试加入 UNIT_TEST_TARGETS。
+注：系统提示在 chat 创建时写进 journal 后冻结（include/clay/chat.h:26），本项只对新建 chat 生效；老 chat 需要时另加显式重建命令。

@@ -1,8 +1,8 @@
 ---
 id: 90
-title: MCP 工具收敛为固定 gateway 工具，避免前缀抖动
+title: MCP 工具字节成本先量后改；必要时收敛为固定 gateway 工具
 status: open
-priority: medium
+priority: low
 labels:
     - type:task
     - area:tools
@@ -19,10 +19,13 @@ created: "2026-11-17"
 updated: "2026-11-17"
 ---
 
-现状：MCP 工具在每次构建工具集时无条件追加，且带完整 server schema（src/commands/message.c:1444-1453、src/commands/mcp.c:29-49）；clay_commands_tools_build 每次 user 轮都会重建（message.c:1554），而 MCP 服务器数量/连接状态可能变化，工具列表变更会直接让前缀缓存归零（killi 在 MiMo 上实测，decisions 9）。killi 对照：MCP 通过一个固定 gateway 工具访问，工具列表会话内不变，/mcp 开关不删工具（mcp/gateway.rs:14-30；mcp.rs:1-4,34-62）。
+现状：MCP 工具在每次构建工具集时追加，且带完整 server schema（src/commands/message.c:1444-1453、src/commands/mcp.c:29-49）。但 MCP 服务器在会话里只连接一次，之后调用是空操作（src/commands/context.h:245-246），工具列表只在 /mcp 增删时才变，所以本项原题的“前缀抖动”不成立。
+
+真正的成本是每个 MCP 工具都带一份完整 schema（工具参数说明）占字节，且随服务器数量线性增长。
 
 任务：
-1. 把 MCP 暴露为单个固定工具（list/call schema 固定），服务器与工具名在结果里出现。
-2. 工具集在 chat 生命周期内只构建一次并缓存，除非模型/provider 切换（换 chat 才会换 cache key）。
-3. 断言：同一会话两次请求的 tools JSON 逐字节相同。
-验收：mock MCP server 测试；两次请求 tools 相同；make test 通过。
+1. 先在 #78 的基准里量出 MCP 工具占的字节数（0 个 / 1 个 / 3 个服务器的 fixture），写进本项。
+2. 只有量表明确显示占比高时才做 gateway：一个固定工具，给 server 列出工具，给 server + tool 就调用（形状照 crates/killi/src/mcp/gateway.rs:14-30，比 action=list|call 少一个字段）。
+3. 无论是否做 gateway，工具集在 chat 生命周期内只构建一次并缓存，除非模型/provider 切换。
+
+验收：字节量表的数字写进本项；若做 gateway，mock MCP server 测试通过且同一会话两次请求的 tools JSON 逐字节相同；若不做，写明触发条件（多少字节占比）后关闭 #137-139。

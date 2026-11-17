@@ -2,7 +2,7 @@
 id: 137
 title: MCP 固定 gateway 工具 schema
 status: open
-priority: medium
+priority: low
 labels:
     - type:task
     - area:tools

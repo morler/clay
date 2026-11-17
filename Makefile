@@ -156,6 +156,14 @@ SKILL_TEST_SRC    := tests/test_skill.c
 SKILL_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(SKILL_TEST_SRC))
 SKILL_TEST_TARGET := $(BIN_DIR)/test_skill
 
+REQUEST_LOG_TEST_SRC    := tests/test_request_log.c
+REQUEST_LOG_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(REQUEST_LOG_TEST_SRC))
+REQUEST_LOG_TEST_TARGET := $(BIN_DIR)/test_request_log
+
+USAGE_TEST_SRC    := tests/test_usage_command.c
+USAGE_TEST_OBJ    := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%.o,$(USAGE_TEST_SRC))
+USAGE_TEST_TARGET := $(BIN_DIR)/test_usage_command
+
 WORKSPACE_FD_TEST_OBJ := $(BUILD_DIR)/tests/test_workspace_fd.o
 
 TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(MESSAGE_TEST_OBJ) $(CHAT_TEST_OBJ) \
@@ -165,7 +173,7 @@ TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(M
 	$(TODOWRITE_TEST_OBJ) $(ASK_USER_TEST_OBJ) $(TASKS_TEST_OBJ) $(MODES_TEST_OBJ) $(SUBAGENT_TEST_OBJ) $(PROCESS_TEST_OBJ) $(MCP_TEST_OBJ) \
 	$(REPO_MAP_TEST_OBJ) $(ENV_BLOCK_TEST_OBJ) $(COMPACT_TEST_OBJ) \
 	$(CODEX_TEST_OBJ) $(GROK_TEST_OBJ) $(UNDO_TEST_OBJ) \
-	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(TEST_OBJ)
+	$(STORAGE_TEST_OBJ) $(SKILL_TEST_OBJ) $(REQUEST_LOG_TEST_OBJ) $(USAGE_TEST_OBJ) $(TEST_OBJ)
 UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
 UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
 TEST_DEP := $(BUILD_DIR)/tests/test_openai_codex_refresh.d $(BUILD_DIR)/tests/test_grok_refresh.d $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d $(BUILD_DIR)/tests/test_subagent_pty_driver.d $(BUILD_DIR)/tests/test_http.d $(BUILD_DIR)/tests/test_retry_e2e.d $(BUILD_DIR)/tests/test_provider_errors.d $(BUILD_DIR)/tests/test_reasoning.d $(BUILD_DIR)/tests/test_reasoning_codex.d
@@ -190,9 +198,9 @@ UNIT_TEST_TARGETS := $(BIN_DIR)/test_openai_codex_refresh $(BIN_DIR)/test_grok_r
 	$(TODOWRITE_TEST_TARGET) $(ASK_USER_TEST_TARGET) $(TASKS_TEST_TARGET) $(MODES_TEST_TARGET) $(SUBAGENT_TEST_TARGET) $(PROCESS_TEST_TARGET) $(MCP_TEST_TARGET) \
 	$(REPO_MAP_TEST_TARGET) $(ENV_BLOCK_TEST_TARGET) $(COMPACT_TEST_TARGET) \
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
-	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
+	$(SKILL_TEST_TARGET) $(REQUEST_LOG_TEST_TARGET) $(USAGE_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
-.PHONY: test-fs-matrix test-tsan test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
+.PHONY: test-fs-matrix test-tsan test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill test-request-log test-usage completions man-pages run compress compress-release compress-win clean debug
 
 all: build
 
@@ -342,6 +350,18 @@ test-skill: $(SKILL_TEST_TARGET)
 
 $(SKILL_TEST_TARGET): $(LIB_OBJ) $(SKILL_TEST_OBJ) | $(BIN_DIR)
 	$(CC) $(LIB_OBJ) $(SKILL_TEST_OBJ) -o $@ $(LDFLAGS)
+
+test-request-log: $(REQUEST_LOG_TEST_TARGET)
+	@./$<
+
+$(REQUEST_LOG_TEST_TARGET): $(LIB_OBJ) $(REQUEST_LOG_TEST_OBJ) | $(BIN_DIR)
+	$(CC) $(LIB_OBJ) $(REQUEST_LOG_TEST_OBJ) -o $@ $(LDFLAGS)
+
+test-usage: $(USAGE_TEST_TARGET)
+	@./$<
+
+$(USAGE_TEST_TARGET): $(LIB_OBJ) $(USAGE_TEST_OBJ) | $(BIN_DIR)
+	$(CC) $(LIB_OBJ) $(USAGE_TEST_OBJ) -o $@ $(LDFLAGS)
 
 test-sandbox: $(SANDBOX_TEST_TARGET)
 	@./$<

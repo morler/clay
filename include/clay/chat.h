@@ -23,6 +23,46 @@ typedef struct {
     long total_output_tokens;
 } ClayChatUsage;
 
+/* One provider request as it was billed, appended to
+   chats/<id>/requests.jsonl as one JSON object per line. `kind` is "main",
+   "compact", "subagent" or "models". Never sent to a provider. */
+typedef struct {
+    const char *provider;
+    const char *model;
+    const char *kind;
+    int round;
+    long input_tokens;
+    long output_tokens;
+    long cached_input_tokens;
+    int cached_input_tokens_known;
+    long context_budget;
+    long long duration_ms;
+} ClayChatRequestUsage;
+
+/* Appends one line in a single write, so concurrent subagents cannot
+   interleave halves of two records. 0 on success. */
+int clay_chat_append_request_usage(ClayChat *chat,
+                                   const ClayChatRequestUsage *usage);
+
+/* ~/.clay/chats/<id>/requests.jsonl. Malloc'd; NULL on failure. */
+char *clay_chat_request_log_path(const ClayChat *chat);
+
+/* Sum over every request logged for this chat. `any_cached_known` is 0 when
+   no provider reported cached input, so callers can say "unknown" instead of
+   printing a fake zero. `longest_miss_streak` counts the longest run of
+   requests with no cached input at all. */
+typedef struct {
+    long requests;
+    long input_tokens;
+    long output_tokens;
+    long cached_tokens;
+    int any_usage;
+    int any_cached_known;
+    long longest_miss_streak;
+} ClayChatRequestTotals;
+void clay_chat_request_totals(const ClayChat *chat,
+                              ClayChatRequestTotals *totals);
+
 /* system_prompt is frozen into the journal at creation and never rebuilt
    on later loads, so a chat's provider-side prefix cache stays valid for
    its whole lifetime. */

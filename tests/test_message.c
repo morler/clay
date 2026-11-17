@@ -14,12 +14,21 @@
 static int completion_result;
 static int fail_save;
 static int sse_error;
+static int usage_reports;
 static const char *partial_saved;
 
 int test_run_completion(ClayCommands *commands, ClayJson *messages,
                         const ClayToolSet *tools, int max_rounds,
                         const char *cache_key, const ClayOpenAICallbacks *callbacks) {
   (void)messages; (void)tools; (void)max_rounds; (void)cache_key; (void)callbacks;
+  /* One usage event per provider request. */
+  for (int i = 0; i < usage_reports; i++) {
+    ClayTokenUsage usage = {.input_tokens = 1000 + i, .output_tokens = 10,
+                            .cached_input_tokens = 900,
+                            .cached_input_tokens_known = 1};
+    if (callbacks->on_usage_details)
+      callbacks->on_usage_details(&usage, callbacks->userdata);
+  }
   if (sse_error) {
     ClayOpenAIError error = {.status = 200, .from_sse = 1,
                              .kind = CLAY_OPENAI_ERROR_RATE_LIMIT,
@@ -75,6 +84,7 @@ int main(void) {
   assert(dup2(fileno(output), STDOUT_FILENO) >= 0);
 
   int results[] = {0, CLAY_RUN_OUT_OF_ROUNDS, 1, -1};
+  usage_reports = 2;
   for (size_t i = 0; i < sizeof(results) / sizeof(results[0]); i++) {
     for (fail_save = 0; fail_save <= 1; fail_save++) {
       commands->chat = clay_chat_create("test");
@@ -95,6 +105,39 @@ int main(void) {
         assert(!strstr(text, "secret-credential"));
       }
       free(text);
+      /* Two billed requests under "main", in order, with the provider and
+         model the session selected. */
+      ClayStr log_path;
+      clay_str_init(&log_path);
+      clay_str_printf(&log_path, "%s/.clay/chats/%s/requests.jsonl", home,
+                      clay_chat_id(commands->chat));
+      ClayStr log_text;
+      if (clay_storage_read_limited(log_path.data, 1024 * 1024, &log_text) != 0)
+        clay_str_init(&log_text);
+      size_t record_count = 0;
+      for (const char *cursor = log_text.data; cursor && *cursor;) {
+        const char *line_end = strchr(cursor, '\n');
+        assert(line_end);
+        size_t line_len = (size_t)(line_end - cursor);
+        char *line = malloc(line_len + 1);
+        assert(line);
+        memcpy(line, cursor, line_len);
+        line[line_len] = '\0';
+        ClayJson *record = clay_json_parse(line, NULL);
+        free(line);
+        assert(record);
+        assert(strcmp(clay_json_string_value(clay_json_object_get(record, "kind")), "main") == 0);
+        assert(strcmp(clay_json_string_value(clay_json_object_get(record, "provider")), "test") == 0);
+        assert(strcmp(clay_json_string_value(clay_json_object_get(record, "model")), "test") == 0);
+        assert(clay_json_number_value(clay_json_object_get(record, "round")) == (double)record_count);
+        clay_json_free(record);
+        record_count++;
+        cursor = line_end + 1;
+      }
+      assert(record_count == (size_t)usage_reports);
+      clay_str_free(&log_text);
+      remove(log_path.data);
+      clay_str_free(&log_path);
       ClayStr path;
       clay_str_init(&path);
       clay_str_printf(&path, "%s/.clay/chats/%s/chat.json", home,
@@ -139,6 +182,10 @@ int main(void) {
     assert(!strcmp(clay_json_string_value(clay_json_object_get(last, "text")), "before"));
     clay_json_free(root);
     assert(remove(path.data) == 0);
+    clay_str_clear(&path);
+    clay_str_printf(&path, "%s/.clay/chats/%s/requests.jsonl", home,
+                    clay_chat_id(commands->chat));
+    remove(path.data);
     clay_str_clear(&path);
     clay_str_printf(&path, "%s/.clay/chats/%s", home, clay_chat_id(commands->chat));
     assert(rmdir(path.data) == 0);

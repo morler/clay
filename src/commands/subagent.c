@@ -43,6 +43,7 @@ typedef struct {
   double seconds;
   long input_tokens;
   long output_tokens;
+  int request_round;
   char *transcript;
   pthread_t thread;
 } ClaySubagentRun;
@@ -78,6 +79,8 @@ static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   ClaySubagentRun *run = userdata;
   run->input_tokens += usage->input_tokens;
   run->output_tokens += usage->output_tokens;
+  clay_commands_record_request_usage(run->batch->commands, "subagent",
+                                     run->request_round++, usage, 0);
 }
 
 static void poll_cancel(ClaySubagentBatch *batch) {

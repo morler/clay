@@ -1,6 +1,7 @@
 #include "context.h"
 #include "../providers/scope.h"
 
+#include "clay/config.h"
 #include "clay/storage.h"
 
 #include <stdio.h>
@@ -1243,6 +1244,27 @@ void clay_commands_add_usage(ClayCommands *commands, long input_tokens,
   pthread_mutex_unlock(&commands->tool_lock);
 }
 
+void clay_commands_record_request_usage(ClayCommands *commands,
+                                       const char *kind, int round,
+                                       const ClayTokenUsage *usage,
+                                       long long duration_ms) {
+  if (!commands || !usage || !commands->chat) return;
+  ClayChatRequestUsage record = {
+      .provider = commands->selected_provider,
+      .model = commands->selected_model,
+      .kind = kind ? kind : "main",
+      .round = round,
+      .input_tokens = usage->input_tokens,
+      .output_tokens = usage->output_tokens,
+      .cached_input_tokens = usage->cached_input_tokens,
+      .cached_input_tokens_known = usage->cached_input_tokens_known,
+      .context_budget = clay_config_context_token_budget(),
+      .duration_ms = duration_ms,
+  };
+  if (clay_chat_append_request_usage(commands->chat, &record) != 0)
+    fprintf(stderr, "clay: could not append request usage\n");
+}
+
 void clay_commands_set_tokens_below(ClayCommands *commands, long input_tokens,
                                     long output_tokens) {
   clay_commands_set_tokens_below_with_cache(commands, input_tokens,
@@ -2129,6 +2151,53 @@ int clay_commands_running(const ClayCommands *commands) {
 
 int clay_commands_has_provider(const ClayCommands *commands) {
   return commands->providers.count > 0;
+}
+
+/* Totals come from the request log, which is one line per billed provider
+   request; tool calls come from the conversation itself. Counting assistant
+   messages instead would count rounds, not requests. */
+void clay_commands_print_json_summary(const ClayCommands *commands,
+                                      long long duration_ms) {
+  ClayChatRequestTotals totals = {0};
+  if (commands->chat) clay_chat_request_totals(commands->chat, &totals);
+  long tool_calls = 0;
+  const char *answer = "";
+  for (size_t i = 0; i < clay_json_array_count(commands->conversation); i++) {
+    ClayJson *message = clay_json_array_get(commands->conversation, i);
+    const char *role =
+        clay_json_string_value(clay_json_object_get(message, "role"));
+    if (!role || strcmp(role, "assistant") != 0) continue;
+    tool_calls += (long)clay_json_array_count(
+        clay_json_object_get(message, "tool_calls"));
+    const char *content =
+        clay_json_string_value(clay_json_object_get(message, "content"));
+    if (content && *content) answer = content;
+  }
+  ClayJson *summary = clay_json_object();
+  clay_json_object_set(summary, "provider",
+                       clay_json_string(commands->selected_provider
+                                            ? commands->selected_provider : ""));
+  clay_json_object_set(summary, "model",
+                       clay_json_string(commands->selected_model
+                                            ? commands->selected_model : ""));
+  clay_json_object_set(summary, "requests", clay_json_number((double)totals.requests));
+  clay_json_object_set(summary, "tool_calls", clay_json_number((double)tool_calls));
+  clay_json_object_set(summary, "input_tokens",
+                       clay_json_number((double)totals.input_tokens));
+  clay_json_object_set(summary, "output_tokens",
+                       clay_json_number((double)totals.output_tokens));
+  if (totals.any_cached_known)
+    clay_json_object_set(summary, "cached_tokens",
+                         clay_json_number((double)totals.cached_tokens));
+  clay_json_object_set(summary, "duration_ms", clay_json_number((double)duration_ms));
+  clay_json_object_set(summary, "answer", clay_json_string(answer));
+  ClayStr text;
+  clay_str_init(&text);
+  clay_json_stringify(summary, &text);
+  clay_json_free(summary);
+  printf("%s\n", text.data);
+  fflush(stdout);
+  clay_str_free(&text);
 }
 
 void clay_commands_print_session_summary(const ClayCommands *commands) {

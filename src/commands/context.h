@@ -210,6 +210,13 @@ void clay_commands_update_selected_below(ClayCommands *commands);
    the status line and the chat journal stay honest. */
 void clay_commands_add_usage(ClayCommands *commands, long input_tokens,
                              long output_tokens);
+/* Appends one billed provider request to chats/<id>/requests.jsonl under
+   `kind` ("main", "compact", "subagent"). A failed append warns and never
+   fails the turn: the log is diagnostics, not the conversation. */
+void clay_commands_record_request_usage(ClayCommands *commands,
+                                       const char *kind, int round,
+                                       const ClayTokenUsage *usage,
+                                       long long duration_ms);
 void clay_commands_set_tokens_below(ClayCommands *commands, long input_tokens,
                                     long output_tokens);
 void clay_commands_set_tokens_below_with_cache(
@@ -249,6 +256,10 @@ void clay_commands_connect_mcp_servers(ClayCommands *commands);
 void clay_cmd_mcp(const char *args, void *user_data);
 void clay_cmd_autotest(const char *args, void *user_data);
 void clay_cmd_compact(const char *args, void *user_data);
+/* Per-chat request totals from chats/<id>/requests.jsonl: billed requests,
+   input and output tokens, cache share and the longest run of requests with
+   no cached input. */
+void clay_cmd_usage(const char *args, void *user_data);
 /* Flattens `conversation` (skipping the system prompt at index 0) into a
    plain-text transcript for /compact's summarization request: user/
    assistant text verbatim, tool calls as "called name(args)", tool

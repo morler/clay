@@ -6,10 +6,18 @@
 #include "clay/time.h"
 #include "clay/uuid.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #define CLAY_CHAT_FORMAT_VERSION 1
 #define CLAY_CHAT_FILE_LIMIT (64 * 1024 * 1024)
@@ -400,6 +408,125 @@ int clay_chat_set_usage(ClayChat *chat, const ClayChatUsage *usage) {
                          clay_json_number((double)usage->total_output_tokens));
     clay_json_object_set(chat->journal, "usage", value);
     return save(chat);
+}
+
+/* Appends one JSON object and a newline with a single write() on a file
+   opened O_APPEND: two subagents finishing at once would otherwise splice
+   half a record into the other, and every line after it fails to parse. */
+char *clay_chat_request_log_path(const ClayChat *chat) {
+    if (!chat) return NULL;
+    ClayStr relative;
+    clay_str_init(&relative);
+    clay_str_printf(&relative, "chats/%s/requests.jsonl", chat->id);
+    char *path = clay_storage_path(relative.data);
+    clay_str_free(&relative);
+    return path;
+}
+
+int clay_chat_append_request_usage(ClayChat *chat,
+                                   const ClayChatRequestUsage *usage) {
+    if (!chat || !usage) return -1;
+    ClayJson *record = clay_json_object();
+    clay_json_object_set(record, "ts", clay_json_number((double)clay_time_now()));
+    clay_json_object_set(record, "provider",
+                         clay_json_string(usage->provider ? usage->provider : ""));
+    clay_json_object_set(record, "model",
+                         clay_json_string(usage->model ? usage->model : ""));
+    clay_json_object_set(record, "kind",
+                         clay_json_string(usage->kind ? usage->kind : "main"));
+    clay_json_object_set(record, "round", clay_json_number((double)usage->round));
+    clay_json_object_set(record, "input_tokens",
+                         clay_json_number((double)usage->input_tokens));
+    clay_json_object_set(record, "output_tokens",
+                         clay_json_number((double)usage->output_tokens));
+    if (usage->cached_input_tokens_known)
+        clay_json_object_set(record, "cached_input_tokens",
+                             clay_json_number((double)usage->cached_input_tokens));
+    clay_json_object_set(record, "context_budget",
+                         clay_json_number((double)usage->context_budget));
+    clay_json_object_set(record, "duration_ms",
+                         clay_json_number((double)usage->duration_ms));
+    ClayStr line;
+    clay_str_init(&line);
+    clay_json_stringify(record, &line);
+    clay_json_free(record);
+    clay_str_push_char(&line, '\n');
+
+    if (ensure_chat_dir(chat->id) != 0) {
+        clay_str_free(&line);
+        return -1;
+    }
+    char *path = clay_chat_request_log_path(chat);
+    if (!path) {
+        clay_str_free(&line);
+        return -1;
+    }
+#ifdef _WIN32
+    int descriptor = _open(path, _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY,
+                            _S_IREAD | _S_IWRITE);
+    int written = descriptor < 0 ? -1
+                                  : (int)_write(descriptor, line.data, (unsigned)line.len);
+    if (descriptor >= 0) _close(descriptor);
+#else
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    ssize_t written = descriptor < 0 ? -1 : write(descriptor, line.data, line.len);
+    if (descriptor >= 0) close(descriptor);
+#endif
+    free(path);
+    int ok = written == (long long)line.len;
+    clay_str_free(&line);
+    return ok ? 0 : -1;
+}
+
+/* One JSON object per line, later lines later in time, so the miss streak
+   comes out in the order the provider answered. */
+void clay_chat_request_totals(const ClayChat *chat,
+                              ClayChatRequestTotals *totals) {
+    if (!chat || !totals) return;
+    memset(totals, 0, sizeof(*totals));
+    char *path = clay_chat_request_log_path(chat);
+    if (!path) return;
+    ClayStr text;
+    if (clay_storage_read_limited(path, 16 * 1024 * 1024, &text) == 0) {
+        long miss_streak = 0;
+        const char *cursor = text.data;
+        while (cursor && *cursor) {
+            const char *end = strchr(cursor, '\n');
+            if (!end) break;
+            size_t length = (size_t)(end - cursor);
+            char *line = malloc(length + 1);
+            if (!line) break;
+            memcpy(line, cursor, length);
+            line[length] = '\0';
+            ClayJson *record = clay_json_parse(line, NULL);
+            free(line);
+            cursor = end + 1;
+            if (!record) continue;
+            ClayJson *input = clay_json_object_get(record, "input_tokens");
+            if (clay_json_type(input) == CLAY_JSON_NUMBER) {
+                totals->requests++;
+                totals->any_usage = 1;
+                totals->input_tokens += (long)clay_json_number_value(input);
+                totals->output_tokens += (long)clay_json_number_value(
+                    clay_json_object_get(record, "output_tokens"));
+                ClayJson *cached =
+                    clay_json_object_get(record, "cached_input_tokens");
+                if (clay_json_type(cached) == CLAY_JSON_NUMBER) {
+                    totals->any_cached_known = 1;
+                    long tokens = (long)clay_json_number_value(cached);
+                    totals->cached_tokens += tokens;
+                    miss_streak = tokens > 0 ? 0 : miss_streak + 1;
+                    if (miss_streak > totals->longest_miss_streak)
+                        totals->longest_miss_streak = miss_streak;
+                } else {
+                    miss_streak = 0;
+                }
+            }
+            clay_json_free(record);
+        }
+        clay_str_free(&text);
+    }
+    free(path);
 }
 
 void clay_chat_set_active_thinking(ClayChat *chat, const char *text,

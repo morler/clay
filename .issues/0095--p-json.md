@@ -1,7 +1,7 @@
 ---
 id: 95
 title: -p --json 汇总输出
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -15,6 +15,7 @@ relations:
         - 92
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：src/cli/startup.c 增加 --json；src/main.c 结束时输出单行 JSON：requests/tool_calls/input_tokens/cached_tokens/output_tokens/duration_ms。

@@ -1,7 +1,7 @@
 ---
 id: 94
 title: /usage 命令
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -15,6 +15,7 @@ relations:
         - 93
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 改动：src/commands/register.c 注册 /usage；汇总本会话 requests.jsonl：请求数、工具调用数、输入、缓存比例、输出、连续未命中次数（达到 3 次时提示原因排查）。

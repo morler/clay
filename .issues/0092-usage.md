@@ -1,7 +1,7 @@
 ---
 id: 92
 title: usage 逐请求记录结构与写入点
-status: open
+status: closed
 priority: high
 labels:
     - type:task
@@ -15,6 +15,7 @@ relations:
         - 95
 created: "2026-11-17"
 updated: "2026-11-17"
+closed: "2026-11-17"
 ---
 
 现状：usage 只在每轮结束汇总（src/commands/message.c:1342-1350、1604-1612），没有逐请求记录。

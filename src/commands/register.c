@@ -48,6 +48,9 @@ void clay_commands_register(ClayCommands *commands) {
                           clay_cmd_autotest, commands);
     clay_command_register(registry, "compact", "Replace the conversation with an LLM-written summary",
                           clay_cmd_compact, commands);
+    clay_command_register(registry, "usage",
+                          "Show this chat's request, token and cache totals",
+                          clay_cmd_usage, commands);
     clay_command_register(registry, "skill",
                           "List/install/remove skills (/skill install <path-or-git-url> [name], "
                           "/skill enable|disable <name>)",

@@ -76,9 +76,22 @@ char *clay_commands_build_compact_transcript(ClayJson *conversation) {
   return out.data;
 }
 
+typedef struct {
+  ClayCommands *commands;
+  int round;
+  ClayStr summary;
+} CompactAccounting;
+
 static void accumulate_token(const char *text, void *userdata) {
+  CompactAccounting *accounting = userdata;
   if (text && *text)
-    clay_str_push(userdata, text);
+    clay_str_push(&accounting->summary, text);
+}
+
+static void compact_usage(const ClayTokenUsage *usage, void *userdata) {
+  CompactAccounting *accounting = userdata;
+  clay_commands_record_request_usage(accounting->commands, "compact",
+                                     accounting->round++, usage, 0);
 }
 
 void clay_cmd_compact(const char *args, void *user_data) {
@@ -116,11 +129,12 @@ void clay_cmd_compact(const char *args, void *user_data) {
   clay_json_array_push(messages, clay_openai_message("user", transcript));
   free(transcript);
 
-  ClayStr summary;
-  clay_str_init(&summary);
+  CompactAccounting accounting = {commands, 0, {0}};
+  clay_str_init(&accounting.summary);
   ClayOpenAICallbacks callbacks = {0};
   callbacks.on_token = accumulate_token;
-  callbacks.userdata = &summary;
+  callbacks.on_usage_details = compact_usage;
+  callbacks.userdata = &accounting;
 
   size_t before_count = clay_json_array_count(commands->conversation);
   ClayTask *task = clay_app_task_start(commands->app, "Compacting context");
@@ -133,9 +147,9 @@ void clay_cmd_compact(const char *args, void *user_data) {
     clay_term_raw_disable();
   clay_json_free(messages);
 
-  if (rc != 0 || summary.len == 0) {
+  if (rc != 0 || accounting.summary.len == 0) {
     clay_app_task_fail(commands->app, task, "failed");
-    clay_str_free(&summary);
+    clay_str_free(&accounting.summary);
     clay_sayc(CLAY_RED, "Could not compact the conversation.");
     return;
   }
@@ -150,11 +164,11 @@ void clay_cmd_compact(const char *args, void *user_data) {
   clay_str_printf(
       &note,
       "Summary of the conversation so far (compacted with /compact):\n%s",
-      summary.data);
+      accounting.summary.data);
   clay_json_array_push(new_conversation,
                        clay_openai_message("system", note.data));
   clay_str_free(&note);
-  clay_str_free(&summary);
+  clay_str_free(&accounting.summary);
 
   clay_json_free(commands->conversation);
   commands->conversation = new_conversation;

@@ -1,4 +1,6 @@
 #include "context.h"
+#include "clay/config.h"
+#include "clay/providers/retry.h"
 #include "clay/shell.h"
 
 #include <stdio.h>
@@ -36,6 +38,13 @@ typedef struct {
   double thinking_seconds;
   int thinking_active;
   int thinking_output_started;
+  /* Per-request accounting for chats/<id>/requests.jsonl (#93). One
+     on_usage_details call is one provider request, so `round` is simply how
+     many have been billed so far and `last_usage_at` dates the previous
+     one. */
+  const char *request_kind;
+  int request_round;
+  int64_t last_usage_at;
 } ClayConversationStream;
 
 void clay_commands_checkpoint(ClayCommands *commands, const char *label) {
@@ -1348,6 +1357,14 @@ static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
     stream->cached_input_tokens_known = 1;
   }
   stream->has_usage = 1;
+
+  ClayCommands *commands = stream->commands;
+  int64_t now = clay_provider_retry_now_ms(NULL);
+  clay_commands_record_request_usage(
+      commands, stream->request_kind, stream->request_round, usage,
+      stream->last_usage_at > 0 ? now - stream->last_usage_at : 0);
+  stream->request_round++;
+  stream->last_usage_at = now;
 }
 
 /* Every tool this turn can call, plus the schema objects they borrow. */
@@ -1531,6 +1548,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   clay_json_array_push(messages, clay_openai_message("user", input));
   ClayConversationStream stream = {0};
   stream.commands = commands;
+  stream.request_kind = "main";
   clay_str_init(&stream.response);
   clay_str_init(&stream.thinking);
   ClayOpenAICallbacks callbacks = {0};

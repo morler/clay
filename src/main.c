@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #define CLAY_VERSION "0.0.4"
 
@@ -23,14 +25,17 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "skill") == 0)
         return clay_skill_cli_main(argc - 2, argv + 2);
     char *one_shot_prompt = NULL;
+    int one_shot_json = 0;
     int cli_status = clay_cli_startup_with_prompt(argc, argv, CLAY_VERSION,
-                                                  &one_shot_prompt);
+                                                  &one_shot_prompt,
+                                                  &one_shot_json);
     if (cli_status != 0) return cli_status < 0 ? 1 : 0;
 
     clay_term_init();
     if (one_shot_prompt) {
         clay_term_set_noninteractive(1);
         clay_term_set_color_enabled(0);
+
     }
     if (clay_http_init() != 0) {
         fprintf(stderr, "Failed to initialize HTTP.\n");
@@ -60,8 +65,34 @@ int main(int argc, char **argv) {
     }
 
     if (one_shot_prompt) {
+        /* --json owns stdout: the run's own tool chatter is written to a
+           scratch stream and dropped, so the only line left is the summary. */
+        int saved_stdout = -1;
+        if (one_shot_json) {
+            fflush(stdout);
+            saved_stdout = dup(STDOUT_FILENO);
+            if (saved_stdout < 0)
+                fprintf(stderr, "clay: could not keep stdout for --json\n");
+            FILE *sink = fopen("/dev/null", "w");
+            if (sink) {
+                dup2(fileno(sink), STDOUT_FILENO);
+                fclose(sink);
+            }
+        }
+        struct timespec started, finished;
+        clock_gettime(CLOCK_MONOTONIC, &started);
         int ok = clay_commands_run_message(commands, one_shot_prompt);
+        clock_gettime(CLOCK_MONOTONIC, &finished);
+        long long duration_ms =
+            (long long)(finished.tv_sec - started.tv_sec) * 1000 +
+            (finished.tv_nsec - started.tv_nsec) / 1000000;
         free(one_shot_prompt);
+        if (one_shot_json) {
+            fflush(stdout);
+            dup2(saved_stdout, STDOUT_FILENO);
+            close(saved_stdout);
+            clay_commands_print_json_summary(commands, duration_ms);
+        }
         clay_commands_destroy(commands);
         clay_app_destroy(app);
         clay_http_cleanup();

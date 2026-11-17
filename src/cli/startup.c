@@ -7,8 +7,9 @@
 #include <string.h>
 
 int clay_cli_startup_with_prompt(int argc, char **argv, const char *version,
-                                 char **prompt_out) {
+                                 char **prompt_out, int *json_out) {
     if (prompt_out) *prompt_out = NULL;
+    if (json_out) *json_out = 0;
     ClayCli *cli = clay_cli_create(argc > 0 ? argv[0] : "clay", "Terminal coding agent.");
     clay_cli_add_bool(cli, "help", "Show this help.");
     clay_cli_add_bool(cli, "version", "Print the version and exit.");
@@ -16,6 +17,8 @@ int clay_cli_startup_with_prompt(int argc, char **argv, const char *version,
     clay_cli_add_string(cli, "cwd", "Run the agent from this directory.");
     clay_cli_add_string(cli, "prompt", "Send one prompt and exit.");
     clay_cli_add_string(cli, "p", "Alias for --prompt.");
+    clay_cli_add_bool(cli, "json",
+                      "With -p, print one JSON summary of the run instead of prose.");
 
     if (clay_cli_parse(cli, argc, argv) != 0) {
         fprintf(stderr, "Error: %s\n\n", clay_cli_error(cli));
@@ -53,11 +56,18 @@ int clay_cli_startup_with_prompt(int argc, char **argv, const char *version,
         const char *value = prompt ? prompt : short_prompt;
         if (value) *prompt_out = strdup(value);
     }
+    int json = clay_cli_bool(cli, "json");
+    if (json && !prompt && !short_prompt) {
+        fprintf(stderr, "Error: --json needs -p/--prompt.\n");
+        clay_cli_destroy(cli);
+        return -1;
+    }
+    if (json_out) *json_out = json;
 
     clay_cli_destroy(cli);
     return 0;
 }
 
 int clay_cli_startup(int argc, char **argv, const char *version) {
-    return clay_cli_startup_with_prompt(argc, argv, version, NULL);
+    return clay_cli_startup_with_prompt(argc, argv, version, NULL, NULL);
 }

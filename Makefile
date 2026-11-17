@@ -192,7 +192,7 @@ UNIT_TEST_TARGETS := $(BIN_DIR)/test_openai_codex_refresh $(BIN_DIR)/test_grok_r
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
 	$(SKILL_TEST_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
-.PHONY: test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
+.PHONY: test-fs-matrix test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill completions man-pages run compress compress-release compress-win clean debug
 
 all: build
 
@@ -253,6 +253,11 @@ $(BIN_DIR)/test_workspace_fd: $(BUILD_DIR)/tests/workspace_fd_test_impl.o $(WORK
 
 test-fs-fallback:
 	$(MAKE) BUILD_DIR=build-fs-fallback BIN_DIR=bin-fs-fallback CFLAGS="$(CFLAGS) -DCLAY_NO_OPENAT2" test-workspace-fd test-fs-tools test-undo test-repo-map
+
+test-fs-matrix: test-workspace-fd test-fs-tools test-undo test-repo-map
+	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./$(BIN_DIR)/test_fs_tools
+	$(MAKE) test-fs-fallback
+	CLAY_ASSERT_GREP_RACE_SAFETY=1 ./bin-fs-fallback/test_fs_tools
 
 test-openai: $(TEST_TARGET)
 	@./$<

@@ -41,6 +41,30 @@ static void test_user_requests_kept(void) {
     clay_json_free(conversation);
 }
 
+/* A request that came out too large is rebuilt once with shorter previews
+   instead of being sent. */
+static void test_reduced_transcript(void) {
+    ClayJson *conversation = clay_json_array();
+    push_message(conversation, "system", "you are clay");
+    push_message(conversation, "user", "summarize main.c");
+    ClayStr long_output;
+    clay_str_init(&long_output);
+    for (int i = 0; i < 5000; i++) clay_str_push_char(&long_output, 'q');
+    push_message(conversation, "tool", long_output.data);
+    push_message(conversation, "assistant", "It is the entry point.");
+
+    char *full = clay_commands_build_compact_transcript(conversation);
+    char *reduced = clay_commands_build_reduced_transcript(conversation);
+    assert(full && reduced);
+    assert(strlen(reduced) < strlen(full));
+    assert(strstr(reduced, "It is the entry point."));
+    assert(!strstr(reduced, long_output.data));
+    free(full);
+    free(reduced);
+    clay_str_free(&long_output);
+    clay_json_free(conversation);
+}
+
 int main(void) {
     ClayJson *conversation = clay_json_array();
     push_message(conversation, "system", "you are clay"); /* skipped by the transcript builder */
@@ -134,6 +158,7 @@ int main(void) {
     clay_json_free(empty);
 
     test_user_requests_kept();
+    test_reduced_transcript();
     printf("compact tests passed\n");
     return 0;
 }

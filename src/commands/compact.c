@@ -15,6 +15,11 @@
 /* Arguments are bounded too: a write's are a whole file. */
 #define CLAY_COMPACT_ARGUMENTS_HEAD 120
 #define CLAY_COMPACT_ARGUMENTS_TAIL 240
+/* A summarization request larger than this is retried reduced instead of
+   being sent: the answer only has to be a 1500-token summary, and a context
+   that already overflowed is exactly when this runs. */
+#define CLAY_COMPACT_REQUEST_MAX_BYTES (96 * 1024)
+#define CLAY_COMPACT_REDUCED_PREVIEW 120
 #define CLAY_COMPACT_SYSTEM_PROMPT                                             \
   "You are compacting a coding-assistant conversation so it can continue "     \
   "with less context. Read the "                                               \
@@ -115,6 +120,54 @@ static char *summarize_arguments(const char *name, const char *arguments) {
 /* Flattens `conversation` (skipping the system prompt at index 0) into a
    plain-text transcript: user/assistant text verbatim, tool calls as a
    one-line "called name(args)", tool results collapsed. */
+/* The same transcript with shorter tool previews, for a request that came
+   out too large. */
+char *clay_commands_build_reduced_transcript(ClayJson *conversation) {
+  ClayStr out;
+  clay_str_init(&out);
+  for (size_t i = 1; i < clay_json_array_count(conversation); i++) {
+    ClayJson *message = clay_json_array_get(conversation, i);
+    const char *role =
+        clay_json_string_value(clay_json_object_get(message, "role"));
+    const char *content =
+        clay_json_string_value(clay_json_object_get(message, "content"));
+    if (!role) continue;
+    if (strcmp(role, "user") == 0) {
+      clay_str_printf(&out, "User: %s\n\n", content ? content : "");
+    } else if (strcmp(role, "assistant") == 0) {
+      if (content && *content) {
+        size_t length = strlen(content);
+        if (length > CLAY_COMPACT_TOOL_PREVIEW)
+          clay_str_printf(&out, "Assistant: %.*s [... ]\n\n",
+                          CLAY_COMPACT_TOOL_PREVIEW, content);
+        else
+          clay_str_printf(&out, "Assistant: %s\n\n", content);
+      }
+      ClayJson *tool_calls = clay_json_object_get(message, "tool_calls");
+      for (size_t j = 0; j < clay_json_array_count(tool_calls); j++) {
+        ClayJson *call = clay_json_array_get(tool_calls, j);
+        ClayJson *function = clay_json_object_get(call, "function");
+        const char *name =
+            clay_json_string_value(clay_json_object_get(function, "name"));
+        char *summary = summarize_arguments(
+            name, clay_json_string_value(clay_json_object_get(function, "arguments")));
+        clay_str_printf(&out, "Assistant called %s(%s)\n",
+                        name && *name ? name : "?", summary ? summary : "");
+        free(summary);
+      }
+    } else if (strcmp(role, "tool") == 0) {
+      const char *text = content ? content : "";
+      size_t length = strlen(text);
+      size_t shown = length < CLAY_COMPACT_REDUCED_PREVIEW
+                         ? length
+                         : CLAY_COMPACT_REDUCED_PREVIEW;
+      clay_str_printf(&out, "Tool result: %.*s%s\n\n", (int)shown, text,
+                      shown < length ? " [...]" : "");
+    }
+  }
+  return out.data;
+}
+
 char *clay_commands_build_compact_transcript(ClayJson *conversation) {
   ClayStr out;
   clay_str_init(&out);
@@ -212,6 +265,16 @@ static void compact_usage(const ClayTokenUsage *usage, void *userdata) {
                                      accounting->round++, usage, 0);
 }
 
+/* What the request actually weighs, as JSON. */
+static size_t transcript_bytes(const ClayJson *messages) {
+  ClayStr text;
+  clay_str_init(&text);
+  clay_json_stringify(messages, &text);
+  size_t bytes = text.len;
+  clay_str_free(&text);
+  return bytes;
+}
+
 void clay_cmd_compact(const char *args, void *user_data) {
   (void)args;
   ClayCommands *commands = user_data;
@@ -255,12 +318,31 @@ void clay_cmd_compact(const char *args, void *user_data) {
   callbacks.userdata = &accounting;
 
   size_t before_count = clay_json_array_count(commands->conversation);
+  size_t request_bytes = transcript_bytes(messages);
   ClayTask *task = clay_app_task_start(commands->app, "Compacting context");
   if (clay_term_is_interactive())
     clay_term_raw_enable();
-  int rc = clay_commands_run_completion(commands, messages, NULL, 1,
+  int rc = -1;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    if (request_bytes <= CLAY_COMPACT_REQUEST_MAX_BYTES) {
+      rc = clay_commands_run_completion(commands, messages, NULL, 1,
                                         clay_chat_id(commands->chat),
                                         &callbacks);
+      break;
+    }
+    if (attempt == 1) break;
+    /* Too large to send: rebuild once with shorter previews rather than
+       fail, since a conversation that needs compacting is usually the one
+       that cannot afford a bigger request. */
+    char *reduced = clay_commands_build_reduced_transcript(commands->conversation);
+    clay_json_free(messages);
+    messages = clay_json_array();
+    clay_json_array_push(
+        messages, clay_openai_message("system", CLAY_COMPACT_SYSTEM_PROMPT));
+    clay_json_array_push(messages, clay_openai_message("user", reduced));
+    free(reduced);
+    request_bytes = transcript_bytes(messages);
+  }
   if (clay_term_is_interactive())
     clay_term_raw_disable();
   clay_json_free(messages);

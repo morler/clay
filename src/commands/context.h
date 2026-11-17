@@ -301,6 +301,9 @@ void clay_cmd_usage(const char *args, void *user_data);
    assistant text verbatim, tool calls as "called name(args)", tool
    results collapsed to a short preview. Malloc'd. */
 char *clay_commands_build_compact_transcript(ClayJson *conversation);
+/* The same transcript with shorter tool previews, for a summarization
+   request that came out over its size limit. Malloc'd. */
+char *clay_commands_build_reduced_transcript(ClayJson *conversation);
 /* The user's own messages, joined with a per-request cut and a note of what
    was cut: the part of a conversation a summary must not paraphrase.
    Malloc'd; NULL when the user never said anything. */

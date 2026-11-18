@@ -46,6 +46,24 @@ extern const char *clay_subagent_prompt_suffix(void);
 
 /* Each tool's own line: with the descriptions and schemas at 8.5 KB, a
    regression has to name the tool that caused it, not move the total. */
+/* Name, description and parameters of every tool, in build order: what the
+   provider receives, without the JSON framing around it. */
+static void append_tools_json(ClayCommands *commands, ClayStr *out) {
+    ClayToolSet set;
+    clay_commands_tools_build(commands, &commands->plan, &set, 1);
+    for (size_t i = 0; i < set.tools.count; i++) {
+        ClayTool *tool = clay_array_get((ClayArray *)&set.tools, i);
+        ClayStr parameters;
+        clay_str_init(&parameters);
+        clay_json_stringify(tool->parameters, &parameters);
+        clay_str_printf(out, "%s\x1f%s\x1f%s\n", tool->name,
+                        tool->description ? tool->description : "",
+                        parameters.data);
+        clay_str_free(&parameters);
+    }
+    clay_commands_tools_free(&set);
+}
+
 static size_t serialized_tool_bytes(const ClayToolSet *set, int report) {
     size_t total = 0;
     for (size_t i = 0; i < set->tools.count; i++) {
@@ -177,6 +195,29 @@ int main(void) {
         /* A subagent gets two fewer tools, so it can only be smaller. */
         if (!with_tools) assert(tools < CLAY_PROMPT_AND_TOOL_BUDGET);
         clay_commands_tools_free(&set);
+    }
+
+    /* The same session asks for the tools twice per turn at least, and a
+       rebuild that differs by a byte invalidates the provider's cached
+       prefix. Every build in one session must agree. */
+    {
+        ClayStr first_build, second_build, after_new;
+        clay_str_init(&first_build);
+        clay_str_init(&second_build);
+        clay_str_init(&after_new);
+        append_tools_json(commands, &first_build);
+        append_tools_json(commands, &second_build);
+        clay_commands_reset_conversation(commands);
+        append_tools_json(commands, &after_new);
+        printf("tools across rebuilds: %s (%zu B)\n",
+               strcmp(first_build.data, second_build.data) == 0 ? "identical"
+                                                               : "DIFFER",
+               first_build.len);
+        assert(strcmp(first_build.data, second_build.data) == 0);
+        assert(strcmp(first_build.data, after_new.data) == 0);
+        clay_str_free(&first_build);
+        clay_str_free(&second_build);
+        clay_str_free(&after_new);
     }
 
     ClayToolSet set;

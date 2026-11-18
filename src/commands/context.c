@@ -1365,11 +1365,6 @@ static void save_system_prompt_cache(const char *text, long long built_at,
 }
 
 #define CLAY_PROJECT_INSTRUCTIONS_MAX_DEPTH 32
-/* The whole set of AGENTS.md/CLAY.md files rides in every chat's system
-   prompt, so it has a ceiling of its own: 32 KB is roughly eight thousand
-   tokens, more than the entire base prompt. A path that gets cut says so and
-   names the file, so the model can read the rest instead of guessing. */
-#define CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES (32 * 1024)
 
 static char *read_file_if_exists(const char *path) {
   ClayStr text;

@@ -23,6 +23,12 @@ char *clay_memory_read(const char *slug);
    if it didn't already exist), -1 on an invalid slug or I/O failure. */
 int clay_memory_delete(const char *slug);
 
+/* The index rides in every chat's system prompt, so it is capped: the
+   newest entries within a byte ceiling, then a line naming where the rest
+   is. Shared with the prompt budget test. */
+#define CLAY_MEMORY_INDEX_MAX_ENTRIES 20
+#define CLAY_MEMORY_INDEX_MAX_BYTES (4 * 1024)
+
 /* Malloc'd index text, one "- slug [type]: summary" line per manifest
    entry; empty string if there are none. Caller frees. */
 char *clay_memory_index(void);

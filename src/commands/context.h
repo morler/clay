@@ -261,6 +261,11 @@ char *clay_commands_environment_delta(const char *previous,
 /* Line-level difference ("+ new", "- gone") between two text blocks, or
    NULL when they are equal. */
 char *clay_commands_text_delta(const char *previous, const char *current);
+/* Every AGENTS.md/CLAY.md read for a chat's system prompt shares one budget,
+   spent root-first so the most general instructions survive a cut. Shared
+   with the prompt budget test. */
+#define CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES (32 * 1024)
+
 /* Walks up from the cwd to the repo root, concatenating AGENTS.md/CLAY.md
    at each level (root-first). Malloc'd; NULL if none found. */
 char *clay_commands_load_project_instructions(void);

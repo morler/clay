@@ -36,6 +36,11 @@ int clay_skill_remove(const char *name);
    installed. */
 int clay_skill_set_enabled(const char *name, int enabled);
 
+/* The index rides in every chat's system prompt, so it is capped like the
+   memory index. Shared with the prompt budget test. */
+#define CLAY_SKILL_INDEX_MAX_ENTRIES 60
+#define CLAY_SKILL_INDEX_MAX_BYTES (8 * 1024)
+
 /* Malloc'd index text, one "- name: description" line per *enabled*
    entry; empty string if there are none. For the system prompt. */
 char *clay_skill_index(void);

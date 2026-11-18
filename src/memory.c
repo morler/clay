@@ -139,11 +139,6 @@ int clay_memory_delete(const char *slug) {
     return save_manifest(root);
 }
 
-/* The index rides in every chat's system prompt. Twenty entries and 4 KB is
-   what killi settled on for the same job. */
-#define CLAY_MEMORY_INDEX_MAX_ENTRIES 20
-#define CLAY_MEMORY_INDEX_MAX_BYTES (4 * 1024)
-
 char *clay_memory_index(void) {
     ClayJson *root = load_manifest();
     ClayJson *entries = clay_json_object_get(root, "entries");

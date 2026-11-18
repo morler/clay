@@ -1,12 +1,16 @@
 #include "../src/commands/context.h"
 
 #include "clay/json.h"
+#include "clay/memory.h"
+#include "clay/skill.h"
 #include "clay/str.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* Every chat pays for the whole system prompt plus every tool schema on
    every request, so this is the fixed cost of talking to a provider at all.
@@ -14,6 +18,21 @@
    in the commit message. killy spends 12,000 characters here (system prompt
    plus its 17 tools), and this is the number #89 has to bring clay toward. */
 #define CLAY_PROMPT_AND_TOOL_BUDGET 22000
+
+/* The base prompt plus a maximal store: memory, skills and project
+   instructions each at their own ceiling still add up to a fixed amount,
+   because the whole system prompt is the fixed prefix of every request.
+   Each section adds a header and a note naming where the rest is kept;
+   CLAY_SECTION_FRAMING_CEILING covers both. The total is also bounded on
+   its own, so raising one section's cap still has to fit here. */
+#define CLAY_SECTION_FRAMING_CEILING 512
+#define CLAY_MEMORY_SECTION_CEILING \
+    (CLAY_MEMORY_INDEX_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
+#define CLAY_SKILLS_SECTION_CEILING \
+    (CLAY_SKILL_INDEX_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
+#define CLAY_INSTRUCTIONS_SECTION_CEILING \
+    (CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
+#define CLAY_SYSTEM_PROMPT_BUDGET (52 * 1024)
 
 static size_t serialized_tool_bytes(const ClayToolSet *set) {
     size_t total = 0;
@@ -30,7 +49,93 @@ static size_t serialized_tool_bytes(const ClayToolSet *set) {
     return total;
 }
 
+static void write_file(const char *path, const char *content) {
+    FILE *file = fopen(path, "w");
+    assert(file);
+    fputs(content, file);
+    fclose(file);
+}
+
+static char *joined_path(const char *dir, const char *name) {
+    ClayStr path;
+    clay_str_init(&path);
+    clay_str_printf(&path, "%s/%s", dir, name);
+    return path.data;
+}
+
+/* A private HOME with every store at its ceiling, and a cwd inside a repo
+   whose AGENTS.md is larger than the project-instruction cap. Everything
+   below then measures a hostile store rather than whatever the machine that
+   runs the test happens to have. mkdtemp rewrites and returns its template
+   argument, so these stay alive at file scope. */
+static char home_template[] = "/tmp/clay_budget_home_XXXXXX";
+static char skill_source_template[] = "/tmp/clay_budget_skill_XXXXXX";
+static char repo_template[] = "/tmp/clay_budget_repo_XXXXXX";
+static char *home;
+static char *skill_source;
+static char *repo;
+
+static void fill_maximal_store(void) {
+    home = mkdtemp(home_template);
+    assert(home);
+    assert(setenv("HOME", home, 1) == 0);
+
+    ClayStr summary;
+    clay_str_init(&summary);
+    for (int i = 0; i < 300; i++)
+        clay_str_push_char(&summary, 'm');
+    for (int i = 0; i < 40; i++) {
+        char slug[16];
+        snprintf(slug, sizeof(slug), "entry-%02d", i);
+        assert(clay_memory_write(slug, "task", summary.data, "body") == 0);
+    }
+    clay_str_free(&summary);
+
+    skill_source = mkdtemp(skill_source_template);
+    assert(skill_source);
+    char *skill_md = joined_path(skill_source, "SKILL.md");
+    ClayStr frontmatter;
+    clay_str_init(&frontmatter);
+    clay_str_push(&frontmatter, "---\nname: sample\ndescription: A skill description long enough to spend the byte "
+                               "budget.\n---\nBody.\n");
+    write_file(skill_md, frontmatter.data);
+    clay_str_free(&frontmatter);
+    for (int i = 0; i < 70; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "skill-%02d", i);
+        assert(clay_skill_install(skill_source, name) == 0);
+    }
+    free(skill_md);
+
+    repo = mkdtemp(repo_template);
+    assert(repo);
+    char *git_dir = joined_path(repo, ".git");
+    assert(mkdir(git_dir, 0755) == 0);
+    free(git_dir);
+    char *agents = joined_path(repo, "AGENTS.md");
+    ClayStr huge;
+    clay_str_init(&huge);
+    for (int i = 0; i < 40 * 1024; i++)
+        clay_str_push_char(&huge, 'r');
+    write_file(agents, huge.data);
+    clay_str_free(&huge);
+    free(agents);
+    assert(chdir(repo) == 0);
+}
+
+/* Every path here came from mkdtemp, so no quoting is needed. */
+static void remove_maximal_store(void) {
+    assert(chdir("/tmp") == 0);
+    ClayStr command;
+    clay_str_init(&command);
+    clay_str_printf(&command, "rm -rf %s %s %s", home, skill_source, repo);
+    assert(system(command.data) == 0);
+    clay_str_free(&command);
+}
+
 int main(void) {
+    fill_maximal_store();
+
     ClayApp *app = clay_app_create();
     ClayCommands *commands = clay_commands_create(app);
     assert(commands);
@@ -57,8 +162,8 @@ int main(void) {
     assert(prompt > 0 && tools > 0);
     assert(prompt + tools <= CLAY_PROMPT_AND_TOOL_BUDGET);
 
-    /* The breakdown is what #89 acts on: a section that grows shows up on
-       its own line instead of in the total. */
+    /* A section that grows shows up on its own line instead of in the
+       total. */
     ClayCommandsPromptSections sections;
     clay_commands_system_prompt_sections(&sections);
     printf("sections: base %zu, memory %zu, skills %zu, instructions %zu\n",
@@ -67,11 +172,41 @@ int main(void) {
     assert(sections.base == prompt);
     assert(sections.total == sections.base + sections.memory +
                                  sections.skills + sections.instructions);
-    /* With no memory, skills or AGENTS.md in this HOME, only the base is
-       left - and a section that appears must land in the total. */
-    assert(sections.total >= sections.base);
+
+    /* Each store was filled to its ceiling, so every section is there, sits
+       under its own cap, and the sum is still bounded. */
+    assert(sections.memory > 0 && sections.skills > 0 &&
+           sections.instructions > 0);
+    printf("sections under a maximal store: memory %zu/%zu, skills %zu/%zu, "
+           "instructions %zu/%zu\n",
+           sections.memory, (size_t)CLAY_MEMORY_SECTION_CEILING,
+           sections.skills, (size_t)CLAY_SKILLS_SECTION_CEILING,
+           sections.instructions, (size_t)CLAY_INSTRUCTIONS_SECTION_CEILING);
+    assert(sections.memory <= CLAY_MEMORY_SECTION_CEILING);
+    assert(sections.skills <= CLAY_SKILLS_SECTION_CEILING);
+    assert(sections.instructions <= CLAY_INSTRUCTIONS_SECTION_CEILING);
+    size_t ceiling = sections.base + CLAY_MEMORY_SECTION_CEILING +
+                     CLAY_SKILLS_SECTION_CEILING +
+                     CLAY_INSTRUCTIONS_SECTION_CEILING;
+    printf("system prompt with a maximal store: %zu bytes (sections add up "
+           "to %zu, budget %d)\n",
+           sections.total, ceiling, CLAY_SYSTEM_PROMPT_BUDGET);
+    assert(sections.total <= ceiling);
+    assert(sections.total <= CLAY_SYSTEM_PROMPT_BUDGET);
+
+    /* The breakdown describes the prompt that is actually sent, and every
+       cut section says so and names where the rest is kept. */
+    clay_commands_reset_conversation(commands);
+    assert(commands->system_prompt);
+    assert(strlen(commands->system_prompt) == sections.total);
+    assert(strstr(commands->system_prompt, "memory_list and memory_read"));
+    assert(strstr(commands->system_prompt, "/skill lists the rest"));
+    assert(strstr(commands->system_prompt, "bytes of project instructions cut"));
+
+    assert(chdir("/tmp") == 0);
 
     clay_commands_destroy(commands);
     clay_app_destroy(app);
+    remove_maximal_store();
     return 0;
 }

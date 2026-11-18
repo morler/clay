@@ -370,10 +370,6 @@ int clay_skill_set_enabled(const char *name, int enabled) {
     return save_manifest(root);
 }
 
-/* The index is in every chat's system prompt; the body is not. */
-#define CLAY_SKILL_INDEX_MAX_ENTRIES 60
-#define CLAY_SKILL_INDEX_MAX_BYTES (8 * 1024)
-
 char *clay_skill_index(void) {
     ClayJson *root = load_manifest();
     ClayJson *entries = clay_json_object_get(root, "entries");

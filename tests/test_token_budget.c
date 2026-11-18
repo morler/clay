@@ -17,7 +17,7 @@
    The ceiling is a budget, not a measurement: raise it only with the reason
    in the commit message. killy spends 12,000 characters here (system prompt
    plus its 17 tools), and this is the number #89 has to bring clay toward. */
-#define CLAY_PROMPT_AND_TOOL_BUDGET 22000
+#define CLAY_PROMPT_AND_TOOL_BUDGET 18000
 
 /* The base prompt plus a maximal store: memory, skills and project
    instructions each at their own ceiling still add up to a fixed amount,

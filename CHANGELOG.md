@@ -4,6 +4,14 @@
 
 ### Added
 
+- Global instructions: `~/.clay/AGENTS.md` (or `CLAY.md` when that is the
+  only one) is folded into the system prompt ahead of the project's own
+  `AGENTS.md`, so a preference you set once - reply language, how you like
+  commits written - follows you into every repo instead of being retyped
+  into each one. A repo can still override it, since the project's text
+  comes last. It is capped at 8 KB and says so and names the file when it
+  cuts. Editing it takes effect on the next chat: the prompt cache carries
+  a fingerprint of both instruction files, so you do not wait out its TTL.
 - `/tasks` lists running background commands in an interactive picker and can
   stop a selected task after confirmation.
 - `ask_user` tool: the model can ask one question mid-turn and get the answer

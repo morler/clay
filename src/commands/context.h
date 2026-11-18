@@ -235,6 +235,7 @@ const char *clay_commands_system_prompt_base(void);
    which is what the fixed cost of every request is made of. */
 typedef struct {
   size_t base;
+  size_t global;
   size_t memory;
   size_t skills;
   size_t instructions;
@@ -265,6 +266,15 @@ char *clay_commands_text_delta(const char *previous, const char *current);
    spent root-first so the most general instructions survive a cut. Shared
    with the prompt budget test. */
 #define CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES (32 * 1024)
+
+/* The user's own instructions, read from ~/.clay and sent ahead of the
+   project's so a repo can override a preference. Smaller than the project
+   budget: a handful of lines, not a document. */
+#define CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES (8 * 1024)
+
+/* ~/.clay/AGENTS.md, falling back to ~/.clay/CLAY.md, capped at
+   CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES. Malloc'd; NULL if neither exists. */
+char *clay_commands_load_global_instructions(void);
 
 /* Walks up from the cwd to the repo root, concatenating AGENTS.md/CLAY.md
    at each level (root-first). Malloc'd; NULL if none found. */

@@ -1277,14 +1277,22 @@ const char *clay_commands_system_prompt_base(void) {
   return CLAY_SYSTEM_PROMPT_BASE;
 }
 
-/* FNV-1a over the build's base prompt: a cache written by a different build
-   describes a clay that no longer exists. */
-static double base_prompt_fingerprint(void) {
+/* FNV-1a over what the cache cannot outlive: the build's base prompt and the
+   instruction files a user or a repo can edit. A cache written for different
+   text describes a clay that no longer exists, and an edit to AGENTS.md takes
+   effect on the next chat instead of waiting out the TTL. */
+static double prompt_fingerprint(const char *global_instructions,
+                                 const char *project_instructions) {
   unsigned long hash = 2166136261UL;
-  for (const char *p = CLAY_SYSTEM_PROMPT_BASE; *p; p++) {
-    hash ^= (unsigned char)*p;
-    hash *= 16777619UL;
-    hash &= 0xffffffffUL;
+  const char *parts[] = {CLAY_SYSTEM_PROMPT_BASE, global_instructions,
+                         project_instructions};
+  for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+    if (!parts[i]) continue;
+    for (const char *p = parts[i]; *p; p++) {
+      hash ^= (unsigned char)*p;
+      hash *= 16777619UL;
+      hash &= 0xffffffffUL;
+    }
   }
   return (double)hash;
 }
@@ -1321,14 +1329,13 @@ static int load_system_prompt_cache(char **text_out, long long *built_at_out,
 }
 
 static void save_system_prompt_cache(const char *text, long long built_at,
-                                     const char *cwd) {
+                                     const char *cwd, double fingerprint) {
   if (clay_storage_ensure_dir("") != 0)
     return;
   ClayJson *root = clay_json_object();
   clay_json_object_set(root, "text", clay_json_string(text));
   clay_json_object_set(root, "built_at", clay_json_number((double)built_at));
-  clay_json_object_set(root, "base_fingerprint",
-                       clay_json_number(base_prompt_fingerprint()));
+  clay_json_object_set(root, "base_fingerprint", clay_json_number(fingerprint));
   clay_json_object_set(root, "cwd", clay_json_string(cwd));
   char *path = clay_storage_path("system_prompt.json");
   if (!path) {
@@ -1362,6 +1369,30 @@ static char *read_level_instructions(const char *dir) {
   }
   clay_str_free(&path);
   return content;
+}
+
+/* Root-first, so a project can override a preference the user set once. */
+char *clay_commands_load_global_instructions(void) {
+  char *dir = clay_storage_root();
+  if (!dir)
+    return NULL;
+  char *content = read_level_instructions(dir);
+  free(dir);
+  if (!content)
+    return NULL;
+  size_t length = strlen(content);
+  if (length <= CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES)
+    return content;
+  ClayStr capped;
+  clay_str_init(&capped);
+  clay_str_push_n(&capped, content, CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES);
+  clay_str_printf(&capped,
+                  "\n\n[%zu bytes of global instructions cut to stay within "
+                  "the %d byte limit; read ~/.clay/AGENTS.md for the rest]",
+                  length - CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES,
+                  (int)CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES);
+  free(content);
+  return capped.data;
 }
 
 /* Walks up from the cwd to the repo root (a directory holding .git),
@@ -1569,6 +1600,12 @@ void clay_commands_system_prompt_sections(ClayCommandsPromptSections *out) {
                   strlen("\n\nAvailable skills (call the skill tool with one "
                          "name to load its full instructions):\n");
   free(skills);
+  char *global_instructions = clay_commands_load_global_instructions();
+  if (global_instructions) {
+    out->global = strlen(global_instructions) +
+                  strlen("\n\nGlobal user instructions (~/.clay/AGENTS.md):\n");
+    free(global_instructions);
+  }
   char *project_instructions = clay_commands_load_project_instructions();
   if (project_instructions) {
     out->instructions =
@@ -1576,7 +1613,8 @@ void clay_commands_system_prompt_sections(ClayCommandsPromptSections *out) {
         strlen("\n\nProject instructions (AGENTS.md/CLAY.md):\n");
     free(project_instructions);
   }
-  out->total = out->base + out->memory + out->skills + out->instructions;
+  out->total = out->base + out->memory + out->skills + out->global +
+               out->instructions;
 }
 
 static char *build_fresh_system_prompt(void) {
@@ -1597,6 +1635,14 @@ static char *build_fresh_system_prompt(void) {
                     skills);
   free(skills);
 
+  char *global_instructions = clay_commands_load_global_instructions();
+  if (global_instructions) {
+    clay_str_printf(&text,
+                    "\n\nGlobal user instructions (~/.clay/AGENTS.md):\n%s",
+                    global_instructions);
+    free(global_instructions);
+  }
+
   char *project_instructions = clay_commands_load_project_instructions();
   if (project_instructions) {
     clay_str_printf(&text, "\n\nProject instructions (AGENTS.md/CLAY.md):\n%s",
@@ -1609,9 +1655,9 @@ static char *build_fresh_system_prompt(void) {
     clay_commands_system_prompt_sections(&sections);
     fprintf(stderr,
             "clay: system prompt %zu B = base %zu + memory %zu + skills %zu "
-            "+ instructions %zu\n",
+            "+ global %zu + instructions %zu\n",
             sections.total, sections.base, sections.memory, sections.skills,
-            sections.instructions);
+            sections.global, sections.instructions);
   }
   return text.data;
 }
@@ -1625,12 +1671,19 @@ static char *clay_commands_build_system_prompt(void) {
   char *cached_text = NULL;
   char *cached_cwd = NULL;
   long long built_at = 0;
-  double fingerprint = 0;
+  double cached_fingerprint = 0;
   long long now = clay_time_now();
   char *cwd = clay_term_cwd();
+  /* Read once: the same bytes go into the prompt and into its fingerprint. */
+  char *global_instructions = clay_commands_load_global_instructions();
+  char *project_instructions = clay_commands_load_project_instructions();
+  double fingerprint =
+      prompt_fingerprint(global_instructions, project_instructions);
+  free(global_instructions);
+  free(project_instructions);
   int hit = load_system_prompt_cache(&cached_text, &built_at, &cached_cwd,
-                                     &fingerprint) == 0 &&
-            fingerprint == base_prompt_fingerprint() &&
+                                     &cached_fingerprint) == 0 &&
+            cached_fingerprint == fingerprint &&
             now - built_at < CLAY_SYSTEM_PROMPT_TTL_SECONDS && cwd &&
             strcmp(cached_cwd, cwd) == 0;
   free(cached_cwd);
@@ -1643,7 +1696,7 @@ static char *clay_commands_build_system_prompt(void) {
   }
   free(cached_text);
   char *fresh = build_fresh_system_prompt();
-  save_system_prompt_cache(fresh, now, cwd ? cwd : "");
+  save_system_prompt_cache(fresh, now, cwd ? cwd : "", fingerprint);
   free(cwd);
   return fresh;
 }

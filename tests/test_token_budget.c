@@ -19,7 +19,7 @@
    plus its 17 tools), and this is the number #89 has to bring clay toward. */
 #define CLAY_PROMPT_AND_TOOL_BUDGET 18000
 
-/* The base prompt plus a maximal store: memory, skills and project
+/* The base prompt plus a maximal store: memory, skills, global and project
    instructions each at their own ceiling still add up to a fixed amount,
    because the whole system prompt is the fixed prefix of every request.
    Each section adds a header and a note naming where the rest is kept;
@@ -32,7 +32,9 @@
     (CLAY_SKILL_INDEX_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
 #define CLAY_INSTRUCTIONS_SECTION_CEILING \
     (CLAY_PROJECT_INSTRUCTIONS_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
-#define CLAY_SYSTEM_PROMPT_BUDGET (52 * 1024)
+#define CLAY_GLOBAL_SECTION_CEILING \
+    (CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
+#define CLAY_SYSTEM_PROMPT_BUDGET (60 * 1024)
 
 static size_t serialized_tool_bytes(const ClayToolSet *set) {
     size_t total = 0;
@@ -79,6 +81,18 @@ static void fill_maximal_store(void) {
     home = mkdtemp(home_template);
     assert(home);
     assert(setenv("HOME", home, 1) == 0);
+
+    /* The user's own instructions live under ~/.clay too, so an overlong one
+       has to fit in the same budget. */
+    assert(clay_storage_ensure_dir("") == 0);
+    char *global_path = joined_path(home, ".clay/AGENTS.md");
+    ClayStr global_text;
+    clay_str_init(&global_text);
+    for (int i = 0; i < 10 * 1024; i++)
+        clay_str_push_char(&global_text, 'g');
+    write_file(global_path, global_text.data);
+    clay_str_free(&global_text);
+    free(global_path);
 
     ClayStr summary;
     clay_str_init(&summary);
@@ -166,27 +180,32 @@ int main(void) {
        total. */
     ClayCommandsPromptSections sections;
     clay_commands_system_prompt_sections(&sections);
-    printf("sections: base %zu, memory %zu, skills %zu, instructions %zu\n",
-           sections.base, sections.memory, sections.skills,
+    printf("sections: base %zu, memory %zu, skills %zu, global %zu, "
+           "instructions %zu\n",
+           sections.base, sections.memory, sections.skills, sections.global,
            sections.instructions);
     assert(sections.base == prompt);
     assert(sections.total == sections.base + sections.memory +
-                                 sections.skills + sections.instructions);
+                                 sections.skills + sections.global +
+                                 sections.instructions);
 
     /* Each store was filled to its ceiling, so every section is there, sits
        under its own cap, and the sum is still bounded. */
-    assert(sections.memory > 0 && sections.skills > 0 &&
+    assert(sections.memory > 0 && sections.skills > 0 && sections.global > 0 &&
            sections.instructions > 0);
     printf("sections under a maximal store: memory %zu/%zu, skills %zu/%zu, "
-           "instructions %zu/%zu\n",
+           "global %zu/%zu, instructions %zu/%zu\n",
            sections.memory, (size_t)CLAY_MEMORY_SECTION_CEILING,
            sections.skills, (size_t)CLAY_SKILLS_SECTION_CEILING,
+           sections.global, (size_t)CLAY_GLOBAL_SECTION_CEILING,
            sections.instructions, (size_t)CLAY_INSTRUCTIONS_SECTION_CEILING);
     assert(sections.memory <= CLAY_MEMORY_SECTION_CEILING);
     assert(sections.skills <= CLAY_SKILLS_SECTION_CEILING);
+    assert(sections.global <= CLAY_GLOBAL_SECTION_CEILING);
     assert(sections.instructions <= CLAY_INSTRUCTIONS_SECTION_CEILING);
     size_t ceiling = sections.base + CLAY_MEMORY_SECTION_CEILING +
                      CLAY_SKILLS_SECTION_CEILING +
+                     CLAY_GLOBAL_SECTION_CEILING +
                      CLAY_INSTRUCTIONS_SECTION_CEILING;
     printf("system prompt with a maximal store: %zu bytes (sections add up "
            "to %zu, budget %d)\n",
@@ -201,6 +220,7 @@ int main(void) {
     assert(strlen(commands->system_prompt) == sections.total);
     assert(strstr(commands->system_prompt, "memory_list and memory_read"));
     assert(strstr(commands->system_prompt, "/skill lists the rest"));
+    assert(strstr(commands->system_prompt, "bytes of global instructions cut"));
     assert(strstr(commands->system_prompt, "bytes of project instructions cut"));
 
     assert(chdir("/tmp") == 0);

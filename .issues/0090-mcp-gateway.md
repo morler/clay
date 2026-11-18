@@ -15,8 +15,9 @@ relations:
         - 137
         - 138
         - 139
+        - 144
 created: "2026-11-17"
-updated: "2026-11-17"
+updated: "2026-11-18"
 ---
 
 现状：MCP 工具在每次构建工具集时追加，且带完整 server schema（src/commands/message.c:1444-1453、src/commands/mcp.c:29-49）。但 MCP 服务器在会话里只连接一次，之后调用是空操作（src/commands/context.h:245-246），工具列表只在 /mcp 增删时才变，所以本项原题的“前缀抖动”不成立。

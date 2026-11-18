@@ -12,6 +12,7 @@
 
 static char mcp_home_template[] = "/tmp/clay_test_mcp_XXXXXX";
 static size_t without_servers;
+static ClayStr bare_tools_json;
 
 int main(void) {
     /* The tool list must not depend on which servers are connected: a chat
@@ -30,6 +31,16 @@ int main(void) {
         }
         assert(found);
         size_t without = set.tools.count;
+        clay_str_init(&bare_tools_json);
+        for (size_t i = 0; i < set.tools.count; i++) {
+            ClayTool *t = clay_array_get((ClayArray *)&set.tools, i);
+            ClayStr params;
+            clay_str_init(&params);
+            clay_json_stringify(t->parameters, &params);
+            clay_str_printf(&bare_tools_json, "%s|%s|%s\n", t->name,
+                            t->description ? t->description : "", params.data);
+            clay_str_free(&params);
+        }
         clay_commands_tools_free(&set);
         clay_commands_destroy(c);
         clay_app_destroy(app);
@@ -205,11 +216,74 @@ int main(void) {
         }
         assert(gateway_count == 1);
         size_t with_servers = set.tools.count;
+        /* Byte for byte, not just the same count: a per-server tool sneaking
+           in would change the count, but a changed description or schema
+           would only show here. */
+        ClayStr connected_json;
+        clay_str_init(&connected_json);
+        for (size_t i = 0; i < set.tools.count; i++) {
+            ClayTool *t = clay_array_get((ClayArray *)&set.tools, i);
+            ClayStr params;
+            clay_str_init(&params);
+            clay_json_stringify(t->parameters, &params);
+            clay_str_printf(&connected_json, "%s|%s|%s\n", t->name,
+                            t->description ? t->description : "", params.data);
+            clay_str_free(&params);
+        }
         clay_commands_tools_free(&set);
+        /* Bytes first: a description or schema change keeps the count, so
+           the count alone would pass a list that no longer matches. */
+        assert(strcmp(bare_tools_json.data, connected_json.data) == 0);
         assert(without_servers == with_servers);
+        clay_str_free(&connected_json);
         clay_commands_destroy(connected);
         clay_app_destroy(app);
         assert(clay_mcp_config_remove("fake") == 0);
+    }
+
+    /* /mcp remove also cuts the live connection: a removed server that the
+       model can still call is the opposite of what the message says. */
+    {
+        assert(clay_mcp_config_add("fake", "python3", args, 1) == 0);
+        ClayMcpServer *live = clay_mcp_connect("fake", "python3", server_argv);
+        assert(live);
+        ClayCommands *removing = clay_commands_create(NULL);
+        assert(removing);
+        clay_array_push_val(&removing->mcp_servers, &live);
+        removing->mcp_connect_attempted = 1;
+        assert(removing->mcp_servers.count == 1);
+
+        clay_cmd_mcp("remove fake", removing);
+        assert(removing->mcp_servers.count == 0);
+
+        /* The list no longer names it, and a call says it is unknown. */
+        ClayJson *list_args2 = clay_json_object();
+        clay_json_object_set(list_args2, "action", clay_json_string("list"));
+        ClayJson *listed2 = clay_mcp_gateway_tool(list_args2, removing);
+        clay_json_free(list_args2);
+        ClayStr listed_text;
+        clay_str_init(&listed_text);
+        clay_json_stringify(listed2, &listed_text);
+        assert(!strstr(listed_text.data, "\"server\":\"fake\""));
+        clay_str_free(&listed_text);
+        clay_json_free(listed2);
+
+        ClayJson *call_args2 = clay_json_object();
+        clay_json_object_set(call_args2, "action", clay_json_string("call"));
+        clay_json_object_set(call_args2, "server", clay_json_string("fake"));
+        clay_json_object_set(call_args2, "tool", clay_json_string("echo"));
+        ClayJson *called2 = clay_mcp_gateway_tool(call_args2, removing);
+        clay_json_free(call_args2);
+        assert(!clay_json_bool_value(clay_json_object_get(called2, "ok")));
+        clay_json_free(called2);
+
+        /* Removing a configured server that was never connected still works,
+           and does not touch the array. */
+        assert(clay_mcp_config_add("configured-only", "python3", args, 1) == 0);
+        clay_cmd_mcp("remove configured-only", removing);
+        assert(removing->mcp_servers.count == 0);
+
+        clay_commands_destroy(removing);
     }
 
     clay_array_remove(&gateway_commands.mcp_servers, 0);

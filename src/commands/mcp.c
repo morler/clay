@@ -109,7 +109,20 @@ void clay_cmd_mcp(const char *args, void *user_data) {
     if (args && strncmp(args, "remove ", 7) == 0) {
         const char *name = args + 7;
         while (*name == ' ') name++;
-        if (*name && clay_mcp_config_remove(name) == 0) clay_sayc(CLAY_GREEN, "Removed %s.", name);
+        if (!*name) {
+            clay_sayc(CLAY_RED, "Usage: /mcp remove <name>");
+            return;
+        }
+        /* Also cut the live connection: removing the config while the model
+           can still call the server is the opposite of what "remove" says. */
+        for (size_t i = 0; i < commands->mcp_servers.count; i++) {
+            ClayMcpServer *server = *(ClayMcpServer **)clay_array_get(&commands->mcp_servers, i);
+            if (strcmp(clay_mcp_server_name(server), name) != 0) continue;
+            clay_mcp_disconnect(server);
+            clay_array_remove(&commands->mcp_servers, i);
+            break;
+        }
+        if (clay_mcp_config_remove(name) == 0) clay_sayc(CLAY_GREEN, "Removed %s.", name);
         else clay_sayc(CLAY_RED, "Usage: /mcp remove <name>");
         return;
     }

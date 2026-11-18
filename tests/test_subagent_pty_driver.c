@@ -31,7 +31,6 @@ int main(void) {
     clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
     clay_array_init(&c.tasks, sizeof(ClayBackgroundTask *));
     clay_array_init(&c.plan.todos, sizeof(ClayTodoItem));
-    clay_array_init(&c.mcp_bindings, sizeof(ClayMcpToolBinding));
     clay_array_init(&c.mcp_servers, sizeof(ClayMcpServer *));
     c.mcp_connect_attempted = 1;
     c.mode = CLAY_MODE_ACT;

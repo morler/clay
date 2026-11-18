@@ -175,8 +175,8 @@
   "repo_map ranks the workspace's top-level definitions; use it to " \
   "orient in unfamiliar code before opening files one by one." \
   "\n\n" \
-  "Tools named mcp__<server>__<tool> come from MCP servers the user " \
-  "configured with /mcp. Use them like any other tool." \
+  "The mcp tool reaches the servers the user configured with /mcp: list " \
+  "their tools and arguments, then call one." \
   "\n\n" \
   "The user can put you in Plan mode with /plan to discuss an approach " \
   "before anything changes: write and edit are refused there and " \
@@ -2345,7 +2345,6 @@ ClayCommands *clay_commands_create(ClayApp *app) {
   clay_array_init(&commands->plan.todos, sizeof(ClayTodoItem));
   commands->plan.rendered = 1;
   clay_array_init(&commands->mcp_servers, sizeof(ClayMcpServer *));
-  clay_array_init(&commands->mcp_bindings, sizeof(ClayMcpToolBinding));
   clay_array_init(&commands->undo_history, sizeof(ClayUndoEntry));
   clay_array_init(&commands->tasks, sizeof(ClayBackgroundTask *));
   if (clay_sandbox_supported())
@@ -2431,12 +2430,6 @@ void clay_commands_destroy(ClayCommands *commands) {
   }
   clay_plan_clear(&commands->plan);
   clay_array_free(&commands->plan.todos);
-  for (size_t i = 0; i < commands->mcp_bindings.count; i++) {
-    ClayMcpToolBinding *binding = clay_array_get(&commands->mcp_bindings, i);
-    free(binding->tool_name);
-    free(binding->exposed_name);
-  }
-  clay_array_free(&commands->mcp_bindings);
   clay_commands_undo_destroy(commands);
   for (size_t i = 0; i < commands->mcp_servers.count; i++) {
     clay_mcp_disconnect(

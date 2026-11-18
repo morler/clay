@@ -179,7 +179,6 @@ struct ClayCommands {
   ClayPlan plan; /* the session's own checklist, session-only, not persisted */
   ClayArray
       mcp_servers; /* ClayMcpServer*, connected for the life of the session */
-  ClayArray mcp_bindings; /* ClayMcpToolBinding, one per discovered MCP tool */
   int mcp_connect_attempted;
   ClayArray undo_history; /* ClayUndoEntry, newest entry last */
   ClayUndoEntry undo_pending;

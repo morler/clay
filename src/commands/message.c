@@ -1502,15 +1502,10 @@ void clay_commands_tools_build(ClayCommands *commands, ClayPlan *plan,
              subagent_schema(), subagent_tool, commands);
   }
   clay_commands_connect_mcp_servers(commands);
-  for (size_t i = 0; i < commands->mcp_bindings.count; i++) {
-    ClayMcpToolBinding *binding = clay_array_get(&commands->mcp_bindings, i);
-    const ClayMcpTool *mcp_tool =
-        clay_mcp_find_tool(binding->server, binding->tool_name);
-    /* The binding owns this schema, so it never joins set->schemas. */
-    ClayTool tool = {binding->exposed_name, mcp_tool->description,
-                     mcp_tool->input_schema, clay_mcp_tool_call_fn, binding};
-    clay_array_push_val(&set->tools, &tool);
-  }
+  add_tool(set, "mcp",
+           "Lists the connected MCP servers and their tools, or calls one of "
+           "their tools by name.",
+           mcp_tool_schema(), clay_mcp_gateway_tool, commands);
 }
 
 void clay_commands_tools_free(ClayToolSet *set) {

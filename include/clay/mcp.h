@@ -35,10 +35,15 @@ const ClayMcpTool *clay_mcp_find_tool(const ClayMcpServer *server, const char *t
    transport failure (the process died, or sent something unparseable). */
 char *clay_mcp_call(ClayMcpServer *server, const char *tool_name, const ClayJson *arguments, int *is_error);
 
-/* Binds one server's tool to a ClayTool-shaped entry point: `exposed_name`
-   is what's registered with the provider ("mcp__<server>__<tool>", to keep
-   names unique across servers), `tool_name` is what's sent back to the
-   server on tools/call. */
+/* One tool in front of every MCP server's tools: registering each discovered
+   tool instead would make the tool list depend on which servers happened to
+   connect, and its byte cost grow with their own schemas. userdata is a
+   ClayCommands*. */
+ClayJson *clay_mcp_gateway_tool(const ClayJson *arguments, void *userdata);
+ClayJson *mcp_tool_schema(void);
+
+/* Binds one server's tool to a ClayTool-shaped entry point; `tool_name` is
+   what's sent back to the server on tools/call. */
 typedef struct {
     ClayMcpServer *server; /* borrowed */
     char *tool_name;

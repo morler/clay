@@ -1042,7 +1042,6 @@ static void stress_commands_init(ClayCommands *commands) {
     clay_array_init(&commands->providers, sizeof(ClayConnectedProvider));
     clay_array_init(&commands->tasks, sizeof(ClayBackgroundTask *));
     clay_array_init(&commands->plan.todos, sizeof(ClayTodoItem));
-    clay_array_init(&commands->mcp_bindings, sizeof(ClayMcpToolBinding));
     clay_array_init(&commands->mcp_servers, sizeof(ClayMcpServer *));
     commands->mcp_connect_attempted = 1;
     commands->mode = CLAY_MODE_ACT;
@@ -1069,7 +1068,6 @@ static void stress_commands_free(ClayCommands *commands, const char *logout_id) 
     clay_chat_destroy(commands->chat);
     clay_array_free(&commands->tasks);
     clay_array_free(&commands->plan.todos);
-    clay_array_free(&commands->mcp_bindings);
     clay_array_free(&commands->mcp_servers);
     pthread_mutex_destroy(&commands->tool_lock);
 }
@@ -1429,7 +1427,6 @@ static void test_scope_sharing_under_workers(void) {
     clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
     clay_array_init(&c.tasks, sizeof(ClayBackgroundTask *));
     clay_array_init(&c.plan.todos, sizeof(ClayTodoItem));
-    clay_array_init(&c.mcp_bindings, sizeof(ClayMcpToolBinding));
     clay_array_init(&c.mcp_servers, sizeof(ClayMcpServer *));
     c.mcp_connect_attempted = 1;
     c.mode = CLAY_MODE_ACT;
@@ -2127,7 +2124,6 @@ static void test_completion_scopes(void) {
     clay_array_init(&c.providers, sizeof(ClayConnectedProvider));
     clay_array_init(&c.tasks, sizeof(ClayBackgroundTask *));
     clay_array_init(&c.plan.todos, sizeof(ClayTodoItem));
-    clay_array_init(&c.mcp_bindings, sizeof(ClayMcpToolBinding));
     clay_array_init(&c.mcp_servers, sizeof(ClayMcpServer *));
     c.mcp_connect_attempted = 1;
     c.mode = CLAY_MODE_ACT;
@@ -2241,7 +2237,6 @@ static void test_completion_scopes(void) {
     clay_chat_destroy(c.chat);
     clay_array_free(&c.tasks);
     clay_array_free(&c.plan.todos);
-    clay_array_free(&c.mcp_bindings);
     clay_array_free(&c.mcp_servers);
     pthread_cond_destroy(&p.cond);
     pthread_mutex_destroy(&p.lock);
@@ -2289,7 +2284,6 @@ int main(void) {
     memset(&commands, 0, sizeof(commands));
     clay_array_init(&commands.tasks, sizeof(ClayBackgroundTask *));
     clay_array_init(&commands.plan.todos, sizeof(ClayTodoItem));
-    clay_array_init(&commands.mcp_bindings, sizeof(ClayMcpToolBinding));
     clay_array_init(&commands.mcp_servers, sizeof(ClayMcpServer *));
     commands.mcp_connect_attempted = 1; /* no servers to dial in a test */
     commands.mode = CLAY_MODE_ACT;
@@ -2377,7 +2371,6 @@ int main(void) {
 
     clay_array_free(&commands.tasks);
     clay_array_free(&commands.plan.todos);
-    clay_array_free(&commands.mcp_bindings);
     clay_array_free(&commands.mcp_servers);
     printf("subagent tests passed\n");
     return 0;

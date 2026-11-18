@@ -4,6 +4,13 @@
 
 ### Added
 
+- MCP servers reach the model through one fixed `mcp` tool instead of one
+  tool per discovered server tool. `action=list` returns every server's tools
+  with the argument schema each takes; `action=call` invokes one. The tool
+  list used to grow with whatever a server advertised, which meant its byte
+  cost was unbounded and the prompt prefix changed the moment a server
+  connected - both paid for on every request. A subagent sees the same single
+  tool.
 - Global instructions: `~/.clay/AGENTS.md` (or `CLAY.md` when that is the
   only one) is folded into the system prompt ahead of the project's own
   `AGENTS.md`, so a preference you set once - reply language, how you like

@@ -10,6 +10,7 @@ labels:
 relations:
     related-to:
         - 76
+        - 146
 created: "2026-11-18"
 updated: "2026-11-18"
 ---
@@ -48,3 +49,14 @@ dquickts（github.com/stencil-hq/dquickts，QuickJS fork，MIT）的价值在另
 ## 2026-11-18 可行性评估
 
 实测环境：/var/home/msc802/code/c/rt-eval/dquickts（fa5fe79），/tmp/dqjs/ 下的四个探针程序。裁剪构建命令：gcc -std=gnu11 -Os -fwrapv -D_GNU_SOURCE -DCONFIG_VERSION=\"2026-06-04\" -I. -c {quickjs,dtoa,libregexp,libunicode,cutils}.c。注意 quickjs.c 用 -std=c11 编译会因 asm volatile 报错，需 gnu11（clay 本身就是 gnu11，无冲突）。
+
+## 2026-11-18 同日复核：重跑全部探针，结论不变
+
+- TS 直跑：新增 tsprobe 探针（add(2,3)+Color.Green → 7），enum 在 TS 下也正确编译。
+- 快照跨进程恢复：probe2 输出 done=124999750000（循环求和无误差）。
+- durable host call：probe3 host 写 snap2.bin（13307 字节）→ probe3 resume → after=body=TOOL_RESULT_42。
+- 护栏：interrupt 打印 infinite loop interrupted=1 ticks=12；caps 打印 branch before=0 after=2001；JS_SetMemoryLimit 拦住分配洪水。
+- 裁剪核心能力面：新增 cap2 探针确认 require/fetch/process/console/os/std 全为 undefined（此前只有 caps 探针）。
+- 体积：libqjs-min.a 1.2MB，最小宿主 strip 后 855KB（未 strip 955KB）；clay 现为 434480 字节，strip 后 384960，gzip -9 183KB，xz -9 155KB。README 徽章的 ~90KB 走 upx --best --lzma（Makefile:524-528），本机未装 upx 故未复现该数；无论用哪种压缩器，多带 855KB 的静态 JS 引擎都会让徽章口径失效。
+- 许可：dquickts README 的 Credits and license 段写明整体 MIT，仅 Python 前端/头文件/pylib 为 PSF-2.0（本方案不取这部分）；get-vix/vix 经 gh api 确认 license=AGPL-3.0、Go、286 stars。
+- 构建：-std=c11 编译 quickjs.c 的失败点定位到 quickjs.c:78641 的 asm volatile pause 指令；上游 HEAD 仍为 fa5fe79。

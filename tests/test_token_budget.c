@@ -12,12 +12,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* A subagent pays for the main prompt, its own suffix and its tools on every
+   run, and that sum was the one cost nothing measured. */
+extern const char *clay_subagent_prompt_suffix(void);
+
 /* Every chat pays for the whole system prompt plus every tool schema on
    every request, so this is the fixed cost of talking to a provider at all.
    The ceiling is a budget, not a measurement: raise it only with the reason
    in the commit message. killy spends 12,000 characters here (system prompt
    plus its 17 tools), and this is the number #89 has to bring clay toward. */
 #define CLAY_PROMPT_AND_TOOL_BUDGET 17400
+
+/* A subagent's own ceiling, measured at 16406 B. Kept apart from the main
+   budget, so a change that only hurts subagents still fails. */
+#define CLAY_SUBAGENT_FIXED_COST_BUDGET 16800
 
 /* The base prompt plus a maximal store: memory, skills, global and project
    instructions each at their own ceiling still add up to a fixed amount,
@@ -182,6 +190,26 @@ int main(void) {
            CLAY_PROMPT_AND_TOOL_BUDGET);
     assert(prompt > 0 && tools > 0);
     assert(prompt + tools <= CLAY_PROMPT_AND_TOOL_BUDGET);
+
+    /* A subagent sends the same prompt and its own smaller tool set plus a
+       suffix, so its fixed cost gets its own ceiling: a change that only
+       hurts subagents must still fail. */
+    {
+        ClayToolSet subagent_tools;
+        clay_commands_tools_build(commands, &commands->plan, &subagent_tools, 0);
+        size_t subagent_bytes = serialized_tool_bytes(&subagent_tools, 0);
+        clay_commands_tools_free(&subagent_tools);
+        const char *suffix = clay_subagent_prompt_suffix();
+        size_t suffix_bytes = strlen(suffix);
+        printf("subagent fixed cost: prompt %zu + suffix %zu + tools %zu = "
+               "%zu B (budget %d)\n",
+               prompt, suffix_bytes, subagent_bytes,
+               prompt + suffix_bytes + subagent_bytes,
+               CLAY_SUBAGENT_FIXED_COST_BUDGET);
+        assert(suffix_bytes > 0);
+        assert(prompt + suffix_bytes + subagent_bytes <=
+               CLAY_SUBAGENT_FIXED_COST_BUDGET);
+    }
 
     /* A section that grows shows up on its own line instead of in the
        total. */

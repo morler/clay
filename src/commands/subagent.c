@@ -30,6 +30,12 @@
   "the job needs to know. No preamble, no markdown headings, just the facts "  \
   "it would otherwise have to rediscover."
 
+/* The suffix measures with the prompt; the budget test adds it to a subagent's
+   fixed cost. Rebuilt on every run, never edited at runtime. */
+const char *clay_subagent_prompt_suffix(void) {
+  return CLAY_SUBAGENT_PROMPT_SUFFIX;
+}
+
 /* Per-run budget, so a subagent folds its own old tool results instead of
    reading the parent's counters or touching the parent's history. */
 typedef struct {

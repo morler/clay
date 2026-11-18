@@ -52,3 +52,18 @@ E 子代理：#91 子代理记账与去重。
 - 估算函数复用 src/commands/scope.c 的「请求字节 ÷ 2 + 输出预留」（scope.c:343-346 注释），不要再造第三种估算。
 
 全部子项完成前本项保持 in-progress。
+
+## 2026-11-18 实测：重复调用分布（#88 的前置测量）
+
+#88 要求先证明模型真的在重复调用，再决定是否实现断路器。用 `scripts/repeat_report.py` 统计 16 个真实 chat 日志、20 个有工具调用的 turn、399 次调用：
+
+```
+397 distinct fingerprints (same turn only)
+>=2: 0 fingerprints, 0 calls skipped (0.0%)
+>=3: 0 fingerprints, 0 calls skipped (0.0%)
+>=8: 0 fingerprints, 0 calls skipped (0.0%)
+```
+
+334 次 `shell_exec` 对应 334 个不同命令。**结论：clay 当前的模型在这些会话里从不重试同一调用**，killi 的“第 3 次阻断 / 第 5、3 次警告”在这里没有可拦对象。#88、#130、#131、#132 因此关闭；脚本保留，换模型或换场景时可重跑。
+
+局限：单一用户、16 个会话、模型/provider 组合有限。

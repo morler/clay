@@ -318,3 +318,7 @@ make test
 
 - [Architecture](ARCHITECTURE.md)
 - [Code style](CODESTYLE.md)
+- `scripts/repeat_report.py` reads saved chats and reports how often one turn
+  calls the same tool with the same arguments. Before adding anything that
+  blocks repeated calls, run it: a breaker with no repeats to stop only
+  costs turns.

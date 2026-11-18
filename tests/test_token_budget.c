@@ -17,7 +17,7 @@
    The ceiling is a budget, not a measurement: raise it only with the reason
    in the commit message. killy spends 12,000 characters here (system prompt
    plus its 17 tools), and this is the number #89 has to bring clay toward. */
-#define CLAY_PROMPT_AND_TOOL_BUDGET 18000
+#define CLAY_PROMPT_AND_TOOL_BUDGET 17400
 
 /* The base prompt plus a maximal store: memory, skills, global and project
    instructions each at their own ceiling still add up to a fixed amount,
@@ -36,16 +36,22 @@
     (CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
 #define CLAY_SYSTEM_PROMPT_BUDGET (60 * 1024)
 
-static size_t serialized_tool_bytes(const ClayToolSet *set) {
+/* Each tool's own line: with the descriptions and schemas at 8.5 KB, a
+   regression has to name the tool that caused it, not move the total. */
+static size_t serialized_tool_bytes(const ClayToolSet *set, int report) {
     size_t total = 0;
     for (size_t i = 0; i < set->tools.count; i++) {
         ClayTool *tool = clay_array_get((ClayArray *)&set->tools, i);
-        total += strlen(tool->name);
-        total += strlen(tool->description ? tool->description : "");
+        size_t description = strlen(tool->description ? tool->description : "");
         ClayStr parameters;
         clay_str_init(&parameters);
         clay_json_stringify(tool->parameters, &parameters);
-        total += parameters.len;
+        size_t bytes = strlen(tool->name) + description + parameters.len;
+        if (report)
+            printf("  %-14s %5zu B (name %zu, desc %zu, params %zu)\n",
+                   tool->name, bytes, strlen(tool->name), description,
+                   parameters.len);
+        total += bytes;
         clay_str_free(&parameters);
     }
     return total;
@@ -157,7 +163,7 @@ int main(void) {
     for (int with_tools = 1; with_tools >= 0; with_tools--) {
         ClayToolSet set;
         clay_commands_tools_build(commands, &commands->plan, &set, with_tools);
-        size_t tools = serialized_tool_bytes(&set);
+        size_t tools = serialized_tool_bytes(&set, 0);
         printf("%s: %zu tools, %zu bytes of schemas\n",
                with_tools ? "main agent" : "subagent", set.tools.count, tools);
         /* A subagent gets two fewer tools, so it can only be smaller. */
@@ -168,7 +174,8 @@ int main(void) {
     ClayToolSet set;
     clay_commands_tools_build(commands, &commands->plan, &set, 1);
     size_t prompt = strlen(clay_commands_system_prompt_base());
-    size_t tools = serialized_tool_bytes(&set);
+    printf("per tool, largest first:\n");
+    size_t tools = serialized_tool_bytes(&set, 1);
     clay_commands_tools_free(&set);
     printf("system prompt: %zu bytes\n", prompt);
     printf("prompt + tools: %zu bytes (budget %d)\n", prompt + tools,

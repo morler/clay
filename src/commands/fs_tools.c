@@ -678,8 +678,8 @@ ClayJson *clay_fs_tool_write_schema(void) {
     ClayJson *path = clay_json_object();
     clay_json_object_set(path, "type", clay_json_string("string"));
     clay_json_object_set(path, "description",
-                         clay_json_string("File path, relative to the workspace root or absolute. Overwrites if it "
-                                          "already exists; parent directories are created as needed."));
+                         clay_json_string("File path, relative to the workspace root or absolute. Overwrites an "
+                                          "existing file; parent directories are created."));
     ClayJson *content = clay_json_object();
     clay_json_object_set(content, "type", clay_json_string("string"));
     clay_json_object_set(content, "description", clay_json_string("Full file content to write."));
@@ -950,8 +950,8 @@ ClayJson *clay_fs_tool_edit_schema(void) {
     clay_json_object_set(old_string, "type", clay_json_string("string"));
     clay_json_object_set(
         old_string, "description",
-        clay_json_string("Exact text to replace. Must match byte-for-byte, including whitespace. Include enough "
-                         "surrounding context to make it unique in the file unless replaceAll is set."));
+        clay_json_string("Exact text to replace, byte for byte. Include enough surrounding context to make it "
+                         "unique unless replaceAll is set."));
     ClayJson *new_string = clay_json_object();
     clay_json_object_set(new_string, "type", clay_json_string("string"));
     clay_json_object_set(new_string, "description", clay_json_string("Replacement text."));
@@ -1176,9 +1176,9 @@ ClayJson *clay_fs_tool_glob_schema(void) {
     clay_json_object_set(pattern, "type", clay_json_string("string"));
     clay_json_object_set(
         pattern, "description",
-        clay_json_string("Wildcard pattern matched against each file's path relative to `path` (e.g. \"*.c\", "
-                         "\"src/*.c\", \"*/test_*.c\"). '*' matches any run of characters including '/'; '?' "
-                         "matches one character."));
+        clay_json_string("Wildcard pattern matched against each file's path "
+                         "relative to `path`, e.g. \"*.c\" or \"src/*.c\". "
+                         "'*' matches any run including '/', '?' one char."));
     ClayJson *path = clay_json_object();
     clay_json_object_set(path, "type", clay_json_string("string"));
     clay_json_object_set(path, "description", clay_json_string("Directory to search from. Defaults to the workspace root."));

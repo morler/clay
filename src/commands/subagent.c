@@ -389,10 +389,9 @@ ClayJson *subagent_schema(void) {
   clay_json_object_set(
       prompt, "description",
       clay_json_string(
-          "Everything the subagent needs, as if briefing someone who has not "
-          "seen this conversation: what to build, which files are its own, "
-          "any contract it has to honour, and what its summary should "
-          "answer. It cannot ask you anything once it starts."));
+          "The full brief: what to build, which files are this branch's, any "
+          "contract it must honour, and what its summary should answer. It "
+          "cannot ask you anything once it starts."));
   ClayJson *task_properties = clay_json_object();
   clay_json_object_set(task_properties, "description", description);
   clay_json_object_set(task_properties, "prompt", prompt);
@@ -409,10 +408,8 @@ ClayJson *subagent_schema(void) {
   clay_json_object_set(tasks, "items", task);
   clay_json_object_set(
       tasks, "description",
-      clay_json_string("One entry per branch, up to four. They all start at "
-                       "once and this returns when the last one is done, so "
-                       "give each branch its own files: two of them editing "
-                       "the same file will fight."));
+      clay_json_string("One entry per branch, up to four. All start at once "
+                       "and this returns when the last one is done."));
 
   ClayJson *properties = clay_json_object();
   clay_json_object_set(properties, "tasks", tasks);

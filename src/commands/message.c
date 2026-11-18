@@ -490,9 +490,8 @@ static ClayJson *memory_save_schema(void) {
   clay_json_object_set(slug, "type", clay_json_string("string"));
   clay_json_object_set(
       slug, "description",
-      clay_json_string("Short id, lowercase letters/digits/hyphens (e.g. "
-                       "\"auth-compliance-decision\"). "
-                       "Reuse an existing slug to overwrite that entry."));
+      clay_json_string("Short lowercase id (e.g. \"auth-compliance\"). "
+                       "Reuse an existing one to overwrite it."));
   ClayJson *type = clay_json_object();
   clay_json_object_set(type, "type", clay_json_string("string"));
   clay_json_object_set(
@@ -503,9 +502,8 @@ static ClayJson *memory_save_schema(void) {
   clay_json_object_set(summary, "type", clay_json_string("string"));
   clay_json_object_set(
       summary, "description",
-      clay_json_string("One-line summary shown in the memory index - specific "
-                       "enough to judge relevance without "
-                       "opening the entry."));
+      clay_json_string("One line for the index, enough to judge relevance "
+                       "without opening the entry."));
   ClayJson *content = clay_json_object();
   clay_json_object_set(content, "type", clay_json_string("string"));
   clay_json_object_set(
@@ -733,8 +731,7 @@ ClayJson *ask_user_schema(void) {
   clay_json_object_set(options, "items", option);
   clay_json_object_set(
       options, "description",
-      clay_json_string("Two to four concrete answers, most likely first. Omit "
-                       "only when no option can be guessed."));
+      clay_json_string("Two to four concrete answers."));
 
   ClayJson *allow_custom = clay_json_object();
   clay_json_object_set(allow_custom, "type", clay_json_string("boolean"));
@@ -859,10 +856,7 @@ ClayJson *todowrite_schema(void) {
   clay_json_object_set(todos, "items", item_schema);
   clay_json_object_set(
       todos, "description",
-      clay_json_string("The full plan, replacing whatever was there before - "
-                       "resend every task, not just the "
-                       "one that changed. Exactly one task should be "
-                       "in_progress at a time."));
+      clay_json_string("The whole plan, resending every task each call."));
   ClayJson *properties = clay_json_object();
   clay_json_object_set(properties, "todos", todos);
   ClayJson *required = clay_json_array();
@@ -890,8 +884,7 @@ static ClayJson *shell_exec_schema(void) {
   clay_json_object_set(
       timeout, "description",
       clay_json_string("Seconds to wait before the command is killed "
-                       "(default 120, max 3600). A command that blocks until "
-                       "you stop it belongs in task_run, not here."));
+                       "(default 120, max 3600)."));
   ClayJson *properties = clay_json_object();
   clay_json_object_set(properties, "command", command);
   clay_json_object_set(properties, "args", args);
@@ -1471,10 +1464,7 @@ void clay_commands_tools_build(ClayCommands *commands, ClayPlan *plan,
            todowrite_schema(), todowrite_tool, plan);
   add_tool(set, "repo_map",
            "Lists the workspace's top-level definitions (functions, classes, "
-           "structs, ...) ranked by how "
-           "often each is referenced elsewhere. Good for orienting in an "
-           "unfamiliar codebase before "
-           "reading specific files.",
+           "structs, ...) ranked by how often they are referenced.",
            clay_fs_tool_repo_map_schema(), clay_fs_tool_repo_map, commands);
   add_tool(set, "skill",
            "Loads one skill's full instructions by name from the index in your "

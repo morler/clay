@@ -357,6 +357,10 @@ typedef struct {
   int sse_rate_limit;
   int usage_known; /* the stream reported usage; tokens are input + output */
   uint64_t usage_tokens;
+  /* Some proxies repeat the totals on the first and the last chunk of one
+     response; the last block is the bill, delivered once when it ends. */
+  int usage_seen;
+  ClayTokenUsage usage_pending;
   ClayOpenAIRetryState retry;
 } ClayStreamState;
 
@@ -376,6 +380,8 @@ static void stream_state_init(ClayStreamState *st,
   st->sse_rate_limit = 0;
   st->usage_known = 0;
   st->usage_tokens = 0;
+  st->usage_seen = 0;
+  memset(&st->usage_pending, 0, sizeof(st->usage_pending));
   st->retry = (ClayOpenAIRetryState){0};
 }
 
@@ -391,6 +397,21 @@ static void stream_state_free(ClayStreamState *st) {
   }
   clay_array_free(&st->tool_calls);
   clay_sse_destroy(st->sse);
+}
+
+/* Ends one request: the usage it reported (if any) reaches the caller exactly
+   once, so a duplicated block cannot bill the request twice. */
+static void stream_state_finish(ClayStreamState *st) {
+  if (st->usage_seen && st->callbacks) {
+    const ClayTokenUsage *usage = &st->usage_pending;
+    if (st->callbacks->on_usage)
+      st->callbacks->on_usage(usage->input_tokens, usage->output_tokens,
+                              st->callbacks->userdata);
+    if (st->callbacks->on_usage_details)
+      st->callbacks->on_usage_details(usage, st->callbacks->userdata);
+  }
+  st->usage_seen = 0;
+  stream_state_free(st);
 }
 
 static ClayToolCallAccum *tool_call_at(ClayArray *calls, size_t index) {
@@ -451,23 +472,11 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
       st->usage_known = 1;
       st->usage_tokens = (uint64_t)counted.input_tokens + (uint64_t)counted.output_tokens;
     }
-  }
-  if (clay_json_type(usage) == CLAY_JSON_OBJECT && st->callbacks &&
-      (st->callbacks->on_usage || st->callbacks->on_usage_details))
-    st->retry.callback_delivered = 1;
-  if (clay_json_type(usage) == CLAY_JSON_OBJECT && st->callbacks &&
-      st->callbacks->on_usage) {
-    ClayTokenUsage parsed;
-    clay_openai_usage_from_json(usage, &parsed);
-    st->callbacks->on_usage(parsed.input_tokens, parsed.output_tokens,
-                            st->callbacks->userdata);
-    if (st->callbacks->on_usage_details)
-      st->callbacks->on_usage_details(&parsed, st->callbacks->userdata);
-  } else if (clay_json_type(usage) == CLAY_JSON_OBJECT && st->callbacks &&
-             st->callbacks->on_usage_details) {
-    ClayTokenUsage parsed;
-    clay_openai_usage_from_json(usage, &parsed);
-    st->callbacks->on_usage_details(&parsed, st->callbacks->userdata);
+    st->usage_pending = counted;
+    st->usage_seen = 1;
+    if (st->callbacks &&
+        (st->callbacks->on_usage || st->callbacks->on_usage_details))
+      st->retry.callback_delivered = 1;
   }
 
   ClayJson *choice0 =
@@ -759,7 +768,7 @@ retry_request:;
       clay_str_free(&url);
       clay_str_free(&auth);
       clay_str_free(&body);
-      stream_state_free(&st);
+      stream_state_finish(&st);
       if (admitted == 0)
         return 1;
       if (callbacks && callbacks->on_error)
@@ -779,7 +788,7 @@ retry_request:;
 
     if (st.cancelled) {
       clay_http_response_free(&resp);
-      stream_state_free(&st);
+      stream_state_finish(&st);
       return 1;
     }
     ClayHttpResponse decision = resp;
@@ -796,13 +805,13 @@ retry_request:;
                                  clay_openai_retry_safe(&st.retry),
                                  clay_provider_retry_jitter())) {
       clay_http_response_free(&resp);
-      stream_state_free(&st);
+      stream_state_finish(&st);
       stream_state_init(&st, callbacks);
       goto retry_request;
     }
     if (st.cancelled) {
       clay_http_response_free(&resp);
-      stream_state_free(&st);
+      stream_state_finish(&st);
       return 1;
     }
     if (rc == 0 && resp.status == 401 && refresh && !refreshed &&
@@ -811,12 +820,12 @@ retry_request:;
       int refresh_result = refresh(refresh_userdata);
       if (refresh_result == 2) {
         clay_http_response_free(&resp);
-        stream_state_free(&st);
+        stream_state_finish(&st);
         return 1;
       }
       if (refresh_result == 0) {
         clay_http_response_free(&resp);
-        stream_state_free(&st);
+        stream_state_finish(&st);
         stream_state_init(&st, callbacks);
         goto retry_request;
       }
@@ -828,7 +837,7 @@ retry_request:;
       if (callbacks && callbacks->on_error)
         callbacks->on_error(resp.status, st.raw.data, callbacks->userdata);
       clay_http_response_free(&resp);
-      stream_state_free(&st);
+      stream_state_finish(&st);
       return -1;
     }
     if (st.sse_failed) {
@@ -840,7 +849,7 @@ retry_request:;
       if (callbacks && callbacks->on_error)
         callbacks->on_error(resp.status, error, callbacks->userdata);
       clay_http_response_free(&resp);
-      stream_state_free(&st);
+      stream_state_finish(&st);
       return -1;
     }
     clay_http_response_free(&resp);
@@ -848,14 +857,14 @@ retry_request:;
     if (st.tool_calls.count == 0) {
       clay_json_array_push(messages,
                            clay_openai_message("assistant", st.content.data));
-      stream_state_free(&st);
+      stream_state_finish(&st);
       return 0;
     }
 
     st.retry.tool_executed = 1;
     client->last_run_replay_safe = 0;
     handle_tool_calls(messages, tools, tool_count, &st, callbacks, 1);
-    stream_state_free(&st);
+    stream_state_finish(&st);
   }
 
   /* Rounds spent with tool calls still coming: not a failure, just an

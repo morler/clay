@@ -19,6 +19,11 @@ static const char *body;
 static int calls, legacy, detailed, refresh_first, sse_mode, tokens, tool_calls;
 static const char *event;
 static int transport_after_sse, executed, two_rounds, codex_rounds, order, refresh_fails;
+static int usage_reports;
+static ClayTokenUsage last_usage;
+static void count_usage(const ClayTokenUsage *usage, void *userdata) {
+  (void)userdata; usage_reports++; last_usage = *usage;
+}
 static ClayJson *execute_tool(const ClayJson *args, void *userdata) {
   (void)args; (void)userdata; assert(order == 1); order = 2; executed++; return clay_json_object();
 }
@@ -219,6 +224,23 @@ int main(void) {
   reset(200, "data: {\"choices\":[{\"delta\":{\"content\":\"before\"}}]}\n\n", CLAY_OPENAI_ERROR_OTHER); sse_mode=1;
   assert(clay_openai_run(client,messages,NULL,0,1,&cb)==0);
   assert(calls==1 && tokens==1 && !legacy && !detailed);
+  /* Some proxies repeat the totals on the first and the last chunk of one
+     response: one request bills once, at the last block's numbers. */
+  cb.on_usage_details = count_usage;
+  reset(200,
+        "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}],"
+        "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":7,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":40}}}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],"
+        "\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":9,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n",
+        CLAY_OPENAI_ERROR_OTHER);
+  sse_mode=1; usage_reports=0;
+  assert(clay_openai_run(client,messages,NULL,0,1,&cb)==0);
+  assert(calls==1 && usage_reports==1);
+  assert(last_usage.input_tokens==120 && last_usage.output_tokens==9);
+  assert(last_usage.cached_input_tokens_known && last_usage.cached_input_tokens==80);
+  cb.on_usage_details = NULL;
   clay_openai_destroy(client);
   ClayCodexCredentials cc = {.access_token="secret", .refresh_token="refresh-secret", .account_id="account"};
   ClayOpenAICodex *codex=clay_openai_codex_create(&cc,"model"); assert(codex);

@@ -50,6 +50,12 @@
 
 ### Fixed
 
+- One request is billed once. A proxy that repeats its token totals on the
+  first and the last chunk of one streamed response made clay log the request
+  twice, so `/usage` and `chats/<id>/requests.jsonl` counted every round
+  twice and halved the cache-hit percentage they reported. The usage a
+  response carries is now delivered once, when it ends, with the last
+  block's numbers.
 - A turn no longer stops dead in the middle of a job. The tool-call budget
   was 8 rounds - a scaffold plus a build plus a verification pass spends that
   long before it starts - and hitting it returned the same code as a network

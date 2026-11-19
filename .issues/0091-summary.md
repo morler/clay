@@ -1,7 +1,7 @@
 ---
 id: 91
 title: 子代理记账、summary 去重与独立预算
-status: open
+status: closed
 priority: medium
 labels:
     - type:task
@@ -16,7 +16,8 @@ relations:
         - 141
         - 142
 created: "2026-11-17"
-updated: "2026-11-17"
+updated: "2026-11-19"
+closed: "2026-11-19"
 ---
 
 现状（src/commands/subagent.c）：
@@ -32,3 +33,14 @@ killi 对照：subagent 继承系统提示与固定工具列表，fresh 历史�
 3. 子代理接入 #83 的预算/压缩逻辑。
 4. 超过上限时按等额份额裁剪并给完整 transcript 路径，而不是只丢弃。
 验收：双分支 subagent 测试断言响应体只含一份 summary；cached 计数正确；make test 通过。
+
+## 验收结果（Linux x86_64）
+
+在 `f08828c` 上运行 `make -j8 test`，全套通过。该版本包含 #140（`0bfb69a`）、#141（`464df08`）和 #142（`f08828c`）。
+
+- 离线响应为两个子代理分别返回 400 和 900 个缓存 token。逐请求账本和重新加载后的父会话均记录 1300。父会话用于预算的最近请求输入仍为自身的 2000 token。
+- 双分支摘要各在父代理发出的下一次请求中出现一次。
+- 子代理达到预算阈值后折叠较早的工具结果，保留最近一轮的全文。父会话历史和预算计数不变。
+- 三分支摘要正文合计超过 16 KiB 时，两份长摘要等额裁剪并保留 UTF-8 字符边界，短摘要保留全文。三个 transcript 路径均可读取，记录保留完整摘要及折叠前的工具结果。
+
+以上回归位于 `tests/test_subagent.c`，测试已纳入 `make test`。

@@ -215,7 +215,8 @@
 #define CLAY_SYSTEM_PROMPT_TTL_SECONDS 600
 
 static const ClayProviderType PROVIDER_TYPES[] = {
-    {"openai", "OpenAI", "https://api.openai.com/v1"},
+    {"openai", "OpenAI", CLAY_OPENAI_API_URL},
+    {"openai-responses", "OpenAI Responses", CLAY_OPENAI_API_URL},
     {"openai-codex", "OpenAI Codex", NULL},
     {"grok", "Grok", CLAY_GROK_API_URL},
     {"openrouter", "OpenRouter", "https://openrouter.ai/api/v1"},
@@ -281,6 +282,8 @@ static int apply_environment_credentials(const ClayProviderType *type,
   if (strcmp(type->id, "openai") == 0) {
     api_key = env_value("OPENAI_API_KEY", api_name);
     base_url = env_value("OPENAI_BASE_URL", base_name);
+  } else if (strcmp(type->id, "openai-responses") == 0) {
+    api_key = env_value("OPENAI_RESPONSES_API_KEY", api_name);
   } else if (strcmp(type->id, "openrouter") == 0) {
     api_key = env_value("OPENROUTER_API_KEY", api_name);
     base_url = env_value("OPENROUTER_BASE_URL", base_name);
@@ -367,6 +370,8 @@ static const char *environment_provider(void) {
   if (provider) return provider;
   if (env_value("OPENAI_CODEX_ACCESS_TOKEN", "CLAY_CODEX_ACCESS_TOKEN"))
     return "openai-codex";
+  if (env_value("OPENAI_RESPONSES_API_KEY", "CLAY_OPENAI_RESPONSES_API_KEY"))
+    return "openai-responses";
   if (env_value("OPENROUTER_API_KEY", "CLAY_OPENROUTER_API_KEY"))
     return "openrouter";
   if (env_value("GROQ_API_KEY", "CLAY_GROQ_API_KEY")) return "groq";
@@ -386,6 +391,8 @@ static const char *environment_model(const char *provider) {
   const char *model = env_value("CLAY_MODEL", NULL);
   if (model) return model;
   if (strcmp(provider, "openai") == 0) return getenv("OPENAI_MODEL");
+  if (strcmp(provider, "openai-responses") == 0)
+    return env_value("OPENAI_RESPONSES_MODEL", "OPENAI_MODEL");
   if (strcmp(provider, "openrouter") == 0) return getenv("OPENROUTER_MODEL");
   if (strcmp(provider, "groq") == 0) return getenv("GROQ_MODEL");
   if (strcmp(provider, "deepseek") == 0) return getenv("DEEPSEEK_MODEL");
@@ -574,6 +581,8 @@ void clay_commands_load_provider(ClayCommands *commands,
        (!clay_openai_url_is_supported(config->base_url) || !config->apikey ||
         !*config->apikey)) ||
       (is_grok_api_key && strcmp(config->base_url, CLAY_GROK_API_URL) != 0) ||
+      (strcmp(type->id, "openai-responses") == 0 &&
+       strcmp(config->base_url, CLAY_OPENAI_API_URL) != 0) ||
       (is_codex && (!config->access_token || !config->refresh_token ||
                     !config->account_id)) ||
       (is_grok_subscription &&
@@ -1738,13 +1747,16 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
   const char *effort = clay_commands_reasoning_effort(commands)->id;
   int is_openrouter = strcmp(provider->type->id, "openrouter") == 0;
   int is_codex = strcmp(provider->type->id, "openai-codex") == 0;
+  int is_responses = strcmp(provider->type->id, "openai-responses") == 0;
   int is_grok_subscription =
       strcmp(provider->type->id, "grok") == 0 && provider->grok_client != NULL;
 
-  if (is_codex) {
-    uint64_t version;
-    ClayOpenAICodex *codex =
-        clay_commands_codex_snapshot(provider, commands->selected_model, &version);
+  if (is_codex || is_responses) {
+    uint64_t version = 0;
+    ClayOpenAICodex *codex = is_responses
+        ? clay_openai_responses_create(provider->config->apikey,
+                                        commands->selected_model)
+        : clay_commands_codex_snapshot(provider, commands->selected_model, &version);
     if (!codex)
       goto done;
     clay_openai_codex_set_scope(codex, scope);
@@ -1754,14 +1766,19 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
       goto done;
     }
     CodexRefreshSave save = {provider, provider->generation, version};
-    clay_openai_codex_set_refresh_observer(codex, save_codex_refresh, &save);
-    clay_openai_codex_set_refresh_coordination(codex, begin_codex_refresh, end_codex_refresh, &save);
+    if (is_codex) {
+      clay_openai_codex_set_refresh_observer(codex, save_codex_refresh, &save);
+      clay_openai_codex_set_refresh_coordination(codex, begin_codex_refresh, end_codex_refresh, &save);
+    } else {
+      clay_openai_responses_set_output_limit(codex, clay_config_max_output_tokens(),
+                                              clay_config_context_window());
+    }
     clay_openai_codex_set_reasoning_effort(codex, effort);
     clay_openai_codex_set_prompt_cache_key(codex, cache_key);
     rc = clay_openai_codex_run(codex, messages, tool_list, tool_count,
                                max_rounds, callbacks);
     /* Save a refresh or rotated refresh token before discarding the client. */
-    if (save_codex_credentials(provider, codex, &save.version) < 0)
+    if (is_codex && save_codex_credentials(provider, codex, &save.version) < 0)
       rc = -1;
     clay_openai_codex_destroy(codex);
     goto done;
@@ -1803,9 +1820,12 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
     clay_openai_set_openrouter_max_reasoning(client);
   else
     clay_openai_set_reasoning_effort(client, effort);
-  if (strcmp(provider->type->id, "openai") == 0)
+  if (strcmp(provider->type->id, "openai") == 0) {
     clay_openai_set_prompt_cache_key(client, cache_key);
-  else if (strcmp(provider->type->id, "grok") == 0)
+    if (strcmp(provider->config->base_url, provider->type->default_base_url) == 0)
+      clay_openai_set_output_limit(client, clay_config_max_output_tokens(),
+                                   clay_config_context_window());
+  } else if (strcmp(provider->type->id, "grok") == 0)
     clay_openai_set_extra_header(client, "x-grok-conv-id", cache_key);
   rc = clay_openai_run(client, messages, tool_list, tool_count, max_rounds,
                        callbacks);

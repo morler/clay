@@ -131,6 +131,7 @@ and model selection. Provider-specific credentials are:
 | Provider | Variables |
 | --- | --- |
 | OpenAI | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`, `OPENAI_MODEL` |
+| OpenAI Responses | `OPENAI_RESPONSES_API_KEY`, `OPENAI_RESPONSES_MODEL` |
 | OpenRouter | `OPENROUTER_API_KEY`, optional `OPENROUTER_BASE_URL`, `OPENROUTER_MODEL` |
 | Groq | `GROQ_API_KEY`, optional `GROQ_BASE_URL`, `GROQ_MODEL` |
 | DeepSeek | `DEEPSEEK_API_KEY`, optional `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` |
@@ -201,16 +202,23 @@ separate.
 
 | Command | What it does |
 | --- | --- |
-| `/connect [openai\|openai-codex\|grok\|openrouter\|groq\|deepseek\|mistral\|together\|custom]` (`/login`, `/provider`, `/providers`) | Connect a provider. OpenAI Codex uses ChatGPT Plus/Pro OAuth; Groq, DeepSeek, Mistral, and Together AI use their OpenAI-compatible APIs with preset base URLs. |
+| `/connect [openai\|openai-responses\|openai-codex\|grok\|openrouter\|groq\|deepseek\|mistral\|together\|custom]` (`/login`, `/provider`, `/providers`) | Connect a provider. OpenAI Responses uses an API key, and OpenAI Codex uses ChatGPT Plus/Pro OAuth. Groq, DeepSeek, Mistral, and Together AI use their OpenAI-compatible APIs with preset base URLs. |
 | `/logout` | Choose a connected provider and remove its saved session. |
 | `/model [id]` (`/models`) | Browse models by provider, or set an id directly. |
 | `/effort` | Set the model reasoning effort when supported. Max is sent explicitly; support depends on the provider and model. |
 
-For max, OpenRouter and Codex receive reasoning.effort, and other OpenAI-compatible providers (including custom and Grok) receive reasoning_effort. Unsupported values may be rejected by the service; Clay does not downgrade them. OpenRouter maps both max and xhigh to approximately 95% of the reasoning token budget; actual behavior depends on the model. See [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+For max, OpenRouter, OpenAI Responses, and Codex receive reasoning.effort, and other OpenAI-compatible providers (including custom and Grok) receive reasoning_effort. Unsupported values may be rejected by the service; Clay does not downgrade them. OpenRouter maps both max and xhigh to approximately 95% of the reasoning token budget; actual behavior depends on the model. See [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
-To record the selected model's context window in tokens, set the optional
-`context_window` field in `~/.clay/config.json` to a positive integer, such as
-`"context_window": 128000`. Automatic compaction uses the separate
+Set `"max_output_tokens": 8192` in `~/.clay/config.json` to cap output tokens
+per request to the official OpenAI Chat Completions or Responses API. Omit
+the setting or use `0` to use the provider default. Responses requires a cap
+of at least 16 tokens. Codex OAuth and other providers use their default
+output limits.
+
+Set `"context_window": 128000` in the same file to lower the configured cap
+when the request nears the selected model's context window. Clay estimates
+input size and reserves 256 tokens, subject to the API's minimum output
+limit. Automatic compaction uses the separate
 `context_token_budget` setting in the same file. Omit it to fold old tool
 results at 128,000 input tokens, set it to `0` to disable automatic
 compaction, or set a positive integer as the threshold.

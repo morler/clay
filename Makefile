@@ -185,6 +185,7 @@ TEST_OBJ_ALL := $(WORKSPACE_FD_TEST_OBJ) $(CLI_TEST_OBJ) $(COMMAND_TEST_OBJ) $(M
 UTF8_TEST_NAMES := test_prompt_utf8 test_term_width test_wrap_utf8
 UTF8_TEST_OBJ := $(addprefix $(BUILD_DIR)/tests/,$(addsuffix .o,$(UTF8_TEST_NAMES)))
 TEST_DEP := $(BUILD_DIR)/tests/test_openai_codex_prefix.d $(BUILD_DIR)/tests/test_openai_codex_refresh.d $(BUILD_DIR)/tests/test_grok_refresh.d $(BUILD_DIR)/tests/workspace_fd_test_impl.d $(TEST_OBJ_ALL:.o=.d) $(UTF8_TEST_OBJ:.o=.d) $(BUILD_DIR)/tests/test_prompt_pty_driver.d $(BUILD_DIR)/tests/test_subagent_pty_driver.d $(BUILD_DIR)/tests/test_http.d $(BUILD_DIR)/tests/test_retry_e2e.d $(BUILD_DIR)/tests/test_provider_errors.d $(BUILD_DIR)/tests/test_reasoning.d $(BUILD_DIR)/tests/test_reasoning_codex.d
+TEST_DEP += $(BUILD_DIR)/tests/test_output_limit.d
 
 # Windows cross-build via mingw-w64. With CURL_LINK=dynamic, clay.exe needs
 # libcurl-4.dll and its own dependency DLLs alongside it.
@@ -206,7 +207,7 @@ UNIT_TEST_TARGETS := $(BIN_DIR)/test_openai_codex_prefix $(BIN_DIR)/test_openai_
 	$(TODOWRITE_TEST_TARGET) $(ASK_USER_TEST_TARGET) $(TASKS_TEST_TARGET) $(MODES_TEST_TARGET) $(SUBAGENT_TEST_TARGET) $(PROCESS_TEST_TARGET) $(MCP_TEST_TARGET) \
 	$(REPO_MAP_TEST_TARGET) $(ENV_BLOCK_TEST_TARGET) $(COMPACT_TEST_TARGET) \
 	$(CODEX_TEST_TARGET) $(GROK_TEST_TARGET) $(UNDO_TEST_TARGET) $(STORAGE_TEST_TARGET) \
-	$(SKILL_TEST_TARGET) $(REQUEST_LOG_TEST_TARGET) $(USAGE_TEST_TARGET) $(TOKEN_BUDGET_TEST_TARGET) $(TOKEN_BENCH_TARGET) $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
+	$(SKILL_TEST_TARGET) $(REQUEST_LOG_TEST_TARGET) $(USAGE_TEST_TARGET) $(TOKEN_BUDGET_TEST_TARGET) $(TOKEN_BENCH_TARGET) $(BIN_DIR)/test_output_limit $(addprefix $(BIN_DIR)/,$(UTF8_TEST_NAMES))
 
 .PHONY: test-fs-matrix test-tsan test-pty test-workspace-fd test-fs-fallback all build release build-win build_win test test-openai test-openai-codex test-grok test-cli test-command test-message test-chat test-uuid test-memory test-sandbox test-fs-tools test-checkpoint test-permissions test-context-compact test-project-instructions test-todowrite test-ask-user test-tasks test-modes test-subagent test-process test-mcp test-repo-map test-environment-block test-compact test-undo test-storage test-skill test-request-log test-usage test-token-budget test-token-bench test-tokens completions man-pages run compress compress-release compress-win clean debug
 
@@ -228,6 +229,9 @@ $(TARGET): $(OBJ) | $(BIN_DIR)
 
 test: $(UNIT_TEST_TARGETS)
 	@set -e; for test_binary in $^; do ./$$test_binary; done
+
+$(BIN_DIR)/test_output_limit: $(LIB_OBJ) $(BUILD_DIR)/tests/test_output_limit.o | $(BIN_DIR)
+	$(CC) $^ -o $@ $(LDFLAGS) -Wl,--wrap=clay_http_request
 
 $(BIN_DIR)/test_retry_e2e: $(LIB_OBJ) $(BUILD_DIR)/tests/test_retry_e2e.o | $(BIN_DIR)
 	$(CC) $^ -o $@ $(LDFLAGS) -Wl,--wrap=clay_provider_retry_now_ms -Wl,--wrap=clay_provider_retry_sleep_ms -Wl,--wrap=clay_provider_retry_jitter

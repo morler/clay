@@ -223,17 +223,24 @@ int clay_config_history_preview_count(void) {
   return count >= 0 ? count : 4;
 }
 
-long clay_config_context_window(void) {
+static long positive_token_setting(const char *key) {
   ClayJson *root = load_selection_root();
-  double window =
-      clay_json_number_value(clay_json_object_get(root, "context_window"));
+  double value = clay_json_number_value(clay_json_object_get(root, key));
   clay_json_free(root);
-  if (window >= 1 && window < (double)LONG_MAX + 1.0) {
-    long tokens = (long)window;
-    if ((double)tokens == window)
+  if (value >= 1 && value < (double)LONG_MAX + 1.0) {
+    long tokens = (long)value;
+    if ((double)tokens == value)
       return tokens;
   }
   return 0;
+}
+
+long clay_config_context_window(void) {
+  return positive_token_setting("context_window");
+}
+
+long clay_config_max_output_tokens(void) {
+  return positive_token_setting("max_output_tokens");
 }
 
 #define CLAY_MAX_CONTEXT_TOKEN_BUDGET 1073741824L

@@ -1,6 +1,7 @@
 #include "scope.h"
-/* OpenAI Codex uses the ChatGPT subscription backend, not api.openai.com.
-   Its undocumented compatibility details deliberately live in this file. */
+#include "output_limit.h"
+/* The public Responses API and the ChatGPT Codex backend share a stream
+   format. Keep the subscription backend's requirements local to this file. */
 #include "clay/providers/openai_codex.h"
 
 #include "clay/encoding.h"
@@ -39,6 +40,9 @@
 struct ClayOpenAICodex {
   ClayScope *scope; /* borrowed from the owning session */
   ClayCodexCredentials credentials;
+  char *api_key;
+  long output_limit;
+  long context_window;
   char *model;
   char *reasoning_effort;
   char *prompt_cache_key;
@@ -76,6 +80,7 @@ typedef struct {
   int cancelled;
   int malformed;
   int failed_event;
+  int incomplete;
   char *sse_error;
   int sse_rate_limit;
   ClayOpenAIRetryState retry;
@@ -392,10 +397,31 @@ ClayOpenAICodex *clay_openai_codex_create(const ClayCodexCredentials *c,
   }
   return client;
 }
+ClayOpenAICodex *clay_openai_responses_create(const char *api_key,
+                                              const char *model) {
+  if (!api_key || !*api_key)
+    return NULL;
+  ClayOpenAICodex *client = calloc(1, sizeof(*client));
+  if (!client)
+    return NULL;
+  client->api_key = strdup(api_key);
+  client->model = strdup(model ? model : "");
+  if (!client->api_key || !client->model) {
+    clay_openai_codex_destroy(client);
+    return NULL;
+  }
+  return client;
+}
+void clay_openai_responses_set_output_limit(ClayOpenAICodex *client,
+                                            long limit, long window) {
+  client->output_limit = limit;
+  client->context_window = window;
+}
 void clay_openai_codex_destroy(ClayOpenAICodex *client) {
   if (!client)
     return;
   clay_openai_codex_credentials_free(&client->credentials);
+  free(client->api_key);
   free(client->model);
   free(client->reasoning_effort);
   free(client->prompt_cache_key);
@@ -467,7 +493,9 @@ static int append_limited(ClayStr *out, const char *text, size_t n,
   return 0;
 }
 static const char *string_at(ClayJson *a, const char *name) {
-  return clay_json_string_value(clay_json_object_get(a, name));
+  ClayJson *value = clay_json_object_get(a, name);
+  return clay_json_type(value) == CLAY_JSON_STRING
+      ? clay_json_string_value(value) : NULL;
 }
 static CodexToolCall *call_for(CodexStream *s, const char *id) {
   if (!id || !*id)
@@ -489,16 +517,15 @@ static CodexToolCall *call_for(CodexStream *s, const char *id) {
   return clay_array_get(&s->calls, s->calls.count - 1);
 }
 static void process_item(CodexStream *s, ClayJson *item) {
-  if (clay_json_type(item) != CLAY_JSON_OBJECT ||
-      strcmp(string_at(item, "type") ? string_at(item, "type") : "",
-             "function_call") != 0)
+  const char *type = string_at(item, "type");
+  if (!type || strcmp(type, "function_call") != 0)
     return;
   const char *call_id = string_at(item, "call_id"),
              *item_id = string_at(item, "id");
-  CodexToolCall *call = call_for(s, item_id ? item_id : call_id);
+  CodexToolCall *call = call_for(s, item_id && *item_id ? item_id : call_id);
   if (!call)
     return;
-  if (call_id && strcmp(call->id.data, call_id) != 0) {
+  if (call_id && *call_id && strcmp(call->id.data, call_id) != 0) {
     clay_str_clear(&call->id);
     clay_str_push(&call->id, call_id);
   }
@@ -506,12 +533,18 @@ static void process_item(CodexStream *s, ClayJson *item) {
     clay_str_push(&call->item_id, item_id);
   const char *name = string_at(item, "name"),
              *args = string_at(item, "arguments");
-  if (name &&
-      append_limited(&call->name, name, strlen(name), CODEX_FIELD_LIMIT))
-    s->malformed = 1;
-  if (args &&
-      append_limited(&call->arguments, args, strlen(args), CODEX_FIELD_LIMIT))
-    s->malformed = 1;
+  /* Item events contain snapshots, including arguments already streamed
+     by delta events. Keep the final snapshot instead of appending it. */
+  if (name && *name) {
+    clay_str_clear(&call->name);
+    if (append_limited(&call->name, name, strlen(name), CODEX_FIELD_LIMIT))
+      s->malformed = 1;
+  }
+  if (args && *args) {
+    clay_str_clear(&call->arguments);
+    if (append_limited(&call->arguments, args, strlen(args), CODEX_FIELD_LIMIT))
+      s->malformed = 1;
+  }
 }
 static void codex_sse_json(const char *text, void *userdata) {
   CodexStream *s = userdata;
@@ -563,7 +596,7 @@ static void codex_sse_json(const char *text, void *userdata) {
     process_item(s, clay_json_object_get(root, "item"));
   } else if (strcmp(type, "response.function_call_arguments.delta") == 0) {
     const char *id = string_at(root, "call_id");
-    if (!id)
+    if (!id || !*id)
       id = string_at(root, "item_id");
     CodexToolCall *call = call_for(s, id);
     const char *delta = string_at(root, "delta");
@@ -572,8 +605,16 @@ static void codex_sse_json(const char *text, void *userdata) {
       s->malformed = 1;
   } else if (strcmp(type, "response.output_item.done") == 0) {
     process_item(s, clay_json_object_get(root, "item"));
-  } else if (strcmp(type, "response.completed") == 0) {
+  } else if (strcmp(type, "response.completed") == 0 ||
+             strcmp(type, "response.incomplete") == 0) {
     ClayJson *response = clay_json_object_get(root, "response");
+    s->incomplete = strcmp(type, "response.incomplete") == 0;
+    if (s->incomplete) {
+      const char *reason =
+          string_at(clay_json_object_get(response, "incomplete_details"), "reason");
+      if (!reason || strcmp(reason, "max_output_tokens") != 0)
+        s->failed_event = 1;
+    }
     ClayJson *usage = clay_json_object_get(response, "usage");
     if (clay_json_type(usage) == CLAY_JSON_OBJECT) {
       ClayTokenUsage counted;
@@ -641,13 +682,31 @@ static int stream_abort(void *userdata) {
   return s->cancelled;
 }
 
-/* Index 0 is the frozen system prompt and belongs in `instructions`, where
-   every request starts with the same bytes. System blocks appended later
-   (the environment, the notes) are conversation content: folding them into
-   `instructions` made one changed block rewrite the request's start and the
-   provider's prefix cache went with it. */
+static ClayJson *responses_message(const char *role, const char *text,
+                                   int public_api) {
+  ClayJson *item = clay_json_object();
+  clay_json_object_set(item, "type", clay_json_string("message"));
+  clay_json_object_set(item, "role", clay_json_string(role));
+  if (public_api && strcmp(role, "assistant") == 0) {
+    /* The public API accepts a string as previous assistant content.
+       Replaying an output_text item would require its server-generated ID. */
+    clay_json_object_set(item, "content", clay_json_string(text));
+  } else {
+    ClayJson *parts = clay_json_array(), *part = clay_json_object();
+    clay_json_object_set(part, "type",
+                         clay_json_string(strcmp(role, "assistant") == 0
+                                              ? "output_text" : "input_text"));
+    clay_json_object_set(part, "text", clay_json_string(text));
+    clay_json_array_push(parts, part);
+    clay_json_object_set(item, "content", parts);
+  }
+  return item;
+}
+
+/* The frozen system prompt goes in instructions. Keep later system blocks
+   in input to preserve the cached prefix when the environment changes. */
 static ClayJson *responses_input(const ClayJson *messages,
-                                 ClayStr *instructions) {
+                                 ClayStr *instructions, int public_api) {
   ClayJson *input = clay_json_array();
   for (size_t i = 0; i < clay_json_array_count(messages); i++) {
     ClayJson *m = clay_json_array_get(messages, i);
@@ -674,17 +733,8 @@ static ClayJson *responses_input(const ClayJson *messages,
     ClayJson *calls = clay_json_object_get(m, "tool_calls");
     if (strcmp(role, "assistant") == 0 &&
         clay_json_type(calls) == CLAY_JSON_ARRAY) {
-      if (content && *content) {
-        ClayJson *item = clay_json_object(), *parts = clay_json_array(),
-                 *part = clay_json_object();
-        clay_json_object_set(part, "type", clay_json_string("output_text"));
-        clay_json_object_set(part, "text", clay_json_string(content));
-        clay_json_array_push(parts, part);
-        clay_json_object_set(item, "type", clay_json_string("message"));
-        clay_json_object_set(item, "role", clay_json_string("assistant"));
-        clay_json_object_set(item, "content", parts);
-        clay_json_array_push(input, item);
-      }
+      if (content && *content)
+        clay_json_array_push(input, responses_message(role, content, public_api));
       for (size_t j = 0; j < clay_json_array_count(calls); j++) {
         ClayJson *call = clay_json_array_get(calls, j),
                  *fn = clay_json_object_get(call, "function"),
@@ -701,21 +751,8 @@ static ClayJson *responses_input(const ClayJson *messages,
       }
       continue;
     }
-    ClayJson *item = clay_json_object(), *parts = clay_json_array(),
-             *part = clay_json_object();
-    /* Responses input represents prior assistant text as output_text. Sending
-       it as input_text works for the first turn but makes later turns 400. */
-    clay_json_object_set(part, "type",
-                         clay_json_string(strcmp(role, "assistant") == 0
-                                              ? "output_text"
-                                              : "input_text"));
-    clay_json_object_set(part, "text",
-                         clay_json_string(content ? content : ""));
-    clay_json_array_push(parts, part);
-    clay_json_object_set(item, "type", clay_json_string("message"));
-    clay_json_object_set(item, "role", clay_json_string(role));
-    clay_json_object_set(item, "content", parts);
-    clay_json_array_push(input, item);
+    clay_json_array_push(input, responses_message(role, content ? content : "",
+                                                  public_api));
   }
   return input;
 }
@@ -724,7 +761,8 @@ static ClayStr request_body(ClayOpenAICodex *client, const ClayJson *messages,
   ClayJson *root = clay_json_object();
   ClayStr instructions;
   clay_str_init(&instructions);
-  ClayJson *input = responses_input(messages, &instructions);
+  ClayJson *input =
+      responses_input(messages, &instructions, client->api_key != NULL);
   clay_json_object_set(root, "model", clay_json_string(client->model));
   if (instructions.len)
     clay_json_object_set(root, "instructions",
@@ -746,6 +784,8 @@ static ClayStr request_body(ClayOpenAICodex *client, const ClayJson *messages,
     for (size_t i = 0; i < count; i++) {
       ClayJson *tool = clay_json_object();
       clay_json_object_set(tool, "type", clay_json_string("function"));
+      if (client->api_key)
+        clay_json_object_set(tool, "strict", clay_json_bool(0));
       clay_json_object_set(tool, "name", clay_json_string(tools[i].name));
       clay_json_object_set(
           tool, "description",
@@ -758,6 +798,9 @@ static ClayStr request_body(ClayOpenAICodex *client, const ClayJson *messages,
     }
     clay_json_object_set(root, "tools", out);
   }
+  if (client->api_key)
+    clay_provider_apply_output_limit(root, "max_output_tokens",
+                                     client->output_limit, client->context_window, 16);
   ClayStr body;
   clay_str_init(&body);
   clay_json_stringify(root, &body);
@@ -830,7 +873,7 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
   if (!client) return -1;
   client->refresh_should_abort = callbacks ? callbacks->should_abort : NULL;
   client->refresh_abort_userdata = callbacks ? callbacks->userdata : NULL;
-  if (ensure_token(client) != 0)
+  if (!client->api_key && ensure_token(client) != 0)
     return client->refresh_cancelled ? 1 : -1;
   for (int round = 0; round < max_rounds; round++) {
     int auth_retried = 0;
@@ -845,18 +888,20 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       callbacks->before_request(messages, callbacks->userdata);
     ClayStr body = request_body(client, messages, tools, tool_count), auth;
     clay_str_init(&auth);
-    clay_str_printf(&auth, "Bearer %s", client->credentials.access_token);
+    clay_str_printf(&auth, "Bearer %s", client->api_key ? client->api_key
+                                                      : client->credentials.access_token);
     ClayHttpHeader headers[] = {
         {"Authorization", auth.data},
-        {"ChatGPT-Account-ID", client->credentials.account_id},
         {"Content-Type", "application/json"},
         {"Accept", "text/event-stream"},
+        {"ChatGPT-Account-ID", client->credentials.account_id},
         {"originator", CODEX_ORIGINATOR}};
     ClayHttpRequest req = {0};
     req.method = "POST";
-    req.url = CODEX_BACKEND_URL "/responses";
+    req.url = client->api_key ? CLAY_OPENAI_API_URL "/responses"
+                              : CODEX_BACKEND_URL "/responses";
     req.headers = headers;
-    req.header_count = 5;
+    req.header_count = client->api_key ? 3 : 5;
     req.body = body.data;
     req.body_len = body.len;
     req.on_chunk = stream_chunk;
@@ -893,7 +938,8 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       stream_free(&stream);
       return 1;
     }
-    if ((response.status == 401 || response.status == 403) && !auth_retried &&
+    if (!client->api_key && (response.status == 401 || response.status == 403) &&
+        !auth_retried &&
         clay_openai_retry_safe(&stream.retry) &&
         !client->refresh_failed && refresh(client) == 0) {
       auth_retried = 1;
@@ -946,7 +992,7 @@ int clay_openai_codex_run(ClayOpenAICodex *client, ClayJson *messages,
       return -1;
     }
     clay_http_response_free(&response);
-    if (!stream.calls.count) {
+    if (stream.incomplete || !stream.calls.count) {
       ClayJson *reply = clay_json_object();
       clay_json_object_set(reply, "role", clay_json_string("assistant"));
       clay_json_object_set(reply, "content",

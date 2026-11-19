@@ -57,6 +57,9 @@ int clay_config_history_preview_count(void);
    Returns 0 if missing or invalid. Separate from the compaction budget. */
 long clay_config_context_window(void);
 
+/* Optional request output cap in tokens. Returns 0 if unset or invalid. */
+long clay_config_max_output_tokens(void);
+
 /* Configured automatic compaction threshold in tokens. Returns -1 for an
    unset or invalid value, 0 to disable, or a positive threshold. */
 long clay_config_context_token_budget(void);

@@ -7,6 +7,8 @@
 
 #include <stddef.h>
 
+#define CLAY_OPENAI_API_URL "https://api.openai.com/v1"
+
 typedef struct ClayOpenAI ClayOpenAI;
 
 /* Extra headers are for small OpenAI-compatible proxy variations. Their
@@ -30,6 +32,7 @@ int clay_openai_set_api_key(ClayOpenAI *client, const char *api_key);
 /* Enables the provider's optional prompt-cache key. Generic OpenAI-compatible
    endpoints leave this unset unless their adapter explicitly supports it. */
 void clay_openai_set_prompt_cache_key(ClayOpenAI *client, const char *key);
+void clay_openai_set_output_limit(ClayOpenAI *client, long limit, long window);
 /* Adds or replaces a provider-specific request header. */
 int clay_openai_set_extra_header(ClayOpenAI *client, const char *name,
                                  const char *value);

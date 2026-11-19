@@ -31,6 +31,11 @@ void clay_openai_codex_credentials_free(ClayCodexCredentials *credentials);
 ClayOpenAICodex *
 clay_openai_codex_create(const ClayCodexCredentials *credentials,
                          const char *model);
+/* Public OpenAI Responses API with an API key. */
+ClayOpenAICodex *clay_openai_responses_create(const char *api_key,
+                                              const char *model);
+void clay_openai_responses_set_output_limit(ClayOpenAICodex *client,
+                                            long limit, long window);
 void clay_openai_codex_destroy(ClayOpenAICodex *client);
 /* Called synchronously after a successful token rotation. */
 void clay_openai_codex_set_refresh_observer(ClayOpenAICodex *client,

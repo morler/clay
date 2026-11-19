@@ -1,4 +1,5 @@
 #include "scope.h"
+#include "output_limit.h"
 #include "clay/providers/openai.h"
 
 #include "clay/array.h"
@@ -29,6 +30,8 @@ struct ClayOpenAI {
   char *reasoning_effort;
   int openrouter_max_reasoning;
   char *prompt_cache_key;
+  long output_limit;
+  long context_window;
   ClayOpenAIHeader extra_headers[CLAY_OPENAI_EXTRA_HEADERS_LIMIT];
   size_t extra_header_count;
   long last_status;
@@ -352,6 +355,7 @@ typedef struct {
   const ClayOpenAICallbacks *callbacks;
   int cancelled;
   int limit_exceeded;
+  int output_limited;
   char *sse_error;
   int sse_failed;
   int sse_rate_limit;
@@ -375,6 +379,7 @@ static void stream_state_init(ClayStreamState *st,
   st->callbacks = callbacks;
   st->cancelled = 0;
   st->limit_exceeded = 0;
+  st->output_limited = 0;
   st->sse_error = NULL;
   st->sse_failed = 0;
   st->sse_rate_limit = 0;
@@ -482,6 +487,9 @@ static int process_sse_data(const char *json_text, ClayStreamState *st) {
   ClayJson *choice0 =
       clay_json_array_get(clay_json_object_get(root, "choices"), 0);
   ClayJson *delta = clay_json_object_get(choice0, "delta");
+  if (strcmp(clay_json_string_value(clay_json_object_get(choice0, "finish_reason")),
+             "length") == 0)
+    st->output_limited = 1;
 
   {
     const char *reasoning = NULL;
@@ -588,6 +596,32 @@ static int should_abort_stream(void *userdata) {
   return st->cancelled;
 }
 
+void clay_openai_set_output_limit(ClayOpenAI *client, long limit, long window) {
+  client->output_limit = limit;
+  client->context_window = window;
+}
+
+void clay_provider_apply_output_limit(ClayJson *request, const char *field,
+                                      long limit, long window, long minimum) {
+  if (limit < minimum)
+    return;
+  if (window > 0) {
+    ClayStr input;
+    clay_str_init(&input);
+    clay_json_stringify(request, &input);
+    /* Match Clay's estimate for history. Include instructions and tool
+       schemas, and leave 256 tokens for framing and estimation error. */
+    size_t estimated = input.len / 2 + input.len % 2;
+    clay_str_free(&input);
+    long available = window - 256;
+    if (available <= minimum || estimated >= (uintmax_t)(available - minimum))
+      limit = minimum;
+    else if (limit > available - (long)estimated)
+      limit = available - (long)estimated;
+  }
+  clay_json_object_set(request, field, clay_json_number((double)limit));
+}
+
 static ClayStr build_request_body(ClayOpenAI *client, const ClayJson *messages,
                                   const ClayTool *tools, size_t tool_count) {
   ClayJson *root = clay_json_object();
@@ -631,6 +665,8 @@ static ClayStr build_request_body(ClayOpenAI *client, const ClayJson *messages,
     clay_json_object_set(root, "tools", tools_json);
   }
 
+  clay_provider_apply_output_limit(root, "max_completion_tokens",
+                                  client->output_limit, client->context_window, 1);
   ClayStr body;
   clay_str_init(&body);
   clay_json_stringify(root, &body);
@@ -854,7 +890,8 @@ retry_request:;
     }
     clay_http_response_free(&resp);
 
-    if (st.tool_calls.count == 0) {
+    /* A capped response can stop partway through a tool call. */
+    if (st.output_limited || st.tool_calls.count == 0) {
       clay_json_array_push(messages,
                            clay_openai_message("assistant", st.content.data));
       stream_state_finish(&st);

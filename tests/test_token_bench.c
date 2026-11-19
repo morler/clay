@@ -1,12 +1,15 @@
 #include "../src/commands/context.h"
 
 #include "clay/json.h"
+#include "clay/mcp.h"
+#include "clay/storage.h"
 #include "clay/str.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Offline baseline for #78: how many bytes a realistic conversation sends,
    and what the request would be estimated to cost at clay's own yardstick
@@ -19,22 +22,33 @@
 
 static size_t bytes_at_least(size_t tokens) { return tokens * 2; }
 
-static void report(const char *label, const ClayJson *messages,
-                   const ClayToolSet *set) {
+typedef struct {
+    size_t total;
+    size_t mcp;
+} ToolBytes;
+
+static ToolBytes measure_tools(const ClayToolSet *set) {
+    ToolBytes bytes = {0};
+    for (size_t i = 0; i < set->tools.count; i++) {
+        const ClayTool *tool = clay_array_get((ClayArray *)&set->tools, i);
+        ClayStr parameters;
+        clay_str_init(&parameters);
+        clay_json_stringify(tool->parameters, &parameters);
+        size_t size = strlen(tool->name) +
+                      strlen(tool->description ? tool->description : "") +
+                      parameters.len;
+        bytes.total += size;
+        if (strcmp(tool->name, "mcp") == 0) bytes.mcp += size;
+        clay_str_free(&parameters);
+    }
+    return bytes;
+}
+
+static void report(const char *label, const ClayJson *messages, size_t tools) {
     ClayStr serialized;
     clay_str_init(&serialized);
     clay_json_stringify(messages, &serialized);
     size_t payload = serialized.len;
-    size_t tools = 0;
-    for (size_t i = 0; i < set->tools.count; i++) {
-        ClayTool *tool = clay_array_get((ClayArray *)&set->tools, i);
-        ClayStr parameters;
-        clay_str_init(&parameters);
-        clay_json_stringify(tool->parameters, &parameters);
-        tools += strlen(tool->name) + strlen(tool->description ? tool->description : "") +
-                 parameters.len;
-        clay_str_free(&parameters);
-    }
     size_t total = payload + tools;
     size_t estimated = total / 2 + OUTPUT_RESERVE_TOKENS;
     printf("%-24s messages %7zu B  tools %7zu B  total %7zu B  ~%zu tokens\n",
@@ -42,6 +56,37 @@ static void report(const char *label, const ClayJson *messages,
     assert(payload > 0 && tools > 0);
     assert(bytes_at_least(estimated) >= total);
     clay_str_free(&serialized);
+}
+
+static void report_mcp_fixtures(ClayApp *app, ToolBytes baseline) {
+    const char *names[] = {"fake1", "fake2", "fake3"};
+    const size_t counts[] = {0, 1, 3};
+    char *args[] = {"tests/fixtures/fake_mcp_server.py"};
+    size_t configured = 0;
+    assert(baseline.mcp > 0);
+
+    for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+        size_t count = counts[i];
+        for (; configured < count; configured++) {
+            assert(clay_mcp_config_add(names[configured], "python3", args, 1) ==
+                   0);
+        }
+        ClayCommands *commands = clay_commands_create(app);
+        assert(commands);
+        ClayToolSet set;
+        clay_commands_tools_build(commands, &commands->plan, &set, 1);
+        assert(commands->mcp_servers.count == count);
+        for (size_t j = 0; j < count; j++) {
+            ClayMcpServer **server = clay_array_get(&commands->mcp_servers, j);
+            assert(clay_mcp_tool_count(*server) == 2);
+        }
+        ToolBytes bytes = measure_tools(&set);
+        printf("MCP servers: %zu  MCP tools: %zu B  all tools: %zu B\n",
+               count, bytes.mcp, bytes.total);
+        assert(bytes.mcp == baseline.mcp && bytes.total == baseline.total);
+        clay_commands_tools_free(&set);
+        clay_commands_destroy(commands);
+    }
 }
 
 /* The same three shapes every session has: a system prompt, a user turn,
@@ -80,30 +125,49 @@ static ClayJson *fixture_conversation(const char *system_prompt) {
 }
 
 int main(void) {
+    /* Keep fixture configuration separate from the user's MCP servers. */
+    char home[] = "/tmp/clay_token_bench_XXXXXX";
+    assert(mkdtemp(home));
+    assert(setenv("HOME", home, 1) == 0);
+
     ClayApp *app = clay_app_create();
     ClayCommands *commands = clay_commands_create(app);
     assert(commands);
 
     ClayToolSet set;
     clay_commands_tools_build(commands, &commands->plan, &set, 1);
+    ToolBytes baseline = measure_tools(&set);
     printf("tools: %zu\n", set.tools.count);
 
     /* A fresh chat: only the system prompt goes out. */
     ClayJson *fresh = clay_json_array();
     clay_json_array_push(fresh, clay_openai_message(
         "system", clay_commands_system_prompt_base()));
-    report("fresh chat", fresh, &set);
+    report("fresh chat", fresh, baseline.total);
     clay_json_free(fresh);
 
     /* A real turn: prompt + user + one tool round trip. */
     ClayJson *turn = fixture_conversation(clay_commands_system_prompt_base());
-    report("one tool round trip", turn, &set);
+    report("one tool round trip", turn, baseline.total);
     clay_json_free(turn);
 
     /* A provider that never reports usage would be charged the estimate, so
        the number above is the ceiling, not the bill. */
     clay_commands_tools_free(&set);
     clay_commands_destroy(commands);
+
+    report_mcp_fixtures(app, baseline);
     clay_app_destroy(app);
+
+    const char *files[] = {"config.json", "system_prompt.json", "mcp_servers.json"};
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        char *path = clay_storage_path(files[i]);
+        remove(path);
+        free(path);
+    }
+    char *root = clay_storage_root();
+    assert(rmdir(root) == 0);
+    free(root);
+    assert(rmdir(home) == 0);
     return 0;
 }

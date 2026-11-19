@@ -376,7 +376,7 @@ test-token-budget: $(TOKEN_BUDGET_TEST_TARGET)
 	@./$<
 
 # The fixed cost of every request plus one realistic turn, offline.
-test-tokens: test-token-budget
+test-tokens: test-token-budget $(TOKEN_BENCH_TARGET)
 	@./$(TOKEN_BENCH_TARGET)
 
 $(TOKEN_BUDGET_TEST_TARGET): $(LIB_OBJ) $(TOKEN_BUDGET_TEST_OBJ) | $(BIN_DIR)

@@ -137,16 +137,11 @@ struct ClayCommands {
   ClayJson *conversation;
   char *system_prompt; /* text currently at conversation[0]; frozen per-chat
                           once one exists */
-  long input_tokens; /* every round of the turn so far, summed */
-  long output_tokens;
-  long cached_input_tokens;
-  int cached_input_tokens_known;
+  ClayTokenUsage subagent_usage; /* all batches in the active turn */
   long total_input_tokens;
   long total_output_tokens;
   long messages_sent;
-  /* What the next request costs: the last request's prompt, and the message
-     index that prompt already billed. Rounds accumulate into input_tokens,
-     so a turn with three tool rounds reads three times the cost of one. */
+  /* The last main request's prompt and the messages already counted in it. */
   long last_prompt_tokens;
   size_t accounted_messages;
   ClayChat *chat;
@@ -212,8 +207,9 @@ int clay_commands_select_model(ClayCommands *commands, const char *provider,
 void clay_commands_update_selected_below(ClayCommands *commands);
 /* Folds a nested run's usage (a subagent, say) into the session totals so
    the status line and the chat journal stay honest. */
-void clay_commands_add_usage(ClayCommands *commands, long input_tokens,
-                             long output_tokens);
+void clay_token_usage_add(ClayTokenUsage *total, const ClayTokenUsage *usage);
+void clay_commands_add_subagent_usage(ClayCommands *commands,
+                                      const ClayTokenUsage *usage);
 /* Appends one billed provider request to chats/<id>/requests.jsonl under
    `kind` ("main", "compact", "subagent"). A failed append warns and never
    fails the turn: the log is diagnostics, not the conversation. */

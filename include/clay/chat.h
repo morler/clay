@@ -21,6 +21,7 @@ typedef struct {
     int cached_input_tokens_known;
     long total_input_tokens;
     long total_output_tokens;
+    long last_prompt_tokens; /* size of the last main request */
 } ClayChatUsage;
 
 /* One provider request as it was billed, appended to

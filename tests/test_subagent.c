@@ -191,6 +191,29 @@ int __real_clay_http_request(const ClayHttpRequest *, ClayHttpResponse *);
 int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp) {
     if (!review_mock) return __real_clay_http_request(req, resp);
     memset(resp, 0, sizeof(*resp));
+    if (review_mock == 22) {
+        const char *event =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"offline summary\"}}]}\n\n";
+        const char *usage;
+        if (strstr(req->body, "\"content\":\"plain follow-up\"")) {
+            usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3000,\"completion_tokens\":30,\"cached_tokens\":0}}\n\n";
+        } else if (strstr(req->body, "\"role\":\"tool\"")) {
+            usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2000,\"completion_tokens\":20}}\n\n";
+        } else if (strstr(req->body, "\"content\":\"cache-branch-a\"")) {
+            usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":600,\"completion_tokens\":6,\"cached_tokens\":400}}\n\n";
+        } else if (strstr(req->body, "\"content\":\"cache-branch-b\"")) {
+            usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\"cached_tokens\":900}}\n\n";
+        } else {
+            event = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"delegate\",\"function\":{\"name\":\"subagent\",\"arguments\":"
+                    "\"{\\\"tasks\\\":[{\\\"description\\\":\\\"a\\\",\\\"prompt\\\":\\\"cache-branch-a\\\"},{\\\"description\\\":\\\"b\\\",\\\"prompt\\\":\\\"cache-branch-b\\\"}]}\"}}]}}]}\n\n";
+            usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10}}\n\n";
+        }
+        resp->status = 200;
+        assert(req->on_chunk);
+        req->on_chunk(event, strlen(event), req->userdata);
+        req->on_chunk(usage, strlen(usage), req->userdata);
+        return 0;
+    }
     if (review_mock == 21) {
         StressMock *mock = stress_mock;
         assert(mock && req->body);
@@ -1085,6 +1108,43 @@ static void stress_assert_transcript(ClayJson *entry, int tool_calls, const char
     assert(saved && strstr(saved, summary));
     clay_json_free(document);
     clay_str_free(&text);
+}
+
+static void test_subagent_parent_usage(void) {
+    assert(setenv("OPENAI_API_KEY", "offline-key", 1) == 0);
+    ClayApp *app = clay_app_create();
+    assert(app);
+    ClayCommands *commands = clay_commands_create(app);
+    assert(commands && clay_commands_find_provider(commands, "openai"));
+    assert(clay_commands_select_model(commands, "openai", "cache-test") == 0);
+    commands->mcp_connect_attempted = 1;
+    commands->mode = CLAY_MODE_ACT;
+
+    review_mock = 22;
+    clay_commands_run_message(commands, "delegate cache work");
+    ClayChatRequestTotals requests;
+    clay_chat_request_totals(commands->chat, &requests);
+    assert(requests.requests == 4 && requests.cached_tokens == 1300);
+
+    ClayChat *saved_chat = clay_chat_load(clay_chat_id(commands->chat));
+    assert(saved_chat);
+    ClayChatUsage usage;
+    clay_chat_get_usage(saved_chat, &usage);
+    assert(usage.input_tokens == 4600 && usage.output_tokens == 46);
+    assert(usage.cached_input_tokens_known && usage.cached_input_tokens == 1300);
+    assert(usage.total_input_tokens == 4600 && usage.total_output_tokens == 46);
+    assert(usage.last_prompt_tokens == 2000);
+    assert(commands->last_prompt_tokens == 2000);
+    clay_chat_destroy(saved_chat);
+
+    clay_commands_run_message(commands, "plain follow-up");
+    review_mock = 0;
+    clay_chat_get_usage(commands->chat, &usage);
+    assert(usage.input_tokens == 3000 && usage.output_tokens == 30);
+    assert(usage.cached_input_tokens_known && usage.cached_input_tokens == 0);
+    assert(usage.total_input_tokens == 7600 && usage.total_output_tokens == 76);
+    clay_commands_destroy(commands);
+    clay_app_destroy(app);
 }
 
 /* One main completion and four subagents over one offline HTTP scope: 429 recovery,
@@ -2277,6 +2337,7 @@ int main(void) {
     test_scope_tpm_budget();
     test_provider_tpm_window();
     test_provider_tpm_config();
+    test_subagent_parent_usage();
     test_subagent_stress_http();
     test_subagent_stress_mixed();
 

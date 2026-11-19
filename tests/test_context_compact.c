@@ -22,7 +22,7 @@ static void test_utf8_preview(const char *character, int prefix, int included) {
     for (int i = 0; i < 210; i++) clay_str_push_char(&output, 'y');
 
     ClayCommands commands = {0};
-    commands.input_tokens = 200000;
+    commands.last_prompt_tokens = 200000;
     commands.conversation = clay_json_array();
     push_message(commands.conversation, "system", "system");
     push_message(commands.conversation, "user", "old");
@@ -68,8 +68,7 @@ static void test_multi_round_accumulation(void) {
        request is 40k: under the 115.2k trigger, nothing to collapse. */
     long budget = clay_config_context_token_budget();
     assert(budget >= 128000);
-    commands.input_tokens = (long)(budget * 0.94); /* three rounds summing */
-    commands.last_prompt_tokens = (long)(budget * 0.31); /* the last one */
+    commands.last_prompt_tokens = (long)(budget * 0.31);
     assert(clay_commands_maybe_compact(&commands) == 0);
 
     /* One round really at the limit still collapses. */
@@ -105,13 +104,13 @@ int main(void) {
     }
 
     /* Below budget: no-op. */
-    commands.input_tokens = 0;
+    commands.last_prompt_tokens = 0;
     assert(clay_commands_maybe_compact(&commands) == 0);
     ClayJson *first_tool = clay_json_array_get(commands.conversation, 2);
     assert(strcmp(clay_json_string_value(clay_json_object_get(first_tool, "content")), long_output.data) == 0);
 
     /* Above budget: collapses the two oldest turns' tool results only. */
-    commands.input_tokens = 200000;
+    commands.last_prompt_tokens = 200000;
     int collapsed = clay_commands_maybe_compact(&commands);
     assert(collapsed == 2);
 

@@ -392,6 +392,11 @@ void clay_chat_get_usage(const ClayChat *chat, ClayChatUsage *usage) {
         clay_json_object_get(value, "total_input_tokens"));
     usage->total_output_tokens = (long)clay_json_number_value(
         clay_json_object_get(value, "total_output_tokens"));
+    ClayJson *last_prompt = clay_json_object_get(value, "last_prompt_tokens");
+    /* Older journals counted only main requests in the turn's input. */
+    usage->last_prompt_tokens = clay_json_type(last_prompt) == CLAY_JSON_NUMBER
+                                    ? (long)clay_json_number_value(last_prompt)
+                                    : usage->input_tokens;
 }
 
 int clay_chat_set_usage(ClayChat *chat, const ClayChatUsage *usage) {
@@ -410,6 +415,8 @@ int clay_chat_set_usage(ClayChat *chat, const ClayChatUsage *usage) {
                          clay_json_number((double)usage->total_input_tokens));
     clay_json_object_set(value, "total_output_tokens",
                          clay_json_number((double)usage->total_output_tokens));
+    clay_json_object_set(value, "last_prompt_tokens",
+                         clay_json_number((double)usage->last_prompt_tokens));
     clay_json_object_set(chat->journal, "usage", value);
     return save(chat);
 }

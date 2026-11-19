@@ -1211,11 +1211,21 @@ void clay_commands_update_selected_below(ClayCommands *commands) {
   clay_str_free(&text);
 }
 
-void clay_commands_add_usage(ClayCommands *commands, long input_tokens,
-                             long output_tokens) {
+void clay_token_usage_add(ClayTokenUsage *total, const ClayTokenUsage *usage) {
+  total->input_tokens += usage->input_tokens;
+  total->output_tokens += usage->output_tokens;
+  if (usage->cached_input_tokens_known) {
+    total->cached_input_tokens += usage->cached_input_tokens;
+    total->cached_input_tokens_known = 1;
+  }
+}
+
+void clay_commands_add_subagent_usage(ClayCommands *commands,
+                                      const ClayTokenUsage *usage) {
   pthread_mutex_lock(&commands->tool_lock);
-  commands->total_input_tokens += input_tokens;
-  commands->total_output_tokens += output_tokens;
+  clay_token_usage_add(&commands->subagent_usage, usage);
+  commands->total_input_tokens += usage->input_tokens;
+  commands->total_output_tokens += usage->output_tokens;
   pthread_mutex_unlock(&commands->tool_lock);
 }
 
@@ -2010,6 +2020,8 @@ void clay_commands_forget_context_blocks(ClayCommands *commands) {
 }
 
 void clay_commands_reset_conversation(ClayCommands *commands) {
+  commands->last_prompt_tokens = 0;
+  commands->accounted_messages = 0;
   clay_json_free(commands->conversation);
   commands->conversation = clay_json_array();
   /* The blocks just left the history; the next sync appends them afresh
@@ -2133,9 +2145,8 @@ int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
 }
 
 int clay_commands_maybe_compact(ClayCommands *commands) {
-  long billed = commands->last_prompt_tokens > 0 ? commands->last_prompt_tokens
-                                                : commands->input_tokens;
-  return clay_commands_compact_history(commands->conversation, billed,
+  return clay_commands_compact_history(commands->conversation,
+                                      commands->last_prompt_tokens,
                                       commands->accounted_messages);
 }
 
@@ -2155,10 +2166,6 @@ void clay_commands_new_chat(ClayCommands *commands) {
   clay_chat_destroy(commands->chat);
   commands->chat = NULL;
   clay_commands_reset_conversation(commands);
-  commands->input_tokens = 0;
-  commands->output_tokens = 0;
-  commands->cached_input_tokens = 0;
-  commands->cached_input_tokens_known = 0;
   clay_below_stop_elapsed("status");
   clay_below_set_enabled("status", 0);
   clay_commands_set_tokens_below(commands, 0, 0);
@@ -2180,10 +2187,6 @@ int clay_commands_select_model(ClayCommands *commands, const char *provider,
     clay_chat_destroy(commands->chat);
     commands->chat = NULL;
     clay_commands_reset_conversation(commands);
-    commands->input_tokens = 0;
-    commands->output_tokens = 0;
-    commands->cached_input_tokens = 0;
-    commands->cached_input_tokens_known = 0;
     clay_commands_set_tokens_below(commands, 0, 0);
   }
   clay_commands_update_selected_below(commands);

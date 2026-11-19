@@ -55,8 +55,7 @@ typedef struct {
   int finished;
   int rc;
   double seconds;
-  long input_tokens;
-  long output_tokens;
+  ClayTokenUsage usage;
   int request_round;
   SubagentBudget budget;
   char *transcript;
@@ -100,8 +99,7 @@ static void before_request(ClayJson *messages, void *userdata) {
 static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   ClaySubagentRun *run = userdata;
   run->budget.last_prompt_tokens = usage->input_tokens;
-  run->input_tokens += usage->input_tokens;
-  run->output_tokens += usage->output_tokens;
+  clay_token_usage_add(&run->usage, usage);
   clay_commands_record_request_usage(run->batch->commands, "subagent",
                                      run->request_round++, usage, 0);
 }
@@ -334,14 +332,12 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
   ClayStr output;
   clay_str_init(&output);
   size_t succeeded = 0;
-  long input_tokens = 0;
-  long output_tokens = 0;
+  ClayTokenUsage usage = {0};
   for (size_t i = 0; i < count; i++) {
     ClaySubagentRun *run = &batch->runs[i];
     int ok = run->rc == 0 && run->summary.len > 0;
     succeeded += ok ? 1 : 0;
-    input_tokens += run->input_tokens;
-    output_tokens += run->output_tokens;
+    clay_token_usage_add(&usage, &run->usage);
     ClayJson *entry = clay_json_object();
     clay_json_object_set(entry, "description",
                          clay_json_string(run->description));
@@ -369,7 +365,7 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
     clay_str_free(&run->summary);
     free(run->transcript);
   }
-  clay_commands_add_usage(commands, input_tokens, output_tokens);
+  clay_commands_add_subagent_usage(commands, &usage);
   clay_json_object_set(result, "ok", clay_json_bool(succeeded == count));
   clay_json_object_set(result, "results", results);
   clay_json_object_set(result, "output", clay_json_string(output.data));

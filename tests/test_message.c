@@ -28,7 +28,6 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
      be reachable, which is what the old per-turn check could not do. */
   if (collapse_during_turn && !collapsed_once) {
     commands->last_prompt_tokens = 120000;
-    commands->input_tokens = 120000;
     commands->accounted_messages = 1;
     for (int round = 0; round < 3; round++) {
       ClayJson *tool = clay_openai_message("tool", "old result");

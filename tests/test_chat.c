@@ -21,7 +21,15 @@ int main(void) {
     assert(strcmp(clay_chat_notes(chat), "") == 0);
     assert(clay_chat_set_notes(chat, "remember this") == 0);
     assert(strcmp(clay_chat_notes(chat), "remember this") == 0);
-    ClayChatUsage saved_usage = {125, 48, 98, 1, 250, 96};
+    ClayChatUsage saved_usage = {
+        .input_tokens = 125,
+        .output_tokens = 48,
+        .cached_input_tokens = 98,
+        .cached_input_tokens_known = 1,
+        .total_input_tokens = 250,
+        .total_output_tokens = 96,
+        .last_prompt_tokens = 120,
+    };
     assert(clay_chat_set_usage(chat, &saved_usage) == 0);
     assert(clay_chat_begin_turn(chat, "hello") == 0);
     clay_chat_set_active_thinking(chat, "first thought\nsecond thought", 1.25);
@@ -51,6 +59,7 @@ int main(void) {
     assert(loaded_usage.cached_input_tokens_known);
     assert(loaded_usage.total_input_tokens == 250);
     assert(loaded_usage.total_output_tokens == 96);
+    assert(loaded_usage.last_prompt_tokens == 120);
     double thinking_seconds = 0;
     char *thinking = clay_chat_last_thinking(chat, &thinking_seconds);
     assert(thinking && strcmp(thinking, "first thought\nsecond thought") == 0);

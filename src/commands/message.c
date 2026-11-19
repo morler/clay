@@ -24,10 +24,7 @@ typedef struct {
   int response_active;
   long error_status;
   int sse_rate_limit;
-  long input_tokens;
-  long output_tokens;
-  long cached_input_tokens;
-  int cached_input_tokens_known;
+  ClayTokenUsage usage;
   int has_usage;
   long last_prompt_tokens; /* the last request's prompt, not the turn's sum */
   ClayTask *tool_task;
@@ -1396,12 +1393,7 @@ static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   /* The next request repeats this one plus whatever follows it, so the last
      round is the cost and the sum is only the bill. */
   stream->last_prompt_tokens = usage->input_tokens;
-  stream->input_tokens += usage->input_tokens;
-  stream->output_tokens += usage->output_tokens;
-  if (usage->cached_input_tokens_known) {
-    stream->cached_input_tokens += usage->cached_input_tokens;
-    stream->cached_input_tokens_known = 1;
-  }
+  clay_token_usage_add(&stream->usage, usage);
   stream->has_usage = 1;
 
   ClayCommands *commands = stream->commands;
@@ -1570,6 +1562,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
     clay_sayc(CLAY_RED, "Could not save the chat journal.");
     return 0;
   }
+  commands->subagent_usage = (ClayTokenUsage){0};
   if (clay_term_is_interactive())
     fputc('\n', stdout); /* breathing room after the user's prompt */
   clay_turn_header(commands->selected_model);
@@ -1662,25 +1655,28 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
     commands->conversation = messages;
     set_status(seconds, rc == 0);
     if (stream.has_usage) {
-      commands->input_tokens = stream.input_tokens;
       commands->last_prompt_tokens = stream.last_prompt_tokens;
       commands->accounted_messages = clay_json_array_count(messages);
-      commands->output_tokens = stream.output_tokens;
-      commands->cached_input_tokens = stream.cached_input_tokens;
-      commands->cached_input_tokens_known = stream.cached_input_tokens_known;
-      commands->total_input_tokens += stream.input_tokens;
-      commands->total_output_tokens += stream.output_tokens;
+      commands->total_input_tokens += stream.usage.input_tokens;
+      commands->total_output_tokens += stream.usage.output_tokens;
+    }
+    const ClayTokenUsage *subagents = &commands->subagent_usage;
+    if (stream.has_usage || subagents->input_tokens || subagents->output_tokens ||
+        subagents->cached_input_tokens_known) {
+      ClayTokenUsage turn_usage = stream.usage;
+      clay_token_usage_add(&turn_usage, subagents);
       ClayChatUsage usage = {
-          stream.input_tokens,
-          stream.output_tokens,
-          stream.cached_input_tokens,
-          stream.cached_input_tokens_known,
-          commands->total_input_tokens,
-          commands->total_output_tokens};
+          .input_tokens = turn_usage.input_tokens,
+          .output_tokens = turn_usage.output_tokens,
+          .cached_input_tokens = turn_usage.cached_input_tokens,
+          .cached_input_tokens_known = turn_usage.cached_input_tokens_known,
+          .total_input_tokens = commands->total_input_tokens,
+          .total_output_tokens = commands->total_output_tokens,
+          .last_prompt_tokens = commands->last_prompt_tokens};
       clay_chat_set_usage(commands->chat, &usage);
       clay_commands_set_tokens_below_with_cache(
-          commands, stream.input_tokens, stream.output_tokens,
-          stream.cached_input_tokens, stream.cached_input_tokens_known);
+          commands, usage.input_tokens, usage.output_tokens,
+          usage.cached_input_tokens, usage.cached_input_tokens_known);
     }
   } else {
     save_unrecorded_response(messages, turn_start, &stream.response);

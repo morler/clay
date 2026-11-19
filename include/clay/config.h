@@ -57,9 +57,10 @@ int clay_config_history_preview_count(void);
    Returns 0 if missing or invalid. Separate from the compaction budget. */
 long clay_config_context_window(void);
 
-/* Maximum input-token budget before automatic context compaction. Defaults
-   to 128000; callers may lower it for models with smaller context windows. */
+/* Configured automatic compaction threshold in tokens. Returns -1 for an
+   unset or invalid value, 0 to disable, or a positive threshold. */
 long clay_config_context_token_budget(void);
+/* Pass -1 to restore the default. Returns 0 on success. */
 int clay_config_set_context_token_budget(long budget);
 
 /* "sandbox" (default), "auto", or "unleashed". Malloc'd. Doesn't know about

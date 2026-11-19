@@ -1229,6 +1229,11 @@ void clay_commands_add_subagent_usage(ClayCommands *commands,
   pthread_mutex_unlock(&commands->tool_lock);
 }
 
+static long effective_context_token_budget(void) {
+  long budget = clay_config_context_token_budget();
+  return budget < 0 ? 128000 : budget;
+}
+
 void clay_commands_record_request_usage(ClayCommands *commands,
                                        const char *kind, int round,
                                        const ClayTokenUsage *usage,
@@ -1243,7 +1248,7 @@ void clay_commands_record_request_usage(ClayCommands *commands,
       .output_tokens = usage->output_tokens,
       .cached_input_tokens = usage->cached_input_tokens,
       .cached_input_tokens_known = usage->cached_input_tokens_known,
-      .context_budget = clay_config_context_token_budget(),
+      .context_budget = effective_context_token_budget(),
       .duration_ms = duration_ms,
   };
   if (clay_chat_append_request_usage(commands->chat, &record) != 0)
@@ -2044,7 +2049,6 @@ void clay_commands_reset_conversation(ClayCommands *commands) {
   clay_json_free(history);
 }
 
-#define CLAY_CONTEXT_COMPACT_RATIO 0.9
 #define CLAY_CONTEXT_KEEP_TURNS 6
 #define CLAY_CONTEXT_TOOL_PREVIEW 200
 #define CLAY_CONTEXT_COLLAPSED_MARKER "[collapsed - "
@@ -2113,9 +2117,14 @@ static long unaccounted_tokens(const ClayJson *conversation, size_t from) {
 
 static int compact_history(ClayJson *conversation, long billed_tokens,
                            size_t accounted_messages, ClayArray *saved_results) {
-  long token_budget = clay_config_context_token_budget();
-  if (billed_tokens + unaccounted_tokens(conversation, accounted_messages) <
-      (long)(token_budget * CLAY_CONTEXT_COMPACT_RATIO))
+  long token_budget = effective_context_token_budget();
+  if (token_budget == 0)
+    return 0;
+  if (billed_tokens < 0)
+    billed_tokens = 0;
+  if (billed_tokens < token_budget &&
+      unaccounted_tokens(conversation, accounted_messages) <
+          token_budget - billed_tokens)
     return 0;
   size_t count = clay_json_array_count(conversation);
   if (count < 2)

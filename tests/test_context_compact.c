@@ -12,7 +12,7 @@
 
 static void test_context_window_config(const char *path) {
     assert(clay_config_context_window() == 0);
-    assert(clay_config_context_token_budget() == 128000);
+    assert(clay_config_context_token_budget() == -1);
 
     const char *invalid_configs[] = {
         "{}",
@@ -33,7 +33,7 @@ static void test_context_window_config(const char *path) {
     assert(clay_config_context_window() == 16000);
     assert(clay_config_selection_save("openai", "custom-model") == 0);
     assert(clay_config_context_window() == 16000);
-    assert(clay_config_context_token_budget() == 128000);
+    assert(clay_config_context_token_budget() == -1);
 }
 
 static void push_message(ClayJson *conversation, const char *role, const char *content) {
@@ -93,19 +93,47 @@ static void test_multi_round_accumulation(void) {
         push_message(commands.conversation, "assistant", "done");
     }
 
-    /* 120k of billed input across three rounds of one turn, but the next
-       request is 40k: under the 115.2k trigger, nothing to collapse. */
-    long budget = clay_config_context_token_budget();
-    assert(budget >= 128000);
-    commands.last_prompt_tokens = (long)(budget * 0.31);
+    /* Three rounds at 40k leave the context at 40k. */
+    commands.accounted_messages = clay_json_array_count(commands.conversation);
+    commands.last_prompt_tokens = 40000;
     assert(clay_commands_maybe_compact(&commands) == 0);
 
-    /* One round really at the limit still collapses. */
-    commands.last_prompt_tokens = (long)(budget * 0.94);
+    commands.last_prompt_tokens = 127999;
+    assert(clay_commands_maybe_compact(&commands) == 0);
+    commands.last_prompt_tokens = 128000;
     assert(clay_commands_maybe_compact(&commands) == 2);
 
     clay_json_free(commands.conversation);
     clay_str_free(&long_output);
+}
+
+static void test_configured_compaction_budget(void) {
+    ClayCommands commands = {0};
+    commands.conversation = clay_json_array();
+    char output[512];
+    memset(output, 'x', sizeof(output) - 1);
+    output[sizeof(output) - 1] = '\0';
+    push_message(commands.conversation, "system", "system");
+    push_message(commands.conversation, "user", "old");
+    push_message(commands.conversation, "tool", output);
+    for (int i = 0; i < 6; i++) push_message(commands.conversation, "user", "new");
+    commands.accounted_messages = clay_json_array_count(commands.conversation);
+
+    assert(clay_config_set_context_token_budget(0) == 0);
+    assert(clay_config_context_token_budget() == 0);
+    commands.last_prompt_tokens = 200000;
+    assert(clay_commands_maybe_compact(&commands) == 0);
+
+    assert(clay_config_set_context_token_budget(512) == 0);
+    assert(clay_config_context_token_budget() == 512);
+    commands.last_prompt_tokens = 511;
+    assert(clay_commands_maybe_compact(&commands) == 0);
+    commands.last_prompt_tokens = 512;
+    assert(clay_commands_maybe_compact(&commands) == 1);
+
+    assert(clay_config_set_context_token_budget(-1) == 0);
+    assert(clay_config_context_token_budget() == -1);
+    clay_json_free(commands.conversation);
 }
 
 int main(void) {
@@ -174,6 +202,7 @@ int main(void) {
     clay_json_free(commands.conversation);
     clay_str_free(&long_output);
     test_multi_round_accumulation();
+    test_configured_compaction_budget();
     assert(unlink(path) == 0);
     free(path);
     char *root = clay_storage_root();

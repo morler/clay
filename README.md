@@ -211,7 +211,9 @@ For max, OpenRouter and Codex receive reasoning.effort, and other OpenAI-compati
 To record the selected model's context window in tokens, set the optional
 `context_window` field in `~/.clay/config.json` to a positive integer, such as
 `"context_window": 128000`. Automatic compaction uses the separate
-`context_token_budget` setting.
+`context_token_budget` setting in the same file. Omit it to fold old tool
+results at 128,000 input tokens, set it to `0` to disable automatic
+compaction, or set a positive integer as the threshold.
 
 **Local token budget (`tpm`, optional).** Add `"tpm": <tokens per minute>` to a provider file under `~/.clay/providers/` to cap that provider's endpoint and model in Clay. Unset (or 0) means no local budget. Before each request Clay reserves half the serialised request bytes plus 4096 tokens and waits for room in a 60-second window; when the provider reports usage, that replaces the reservation even if it is higher. Without usage the reservation stands until it leaves the window. A request larger than the budget is refused at once. This is Clay's own estimate, not the provider's quota: Clay cannot read remaining quota, does not assume cached-token billing rules, and does not coordinate with other Clay processes.
 

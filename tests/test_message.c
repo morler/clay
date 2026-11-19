@@ -27,7 +27,7 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
      request hook shrink the live array: a single turn's own tool results must
      be reachable, which is what the old per-turn check could not do. */
   if (collapse_during_turn && !collapsed_once) {
-    commands->last_prompt_tokens = 120000;
+    commands->last_prompt_tokens = 127000;
     commands->accounted_messages = 1;
     for (int round = 0; round < 3; round++) {
       ClayJson *tool = clay_openai_message("tool", "old result");
@@ -206,6 +206,7 @@ int main(void) {
         assert(strcmp(clay_json_string_value(clay_json_object_get(record, "provider")), "test") == 0);
         assert(strcmp(clay_json_string_value(clay_json_object_get(record, "model")), "test") == 0);
         assert(clay_json_number_value(clay_json_object_get(record, "round")) == (double)record_count);
+        assert(clay_json_number_value(clay_json_object_get(record, "context_budget")) == 128000);
         clay_json_free(record);
         record_count++;
         cursor = line_end + 1;

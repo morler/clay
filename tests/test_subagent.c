@@ -222,7 +222,7 @@ static void subagent_budget_http(const ClayHttpRequest *req) {
             clay_str_printf(&event,
                 "\\\",\\\"status\\\":\\\"completed\\\"}]}\"}}]}}]}\n\n"
                 "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":%d}}\n\n",
-                tool_count == 0 ? 2000 : 7500);
+                tool_count == 0 ? 2000 : 8100);
             req->on_chunk(event.data, event.len, req->userdata);
             clay_str_free(&event);
             return;

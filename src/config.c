@@ -236,20 +236,28 @@ long clay_config_context_window(void) {
   return 0;
 }
 
+#define CLAY_MAX_CONTEXT_TOKEN_BUDGET 1073741824L
+
 long clay_config_context_token_budget(void) {
   ClayJson *root = load_selection_root();
-  ClayJson *value = clay_json_object_get(root, "context_token_budget");
-  long budget = clay_json_type(value) == CLAY_JSON_NUMBER
-                    ? (long)clay_json_number_value(value)
-                    : 128000;
+  const ClayJson *value = clay_json_object_get(root, "context_token_budget");
+  double tokens = clay_json_type(value) == CLAY_JSON_NUMBER
+                      ? clay_json_number_value(value)
+                      : -1;
   clay_json_free(root);
-  return budget >= 1024 && budget <= 1073741824L ? budget : 128000;
+  if (!(tokens >= 0 && tokens <= CLAY_MAX_CONTEXT_TOKEN_BUDGET))
+    return -1;
+  long budget = (long)tokens;
+  return (double)budget == tokens ? budget : -1;
 }
 
 int clay_config_set_context_token_budget(long budget) {
-  if (budget < 1024 || budget > 1073741824L) return -1;
+  if (budget < -1 || budget > CLAY_MAX_CONTEXT_TOKEN_BUDGET)
+    return -1;
   ClayJson *root = load_selection_root();
-  clay_json_object_set(root, "context_token_budget", clay_json_number((double)budget));
+  clay_json_object_set(root, "context_token_budget",
+                       budget == -1 ? clay_json_null()
+                                    : clay_json_number((double)budget));
   return save_selection_root(root);
 }
 

@@ -187,10 +187,79 @@ typedef struct {
 } StressMock;
 static StressMock *stress_mock;
 
+static void subagent_budget_http(const ClayHttpRequest *req) {
+    const char *body = req->body;
+    if (strstr(body, "\"content\":\"budget-a\"")) {
+        ClayJson *request = clay_json_parse(body, NULL);
+        assert(request);
+        ClayJson *messages = clay_json_object_get(request, "messages");
+        size_t tool_count = 0;
+        for (size_t i = 0; i < clay_json_array_count(messages); i++) {
+            ClayJson *message = clay_json_array_get(messages, i);
+            if (strcmp(clay_json_string_value(clay_json_object_get(message, "role")), "tool"))
+                continue;
+            const char *content = clay_json_string_value(clay_json_object_get(message, "content"));
+            if (tool_count++ == 0) {
+                if (clay_json_array_count(messages) == 4)
+                    assert(strstr(content, "old-result-tail"));
+                else
+                    assert(strstr(content, "[collapsed - ") &&
+                           !strstr(content, "old-result-tail"));
+            } else {
+                assert(strstr(content, "recent-result-tail"));
+            }
+        }
+        clay_json_free(request);
+        if (tool_count < 2) {
+            ClayStr event;
+            clay_str_init(&event);
+            clay_str_printf(&event,
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-%zu\","
+                "\"function\":{\"name\":\"todowrite\",\"arguments\":"
+                "\"{\\\"todos\\\":[{\\\"content\\\":\\\"", tool_count);
+            for (int i = 0; i < 300; i++) clay_str_push_char(&event, 'x');
+            clay_str_push(&event, tool_count == 0 ? "old-result-tail" : "recent-result-tail");
+            clay_str_printf(&event,
+                "\\\",\\\"status\\\":\\\"completed\\\"}]}\"}}]}}]}\n\n"
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":%d}}\n\n",
+                tool_count == 0 ? 2000 : 7500);
+            req->on_chunk(event.data, event.len, req->userdata);
+            clay_str_free(&event);
+            return;
+        }
+    }
+
+    const char *prefix = strstr(body, "\"content\":\"budget-a\"") ? "A " :
+                         strstr(body, "\"content\":\"budget-b\"") ? "B " : NULL;
+    if (!prefix) {
+        const char *event = "data: {\"choices\":[{\"delta\":{\"content\":\"short summary\"}}]}\n\n";
+        req->on_chunk(event, strlen(event), req->userdata);
+        return;
+    }
+    ClayStr event;
+    clay_str_init(&event);
+    for (int i = 0; i < 3; i++) {
+        clay_str_clear(&event);
+        clay_str_push(&event, "data: {\"choices\":[{\"delta\":{\"content\":\"");
+        if (i == 0) clay_str_push(&event, prefix);
+        for (int j = 0; j < 2000; j++) clay_str_push(&event, "中");
+        clay_str_push(&event, "\"}}]}\n\n");
+        req->on_chunk(event.data, event.len, req->userdata);
+    }
+    const char *end = "data: {\"choices\":[{\"delta\":{\"content\":\"summary-tail\"}}]}\n\n";
+    req->on_chunk(end, strlen(end), req->userdata);
+    clay_str_free(&event);
+}
+
 int __real_clay_http_request(const ClayHttpRequest *, ClayHttpResponse *);
 int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp) {
     if (!review_mock) return __real_clay_http_request(req, resp);
     memset(resp, 0, sizeof(*resp));
+    if (review_mock == 23) {
+        resp->status = 200;
+        subagent_budget_http(req);
+        return 0;
+    }
     if (review_mock == 22) {
         const char *event =
             "data: {\"choices\":[{\"delta\":{\"content\":\"offline summary\"}}]}\n\n";
@@ -1152,6 +1221,74 @@ static void test_subagent_parent_usage(void) {
     assert(usage.total_input_tokens == 7600 && usage.total_output_tokens == 76);
     clay_commands_destroy(commands);
     clay_app_destroy(app);
+}
+
+static void test_subagent_budget_and_summary(void) {
+    ClayCommands commands;
+    stress_commands_init(&commands);
+    assert(setenv("OPENAI_API_KEY", "offline-key", 1) == 0);
+    clay_commands_load_provider(&commands, clay_commands_find_provider_type("openai"));
+    commands.selected_provider = "openai";
+    commands.selected_model = "budget-test";
+    commands.last_prompt_tokens = 123;
+    commands.accounted_messages = 1;
+    commands.conversation = clay_json_array();
+    clay_json_array_push(commands.conversation, clay_openai_message("system", "parent system"));
+
+    long budget = clay_config_context_token_budget();
+    assert(clay_config_set_context_token_budget(8192) == 0);
+    review_mock = 23;
+    ClayJson *result = call(&commands,
+        "{\"tasks\":[{\"description\":\"a\",\"prompt\":\"budget-a\"},"
+        "{\"description\":\"b\",\"prompt\":\"budget-b\"},"
+        "{\"description\":\"c\",\"prompt\":\"budget-c\"}]}");
+    review_mock = 0;
+    assert(clay_config_set_context_token_budget(budget) == 0);
+
+    assert(ok(result));
+    assert(commands.last_prompt_tokens == 123 && commands.accounted_messages == 1);
+    assert(clay_json_array_count(commands.conversation) == 1);
+    const char *output = clay_json_string_value(clay_json_object_get(result, "output"));
+    const char *a = strstr(output, "[a] A 中");
+    const char *b = strstr(output, "[b] B 中");
+    const char *c = strstr(output, "[c] short summary");
+    assert(a == output && b && c && a < b && b < c);
+    assert(!strstr(output, "summary-tail"));
+    size_t share = (16 * 1024) / 3;
+    size_t preview_len = 2 + ((share - 2) / strlen("中")) * strlen("中");
+    assert(strstr(a, " […]") == a + strlen("[a] ") + preview_len);
+    assert(strstr(b, " […]") == b + strlen("[b] ") + preview_len);
+    assert(!strstr(c, " […]"));
+
+    ClayJson *entries = clay_json_object_get(result, "results");
+    assert(clay_json_array_count(entries) == 3);
+    for (size_t i = 0; i < 3; i++) {
+        ClayJson *entry = clay_json_array_get(entries, i);
+        const char *path = clay_json_string_value(clay_json_object_get(entry, "transcript"));
+        ClayStr file;
+        clay_str_init(&file);
+        assert(*path && clay_term_read_file(path, 1 << 20, &file) == 0);
+        ClayJson *transcript = clay_json_parse(file.data, NULL);
+        assert(transcript);
+        const char *summary = clay_json_string_value(clay_json_object_get(transcript, "summary"));
+        if (i < 2) {
+            assert(strlen(summary) == 2 + 18000 + strlen("summary-tail"));
+            assert(strstr(summary, "summary-tail"));
+        } else {
+            assert(!strcmp(summary, "short summary"));
+        }
+        if (i == 0) {
+            ClayJson *messages = clay_json_object_get(transcript, "messages");
+            const char *old = clay_json_string_value(clay_json_object_get(
+                clay_json_array_get(messages, 3), "content"));
+            assert(strstr(old, "old-result-tail") && !strstr(old, "[collapsed - "));
+        }
+        clay_json_free(transcript);
+        clay_str_free(&file);
+    }
+    clay_json_free(result);
+    clay_json_free(commands.conversation);
+    stress_commands_free(&commands, "openai");
 }
 
 /* One main completion and four subagents over one offline HTTP scope: 429 recovery,
@@ -2341,6 +2478,7 @@ int main(void) {
     test_provider_tpm_window();
     test_provider_tpm_config();
     test_subagent_parent_usage();
+    test_subagent_budget_and_summary();
     test_subagent_stress_http();
     test_subagent_stress_mixed();
 

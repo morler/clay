@@ -2054,7 +2054,7 @@ static int is_user_message(const ClayJson *message) {
                 "user") == 0;
 }
 
-static int collapse_tool_content(ClayJson *message) {
+static int collapse_tool_content(ClayJson *message, ClayArray *saved_results) {
   const char *text =
       clay_json_string_value(clay_json_object_get(message, "content"));
   if (!text)
@@ -2078,6 +2078,11 @@ static int collapse_tool_content(ClayJson *message) {
   clay_str_printf(&summary, "%s%zu bytes, showing the first %d]\n%.*s...",
                   CLAY_CONTEXT_COLLAPSED_MARKER, len, CLAY_CONTEXT_TOOL_PREVIEW,
                   (int)preview, text);
+  if (saved_results) {
+    ClayCompactedToolResult original = {
+        message, clay_json_clone(clay_json_object_get(message, "content"))};
+    clay_array_push_val(saved_results, &original);
+  }
   clay_json_object_set(message, "content", clay_json_string(summary.data));
   clay_str_free(&summary);
   return 1;
@@ -2106,10 +2111,8 @@ static long unaccounted_tokens(const ClayJson *conversation, size_t from) {
          (long)((total - from) * CLAY_CONTEXT_MESSAGE_OVERHEAD);
 }
 
-/* The one collapse implementation, over whichever array the caller is about
-   to send: the session's conversation, or a subagent's own history. */
-int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
-                                  size_t accounted_messages) {
+static int compact_history(ClayJson *conversation, long billed_tokens,
+                           size_t accounted_messages, ClayArray *saved_results) {
   long token_budget = clay_config_context_token_budget();
   if (billed_tokens + unaccounted_tokens(conversation, accounted_messages) <
       (long)(token_budget * CLAY_CONTEXT_COMPACT_RATIO))
@@ -2118,18 +2121,18 @@ int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
   if (count < 2)
     return 0;
 
-  /* Everything at index < cutoff is older than the last CLAY_CONTEXT_KEEP_TURNS
-     user turns and is eligible for collapsing; index 0 (system prompt) never
-     is. */
+  /* Subagents usually have one user message. Protect the entire latest tool
+     round; for the main session, protect the last few user turns. */
   size_t cutoff = 1;
   int turns_seen = 0;
   for (size_t i = count; i-- > 1;) {
-    if (is_user_message(clay_json_array_get(conversation, i))) {
-      turns_seen++;
-      if (turns_seen == CLAY_CONTEXT_KEEP_TURNS) {
-        cutoff = i;
-        break;
-      }
+    const ClayJson *message = clay_json_array_get(conversation, i);
+    int keep_from_here = saved_results
+        ? clay_json_array_count(clay_json_object_get(message, "tool_calls")) > 0
+        : is_user_message(message) && ++turns_seen == CLAY_CONTEXT_KEEP_TURNS;
+    if (keep_from_here) {
+      cutoff = i;
+      break;
     }
   }
 
@@ -2138,16 +2141,22 @@ int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
     ClayJson *message = clay_json_array_get(conversation, i);
     if (strcmp(clay_json_string_value(clay_json_object_get(message, "role")),
                "tool") == 0) {
-      collapsed += collapse_tool_content(message);
+      collapsed += collapse_tool_content(message, saved_results);
     }
   }
   return collapsed;
 }
 
 int clay_commands_maybe_compact(ClayCommands *commands) {
-  return clay_commands_compact_history(commands->conversation,
-                                      commands->last_prompt_tokens,
-                                      commands->accounted_messages);
+  return compact_history(commands->conversation, commands->last_prompt_tokens,
+                         commands->accounted_messages, NULL);
+}
+
+int clay_commands_compact_subagent_history(ClayJson *messages, long billed_tokens,
+                                           size_t accounted_messages,
+                                           ClayArray *saved_results) {
+  return compact_history(messages, billed_tokens, accounted_messages,
+                         saved_results);
 }
 
 void clay_plan_clear(ClayPlan *plan) {

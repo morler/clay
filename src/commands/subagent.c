@@ -41,6 +41,8 @@ const char *clay_subagent_prompt_suffix(void) {
 typedef struct {
   long last_prompt_tokens;
   size_t accounted_messages;
+  size_t request_messages;
+  ClayArray saved_results;
 } SubagentBudget;
 
 typedef struct ClaySubagentBatch ClaySubagentBatch;
@@ -72,8 +74,7 @@ struct ClaySubagentBatch {
 
 static void on_token(const char *text, void *userdata) {
   ClaySubagentRun *run = userdata;
-  if (run->summary.len < CLAY_SUBAGENT_SUMMARY_LIMIT)
-    clay_str_push(&run->summary, text);
+  clay_str_push(&run->summary, text);
 }
 
 static void on_tool_call(const char *name, const char *arguments_json,
@@ -91,14 +92,16 @@ static void on_tool_call(const char *name, const char *arguments_json,
 
 static void before_request(ClayJson *messages, void *userdata) {
   ClaySubagentRun *run = userdata;
-  clay_commands_compact_history(messages, run->budget.last_prompt_tokens,
-                                run->budget.accounted_messages);
-  run->budget.accounted_messages = clay_json_array_count(messages);
+  clay_commands_compact_subagent_history(messages, run->budget.last_prompt_tokens,
+                                         run->budget.accounted_messages,
+                                         &run->budget.saved_results);
+  run->budget.request_messages = clay_json_array_count(messages);
 }
 
 static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   ClaySubagentRun *run = userdata;
   run->budget.last_prompt_tokens = usage->input_tokens;
+  run->budget.accounted_messages = run->budget.request_messages;
   clay_token_usage_add(&run->usage, usage);
   clay_commands_record_request_usage(run->batch->commands, "subagent",
                                      run->request_round++, usage, 0);
@@ -186,6 +189,7 @@ static void *run_subagent(void *argument) {
   callbacks.before_request = before_request;
   callbacks.should_abort = should_abort;
   callbacks.userdata = run;
+  clay_array_init(&run->budget.saved_results, sizeof(ClayCompactedToolResult));
 
   ClayToolSet tools;
   clay_commands_tools_build(commands, &run->plan, &tools, 0);
@@ -216,6 +220,11 @@ static void *run_subagent(void *argument) {
   run->rc = rc;
   run->seconds = (double)(finished.tv_sec - started.tv_sec) +
                  (double)(finished.tv_nsec - started.tv_nsec) / 1e9;
+  for (size_t i = 0; i < run->budget.saved_results.count; i++) {
+    ClayCompactedToolResult *original = clay_array_get(&run->budget.saved_results, i);
+    clay_json_object_set(original->message, "content", original->content);
+  }
+  clay_array_free(&run->budget.saved_results);
   run->transcript = save_transcript(commands, run, messages);
   clay_json_free(messages);
   clay_plan_clear(&run->plan);
@@ -332,11 +341,21 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
   ClayStr output;
   clay_str_init(&output);
   size_t succeeded = 0;
+  size_t summary_bytes = 0;
+  for (size_t i = 0; i < count; i++) {
+    const ClaySubagentRun *run = &batch->runs[i];
+    if (run->rc == 0 && run->summary.len > 0) {
+      succeeded++;
+      summary_bytes += run->summary.len;
+    }
+  }
+  size_t share = summary_bytes > CLAY_SUBAGENT_SUMMARY_LIMIT
+                     ? CLAY_SUBAGENT_SUMMARY_LIMIT / succeeded
+                     : CLAY_SUBAGENT_SUMMARY_LIMIT;
   ClayTokenUsage usage = {0};
   for (size_t i = 0; i < count; i++) {
     ClaySubagentRun *run = &batch->runs[i];
     int ok = run->rc == 0 && run->summary.len > 0;
-    succeeded += ok ? 1 : 0;
     clay_token_usage_add(&usage, &run->usage);
     ClayJson *entry = clay_json_object();
     clay_json_object_set(entry, "description",
@@ -356,9 +375,19 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
       clay_json_object_set(entry, "transcript",
                            clay_json_string(run->transcript));
     clay_json_array_push(results, entry);
-    clay_str_printf(&output, "%s[%s] %s", output.len ? "\n\n" : "",
-                    run->description,
-                    ok ? run->summary.data : "(no summary came back)");
+    clay_str_printf(&output, "%s[%s] ", output.len ? "\n\n" : "",
+                    run->description);
+    if (!ok) {
+      clay_str_push(&output, "(no summary came back)");
+    } else if (run->summary.len <= share) {
+      clay_str_push_n(&output, run->summary.data, run->summary.len);
+    } else {
+      size_t end = share;
+      while (end && ((unsigned char)run->summary.data[end] & 0xc0) == 0x80)
+        end--;
+      clay_str_push_n(&output, run->summary.data, end);
+      clay_str_push(&output, " […]");
+    }
     clay_str_free(&run->summary);
     free(run->transcript);
   }

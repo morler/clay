@@ -287,11 +287,15 @@ char *clay_commands_list_top_level(const char *dir);
    older than the last few turns to a short preview, in place on
    commands->conversation. Returns how many results it collapsed. */
 int clay_commands_maybe_compact(ClayCommands *commands);
-/* The same collapse applied to any history being sent, with its own billed
-   prompt and accounted boundary. A subagent calls this on its own array, so
-   it never reads or folds the session's conversation. */
-int clay_commands_compact_history(ClayJson *conversation, long billed_tokens,
-                                  size_t accounted_messages);
+typedef struct {
+  ClayJson *message; /* borrowed from the subagent's append-only history */
+  ClayJson *content; /* owned until restored to the message */
+} ClayCompactedToolResult;
+/* Apply the same budget to a subagent, keeping its newest tool round intact.
+   Append originals to saved_results for restoration before saving the transcript. */
+int clay_commands_compact_subagent_history(ClayJson *messages, long billed_tokens,
+                                           size_t accounted_messages,
+                                           ClayArray *saved_results);
 /* Frees every item and empties `plan` in place (keeping the array, ready
    for more steps). A rendered plan also clears its row. */
 void clay_plan_clear(ClayPlan *plan);

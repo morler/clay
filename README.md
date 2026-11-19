@@ -208,6 +208,11 @@ separate.
 
 For max, OpenRouter and Codex receive reasoning.effort, and other OpenAI-compatible providers (including custom and Grok) receive reasoning_effort. Unsupported values may be rejected by the service; Clay does not downgrade them. OpenRouter maps both max and xhigh to approximately 95% of the reasoning token budget; actual behavior depends on the model. See [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
+To record the selected model's context window in tokens, set the optional
+`context_window` field in `~/.clay/config.json` to a positive integer, such as
+`"context_window": 128000`. Automatic compaction uses the separate
+`context_token_budget` setting.
+
 **Local token budget (`tpm`, optional).** Add `"tpm": <tokens per minute>` to a provider file under `~/.clay/providers/` to cap that provider's endpoint and model in Clay. Unset (or 0) means no local budget. Before each request Clay reserves half the serialised request bytes plus 4096 tokens and waits for room in a 60-second window; when the provider reports usage, that replaces the reservation even if it is higher. Without usage the reservation stands until it leaves the window. A request larger than the budget is refused at once. This is Clay's own estimate, not the provider's quota: Clay cannot read remaining quota, does not assume cached-token billing rules, and does not coordinate with other Clay processes.
 
 **429 responses.** Clay retries an explicit HTTP or SSE 429 up to twice (three attempts), backing off about one and two seconds plus jitter. A single valid `Retry-After` of at most 30 seconds raises the wait; a wait above 30 seconds, more than 60 seconds in total, cancellation, or a discarded, duplicated, or invalid header stops the retry and keeps the original error. Permanent quota errors (`insufficient_quota`, `billing_hard_limit_reached`) are not retried, and Clay stops replaying once text, a tool call, or an error callback has been delivered.

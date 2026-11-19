@@ -1,11 +1,40 @@
 #include "../src/commands/context.h"
 
 #include "clay/json.h"
+#include "clay/storage.h"
 #include "clay/str.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+static void test_context_window_config(const char *path) {
+    assert(clay_config_context_window() == 0);
+    assert(clay_config_context_token_budget() == 128000);
+
+    const char *invalid_configs[] = {
+        "{}",
+        "{\"context_window\":0}",
+        "{\"context_window\":-16000}",
+        "{\"context_window\":\"16000\"}",
+        "{\"context_window\":16000.5}",
+        "{\"context_window\":1e20}",
+    };
+    for (size_t i = 0; i < sizeof(invalid_configs) / sizeof(invalid_configs[0]); i++) {
+        const char *config = invalid_configs[i];
+        assert(clay_storage_write_atomic_private(path, config, strlen(config)) == 0);
+        assert(clay_config_context_window() == 0);
+    }
+
+    const char config[] = "{\"context_window\":16000}";
+    assert(clay_storage_write_atomic_private(path, config, sizeof(config) - 1) == 0);
+    assert(clay_config_context_window() == 16000);
+    assert(clay_config_selection_save("openai", "custom-model") == 0);
+    assert(clay_config_context_window() == 16000);
+    assert(clay_config_context_token_budget() == 128000);
+}
 
 static void push_message(ClayJson *conversation, const char *role, const char *content) {
     ClayJson *message = clay_json_object();
@@ -80,6 +109,14 @@ static void test_multi_round_accumulation(void) {
 }
 
 int main(void) {
+    char home[] = "/tmp/clay_test_context_compact_XXXXXX";
+    assert(mkdtemp(home));
+    assert(setenv("HOME", home, 1) == 0);
+    assert(clay_storage_ensure_dir("") == 0);
+    char *path = clay_storage_path("config.json");
+    assert(path);
+    test_context_window_config(path);
+
     test_utf8_preview("é", 199, 0);
     test_utf8_preview("中", 198, 0);
     test_utf8_preview("😀", 197, 0);
@@ -137,6 +174,12 @@ int main(void) {
     clay_json_free(commands.conversation);
     clay_str_free(&long_output);
     test_multi_round_accumulation();
+    assert(unlink(path) == 0);
+    free(path);
+    char *root = clay_storage_root();
+    assert(root && rmdir(root) == 0);
+    free(root);
+    assert(rmdir(home) == 0);
     printf("context compact tests passed\n");
     return 0;
 }

@@ -53,6 +53,10 @@ int clay_config_set_reasoning_effort(const char *effort);
 /* Number of previous messages shown after /resume. Defaults to 4. */
 int clay_config_history_preview_count(void);
 
+/* Optional model context window in ~/.clay/config.json, in tokens.
+   Returns 0 if missing or invalid. Separate from the compaction budget. */
+long clay_config_context_window(void);
+
 /* Maximum input-token budget before automatic context compaction. Defaults
    to 128000; callers may lower it for models with smaller context windows. */
 long clay_config_context_token_budget(void);

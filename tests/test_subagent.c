@@ -198,10 +198,17 @@ int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp)
         if (strstr(req->body, "\"content\":\"plain follow-up\"")) {
             usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3000,\"completion_tokens\":30,\"cached_tokens\":0}}\n\n";
         } else if (strstr(req->body, "\"role\":\"tool\"")) {
+            /* The parent sees each branch's report once in the tool response. */
+            const char *a = strstr(req->body, "summary from branch A");
+            const char *b = strstr(req->body, "summary from branch B");
+            assert(a && !strstr(a + 1, "summary from branch A"));
+            assert(b && !strstr(b + 1, "summary from branch B"));
             usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2000,\"completion_tokens\":20}}\n\n";
         } else if (strstr(req->body, "\"content\":\"cache-branch-a\"")) {
+            event = "data: {\"choices\":[{\"delta\":{\"content\":\"summary from branch A\"}}]}\n\n";
             usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":600,\"completion_tokens\":6,\"cached_tokens\":400}}\n\n";
         } else if (strstr(req->body, "\"content\":\"cache-branch-b\"")) {
+            event = "data: {\"choices\":[{\"delta\":{\"content\":\"summary from branch B\"}}]}\n\n";
             usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\"cached_tokens\":900}}\n\n";
         } else {
             event = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"delegate\",\"function\":{\"name\":\"subagent\",\"arguments\":"
@@ -1191,8 +1198,6 @@ static void test_subagent_stress_http(void) {
         } else {
             assert(ok(entry));
             assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 1);
-            const char *summary = clay_json_string_value(clay_json_object_get(entry, "summary"));
-            assert(summary && strstr(summary, "offline summary"));
             stress_assert_transcript(entry, 1, "offline summary");
         }
     }
@@ -1292,14 +1297,12 @@ static void test_subagent_stress_mixed(void) {
         ClayJson *entry = clay_json_array_get(results_a, i);
         assert(ok(entry));
         assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 1);
-        const char *summary = clay_json_string_value(clay_json_object_get(entry, "summary"));
-        assert(summary && strstr(summary, "mixed summary"));
+        stress_assert_transcript(entry, 1, "mixed summary");
 
         entry = clay_json_array_get(results_b, i);
         if (ok(entry)) {
             assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 1);
-            summary = clay_json_string_value(clay_json_object_get(entry, "summary"));
-            assert(summary && strstr(summary, "mixed summary"));
+            stress_assert_transcript(entry, 1, "mixed summary");
         } else {
             assert(strstr(error_of(entry), "cancelled"));
         }

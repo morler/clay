@@ -345,10 +345,7 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
     clay_json_object_set(entry, "tool_calls",
                          clay_json_number(run->tool_calls));
     clay_json_object_set(entry, "seconds", clay_json_number(run->seconds));
-    if (ok)
-      clay_json_object_set(entry, "summary",
-                           clay_json_string(run->summary.data));
-    else
+    if (!ok)
       clay_json_object_set(
           entry, "error",
           clay_json_string(run->rc == 1

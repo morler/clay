@@ -1,7 +1,7 @@
 ---
 id: 161
 title: 计划清单块实时刷新：header 统计、运行项活动与失败收尾
-status: open
+status: in-progress
 priority: high
 labels:
     - type:feature

@@ -1488,9 +1488,9 @@ void clay_commands_tools_build(ClayCommands *commands, ClayPlan *plan,
              "would change what you build.",
              ask_user_schema(), ask_user_tool, commands);
     add_tool(set, "subagent",
-             "Hands one self-contained step of a larger job to a fresh agent "
-             "that starts with no conversation history, works on its own, and "
-             "returns a summary. For big multi-part work only.",
+             "Hands one or more independent branches of a larger job to fresh "
+             "agents that start with no conversation history, work in "
+             "parallel, and return summaries. For big multi-part work only.",
              subagent_schema(), subagent_tool, commands);
   }
   clay_commands_connect_mcp_servers(commands);

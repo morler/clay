@@ -234,6 +234,142 @@ static void test_grep_directory_race_baseline(ClayCommands *commands) {
 }
 #endif
 
+static void test_read_many_and_grep_options(ClayCommands *commands) {
+    FILE *file = fopen("multi-a.txt", "w");
+    assert(file && fputs("alpha\nBeta\nGamma\n", file) >= 0 && fclose(file) == 0);
+    file = fopen("multi-b.txt", "w");
+    assert(file && fputs("one\ntwo\nthree\n", file) >= 0 && fclose(file) == 0);
+    file = fopen("multi-c.txt", "w");
+    assert(file && fputs("ALPHA\nbeta\n", file) >= 0 && fclose(file) == 0);
+    file = fopen("multi-many.txt", "w");
+    assert(file);
+    for (int i = 0; i < 6; i++) assert(fputs("line item\n", file) >= 0);
+    assert(fclose(file) == 0);
+
+    /* Per-file offset/limit in one read call. */
+    ClayJson *result = call(
+        clay_fs_tool_read,
+        "{\"paths\":[{\"path\":\"multi-a.txt\",\"offset\":2,\"limit\":1},"
+        "{\"path\":\"multi-b.txt\",\"offset\":2,\"limit\":1}]}");
+    assert(ok(result));
+    const char *output =
+        clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "==> multi-a.txt <=="));
+    assert(strstr(output, "2\tBeta"));
+    assert(strstr(output, "2\ttwo"));
+    assert(!strstr(output, "alpha"));
+    assert(!strstr(output, "one"));
+    ClayJson *files = clay_json_object_get(result, "files");
+    assert(clay_json_array_count(files) == 2);
+    assert(clay_json_bool_value(clay_json_object_get(
+        clay_json_array_get(files, 0), "ok")));
+    clay_json_free(result);
+
+    /* Top-level offset/limit apply to paths entries that omit their own. */
+    result = call(clay_fs_tool_read,
+                  "{\"paths\":[\"multi-a.txt\",\"multi-b.txt\"],\"limit\":1}");
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "1\talpha"));
+    assert(strstr(output, "1\tone"));
+    assert(!strstr(output, "Beta"));
+    assert(!strstr(output, "two"));
+    clay_json_free(result);
+
+    /* A missing member keeps the successful files and marks the result. */
+    result = call(clay_fs_tool_read,
+                  "{\"paths\":[\"multi-a.txt\",\"missing-multi\"]}");
+    assert(!ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "alpha"));
+    assert(strstr(output, "read failed"));
+    clay_json_free(result);
+
+    /* Multi-path grep with case folding and a header per target. */
+    ClayJson *args = clay_json_parse(
+        "{\"pattern\":\"alpha\",\"paths\":[\"multi-a.txt\",\"multi-c.txt\"],"
+        "\"ignore_case\":true}",
+        NULL);
+    result = clay_fs_tool_grep(args, commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "==> multi-a.txt <=="));
+    assert(strstr(output, "==> multi-c.txt <=="));
+    assert(strstr(output, "==> multi-a.txt <==\n1:alpha"));
+    assert(strstr(output, "==> multi-c.txt <==\n1:ALPHA"));
+    clay_json_free(result);
+    clay_json_free(args);
+
+    /* Context lines around a match. */
+    args = clay_json_parse(
+        "{\"pattern\":\"Beta\",\"path\":\"multi-a.txt\",\"context\":1}",
+        NULL);
+    result = clay_fs_tool_grep(args, commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "1-alpha"));
+    assert(strstr(output, "2:Beta"));
+    assert(strstr(output, "3-Gamma"));
+    clay_json_free(result);
+    clay_json_free(args);
+
+    /* File names instead of matching lines. */
+    args = clay_json_parse(
+        "{\"pattern\":\"alpha\",\"paths\":[\"multi-a.txt\",\"multi-c.txt\"],"
+        "\"ignore_case\":true,\"files_with_matches\":true}",
+        NULL);
+    result = clay_fs_tool_grep(args, commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "multi-a.txt"));
+    assert(strstr(output, "multi-c.txt"));
+    assert(!strstr(output, ":1:"));
+    clay_json_free(result);
+    clay_json_free(args);
+
+    /* The result cap is explicit, and a cut says so. */
+    args = clay_json_parse(
+        "{\"pattern\":\"line\",\"path\":\"multi-many.txt\",\"max_results\":2}",
+        NULL);
+    result = clay_fs_tool_grep(args, commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(clay_json_bool_value(
+        clay_json_object_get(result, "output_truncated")));
+    assert(clay_json_string_value(clay_json_object_get(result, "hint")));
+    int matches = 0;
+    for (const char *p = output; (p = strstr(p, "line item")) != NULL;
+         p += strlen("line item"))
+        matches++;
+    assert(matches == 2);
+    clay_json_free(result);
+    clay_json_free(args);
+
+    /* The cap is shared across paths; headers do not consume it. */
+    args = clay_json_parse(
+        "{\"pattern\":\"line\",\"paths\":[\"multi-many.txt\","
+        "\"multi-many.txt\"],\"max_results\":3}",
+        NULL);
+    result = clay_fs_tool_grep(args, commands);
+    assert(ok(result));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "==> multi-many.txt <=="));
+    matches = 0;
+    for (const char *p = output; (p = strstr(p, "line item")) != NULL;
+         p += strlen("line item"))
+        matches++;
+    assert(matches == 3);
+    assert(clay_json_bool_value(
+        clay_json_object_get(result, "output_truncated")));
+    clay_json_free(result);
+    clay_json_free(args);
+
+    assert(unlink("multi-a.txt") == 0);
+    assert(unlink("multi-b.txt") == 0);
+    assert(unlink("multi-c.txt") == 0);
+    assert(unlink("multi-many.txt") == 0);
+}
+
 int main(void) {
     test_windows_paths();
     static const struct { const char *path, *parent; } parents[] = {
@@ -761,6 +897,7 @@ int main(void) {
     commands.chat = clay_chat_create("test");
     assert(commands.chat);
     commands.sandbox_mode = CLAY_SANDBOX_MODE_UNLEASHED;
+    test_read_many_and_grep_options(&commands);
     grep_args = clay_json_parse("{\"pattern\":\"line1\",\"path\":\"a.txt\"}", NULL);
     result = clay_fs_tool_grep(grep_args, &commands);
     assert(ok(result));

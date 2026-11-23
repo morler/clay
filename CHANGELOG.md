@@ -4,6 +4,11 @@
 
 ### Added
 
+- `read` and `grep` take several targets in one call. `read` accepts `paths`
+  with an optional per-file offset/limit; `grep` accepts `paths` plus
+  `ignore_case`, `context`, `files_with_matches` and `max_results`. Both keep
+  one shared output cap, truncate on a UTF-8 boundary, and say when the cap
+  was reached instead of silently dropping the rest.
 - MCP servers reach the model through one fixed `mcp` tool instead of one
   tool per discovered server tool. `action=list` returns every server's tools
   with the argument schema each takes; `action=call` invokes one. The tool
@@ -50,6 +55,8 @@
 
 ### Fixed
 
+- OAuth model discovery no longer waits without a way out. `clay_openai_codex_list_models` and `clay_grok_list_models` accept the cancellation callback used by the completion path, return 1 when a refresh wait is cancelled, and the model picker treats that as a cancelled fetch. Escape or Ctrl-C during a wait no longer strands `/model`, and the refresh owner still publishes its rotated token. The persistent Grok credential client is gone too: the provider keeps only a subscription-mode flag, so no stale copy of a rotated token can outlive the configuration snapshot.
+- A token-rotation response that cannot allocate JSON no longer crashes the provider or silently keeps an old token. JSON node, array, object and string growth now fail closed, a test seam fails the Nth node allocation, and the Codex refresh test proves the old access/refresh pair survives a parse failure.
 - One request is billed once. A proxy that repeats its token totals on the
   first and the last chunk of one streamed response made clay log the request
   twice, so `/usage` and `chats/<id>/requests.jsonl` counted every round
@@ -129,6 +136,12 @@
 
 ### Changed
 
+- The system prompt now treats a round as a budget: one assistant message can
+  carry several independent reads, greps, globs and shell calls; related
+  read-only checks go in one command; and the model is told not to spend a
+  round narrating the next step. Todo updates complete the previous step and
+  start the next in one call, and the `subagent` tool description now matches
+  its four-branch schema.
 - The system prompt now says the checklist is the plan the user reads: no
   restating it in prose, no printing a tree of files about to be created, no
   announcing each step before taking it.

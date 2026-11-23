@@ -20,12 +20,14 @@ extern const char *clay_subagent_prompt_suffix(void);
    every request, so this is the fixed cost of talking to a provider at all.
    The ceiling is a budget, not a measurement: raise it only with the reason
    in the commit message. killy spends 12,000 characters here (system prompt
-   plus its 17 tools), and this is the number #89 has to bring clay toward. */
-#define CLAY_PROMPT_AND_TOOL_BUDGET 17400
+   plus its 17 tools), and this is the number #89 has to bring clay toward.
+   Raised to 17800 for the multi-target read/grep schemas (#151). */
+#define CLAY_PROMPT_AND_TOOL_BUDGET 17800
 
-/* A subagent's own ceiling, measured at 16406 B. Kept apart from the main
-   budget, so a change that only hurts subagents still fails. */
-#define CLAY_SUBAGENT_FIXED_COST_BUDGET 16800
+/* A subagent's own ceiling, measured at 16406 B and raised for the
+   multi-target read/grep schemas (#151). Kept apart from the main budget, so
+   a change that only hurts subagents still fails. */
+#define CLAY_SUBAGENT_FIXED_COST_BUDGET 17300
 
 /* The base prompt plus a maximal store: memory, skills, global and project
    instructions each at their own ceiling still add up to a fixed amount,
@@ -222,7 +224,13 @@ int main(void) {
 
     ClayToolSet set;
     clay_commands_tools_build(commands, &commands->plan, &set, 1);
-    size_t prompt = strlen(clay_commands_system_prompt_base());
+    const char *base_prompt = clay_commands_system_prompt_base();
+    size_t prompt = strlen(base_prompt);
+    assert(strstr(base_prompt, "# Round economy"));
+    assert(strstr(base_prompt, "One assistant message is one round"));
+    assert(strstr(base_prompt, "Put independent reads, greps, globs and shell commands"));
+    assert(!strstr(base_prompt, "one at a time"));
+    assert(!strstr(base_prompt, "Keep commands focused"));
     printf("per tool, largest first:\n");
     size_t tools = serialized_tool_bytes(&set, 1);
     clay_commands_tools_free(&set);

@@ -441,6 +441,12 @@ void clay_openai_codex_set_refresh_coordination(ClayOpenAICodex *client,
   client->refresh_end = end;
   client->refresh_coordination_userdata = userdata;
 }
+void clay_openai_codex_set_refresh_abort(ClayOpenAICodex *client,
+    int (*should_abort)(void *), void *userdata) {
+  if (!client) return;
+  client->refresh_should_abort = should_abort;
+  client->refresh_abort_userdata = userdata;
+}
 void clay_openai_codex_swap_credentials(ClayOpenAICodex *client,
                                          ClayCodexCredentials *credentials) {
   ClayCodexCredentials old = client->credentials;
@@ -1036,9 +1042,8 @@ static void append_model(ClayArray *models, ClayJson *item) {
 
 int clay_openai_codex_list_models(ClayOpenAICodex *client, ClayArray *models) {
   if (!client || !models) return -1;
-  client->refresh_should_abort = NULL;
-  client->refresh_abort_userdata = NULL;
-  if (ensure_token(client) != 0) return -1;
+  client->refresh_cancelled = 0;
+  if (ensure_token(client) != 0) return client->refresh_cancelled ? 1 : -1;
   int retried_auth = 0;
 retry_models:;
   ClayStr auth;
@@ -1062,10 +1067,17 @@ retry_models:;
   clay_str_free(&auth);
   client->last_status = response.status;
   if ((response.status == 401 || response.status == 403) && !retried_auth &&
-      !client->refresh_failed && refresh(client) == 0) {
-    retried_auth = 1;
-    clay_http_response_free(&response);
-    goto retry_models;
+      !client->refresh_failed) {
+    int refresh_rc = refresh(client);
+    if (refresh_rc == 0) {
+      retried_auth = 1;
+      clay_http_response_free(&response);
+      goto retry_models;
+    }
+    if (client->refresh_cancelled) {
+      clay_http_response_free(&response);
+      return 1;
+    }
   }
   if (rc || response.status < 200 || response.status >= 300) {
     clay_http_response_free(&response);

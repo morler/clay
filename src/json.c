@@ -19,8 +19,21 @@ struct ClayJson {
     ClayArray members; /* ClayJsonMember, for CLAY_JSON_OBJECT */
 };
 
+static int json_fail_after = -1;
+
+/* Test seam: fail the Nth json_new allocation (0 = next), then reset. */
+void clay_json_test_fail_allocation(int after) {
+    json_fail_after = after;
+}
+
 static ClayJson *json_new(ClayJsonType type) {
+    if (json_fail_after == 0) {
+        json_fail_after = -1;
+        return NULL;
+    }
+    if (json_fail_after > 0) json_fail_after--;
     ClayJson *v = calloc(1, sizeof(ClayJson));
+    if (!v) return NULL;
     v->type = type;
     return v;
 }
@@ -31,19 +44,26 @@ ClayJson *clay_json_null(void) {
 
 ClayJson *clay_json_bool(int value) {
     ClayJson *v = json_new(CLAY_JSON_BOOL);
+    if (!v) return NULL;
     v->boolean = value ? 1 : 0;
     return v;
 }
 
 ClayJson *clay_json_number(double value) {
     ClayJson *v = json_new(CLAY_JSON_NUMBER);
+    if (!v) return NULL;
     v->number = value;
     return v;
 }
 
 ClayJson *clay_json_string(const char *value) {
     ClayJson *v = json_new(CLAY_JSON_STRING);
+    if (!v) return NULL;
     v->string = strdup(value ? value : "");
+    if (!v->string) {
+        free(v);
+        return NULL;
+    }
     return v;
 }
 
@@ -57,18 +77,28 @@ char *clay_json_take_string(ClayJson *value) {
 
 ClayJson *clay_json_array(void) {
     ClayJson *v = json_new(CLAY_JSON_ARRAY);
+    if (!v) return NULL;
     clay_array_init(&v->items, sizeof(ClayJson *));
     return v;
 }
 
 ClayJson *clay_json_object(void) {
     ClayJson *v = json_new(CLAY_JSON_OBJECT);
+    if (!v) return NULL;
     clay_array_init(&v->members, sizeof(ClayJsonMember));
     return v;
 }
 
+static int json_array_push(ClayJson *array, ClayJson *value) {
+    if (!array || array->type != CLAY_JSON_ARRAY || !value) return 0;
+    void *slot = clay_array_push(&array->items);
+    if (!slot) return 0;
+    *(ClayJson **)slot = value;
+    return 1;
+}
+
 void clay_json_array_push(ClayJson *array, ClayJson *value) {
-    clay_array_push_val(&array->items, &value);
+    (void)json_array_push(array, value);
 }
 
 void clay_json_array_remove(ClayJson *array, size_t index) {
@@ -77,19 +107,38 @@ void clay_json_array_remove(ClayJson *array, size_t index) {
     clay_array_remove(&array->items, index);
 }
 
-void clay_json_object_set(ClayJson *object, const char *key, ClayJson *value) {
+static int json_object_set(ClayJson *object, const char *key, ClayJson *value) {
+    if (!object || object->type != CLAY_JSON_OBJECT || !key) {
+        clay_json_free(value);
+        return 0;
+    }
     for (size_t i = 0; i < object->members.count; i++) {
         ClayJsonMember *m = clay_array_get(&object->members, i);
         if (strcmp(m->key, key) == 0) {
             clay_json_free(m->value);
             m->value = value;
-            return;
+            return 1;
         }
     }
     ClayJsonMember m;
     m.key = strdup(key);
+    if (!m.key) {
+        clay_json_free(value);
+        return 0;
+    }
     m.value = value;
-    clay_array_push_val(&object->members, &m);
+    ClayJsonMember *slot = clay_array_push(&object->members);
+    if (!slot) {
+        free(m.key);
+        clay_json_free(value);
+        return 0;
+    }
+    *slot = m;
+    return 1;
+}
+
+void clay_json_object_set(ClayJson *object, const char *key, ClayJson *value) {
+    (void)json_object_set(object, key, value);
 }
 
 void clay_json_free(ClayJson *value) {
@@ -133,17 +182,32 @@ ClayJson *clay_json_clone(const ClayJson *value) {
             return clay_json_string(value->string);
         case CLAY_JSON_ARRAY: {
             ClayJson *arr = clay_json_array();
+            if (!arr) return NULL;
             for (size_t i = 0; i < value->items.count; i++) {
                 ClayJson *item = *(ClayJson **)clay_array_get((ClayArray *)&value->items, i);
-                clay_json_array_push(arr, clay_json_clone(item));
+                ClayJson *copy = clay_json_clone(item);
+                if (!copy || !json_array_push(arr, copy)) {
+                    clay_json_free(copy);
+                    clay_json_free(arr);
+                    return NULL;
+                }
             }
             return arr;
         }
         case CLAY_JSON_OBJECT: {
             ClayJson *obj = clay_json_object();
+            if (!obj) return NULL;
             for (size_t i = 0; i < value->members.count; i++) {
                 ClayJsonMember *m = clay_array_get((ClayArray *)&value->members, i);
-                clay_json_object_set(obj, m->key, clay_json_clone(m->value));
+                ClayJson *copy = clay_json_clone(m->value);
+                if (!copy) {
+                    clay_json_free(obj);
+                    return NULL;
+                }
+                if (!json_object_set(obj, m->key, copy)) {
+                    clay_json_free(obj);
+                    return NULL;
+                }
             }
             return obj;
         }
@@ -276,22 +340,26 @@ static int parse_hex4(const char **pp, unsigned int *value) {
     return 1;
 }
 
-static void append_utf8(ClayStr *s, unsigned int cp) {
-    if (cp < 0x80) {
-        clay_str_push_char(s, (char)cp);
-    } else if (cp < 0x800) {
-        clay_str_push_char(s, (char)(0xC0 | (cp >> 6)));
-        clay_str_push_char(s, (char)(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-        clay_str_push_char(s, (char)(0xE0 | (cp >> 12)));
-        clay_str_push_char(s, (char)(0x80 | ((cp >> 6) & 0x3F)));
-        clay_str_push_char(s, (char)(0x80 | (cp & 0x3F)));
-    } else {
-        clay_str_push_char(s, (char)(0xF0 | (cp >> 18)));
-        clay_str_push_char(s, (char)(0x80 | ((cp >> 12) & 0x3F)));
-        clay_str_push_char(s, (char)(0x80 | ((cp >> 6) & 0x3F)));
-        clay_str_push_char(s, (char)(0x80 | (cp & 0x3F)));
-    }
+static int json_push_char(ClayStr *s, char c) {
+    size_t before = s->len;
+    clay_str_push_char(s, c);
+    return s->len == before + 1;
+}
+
+static int append_utf8(ClayStr *s, unsigned int cp) {
+    if (cp < 0x80)
+        return json_push_char(s, (char)cp);
+    if (cp < 0x800)
+        return json_push_char(s, (char)(0xC0 | (cp >> 6))) &&
+               json_push_char(s, (char)(0x80 | (cp & 0x3F)));
+    if (cp < 0x10000)
+        return json_push_char(s, (char)(0xE0 | (cp >> 12))) &&
+               json_push_char(s, (char)(0x80 | ((cp >> 6) & 0x3F))) &&
+               json_push_char(s, (char)(0x80 | (cp & 0x3F)));
+    return json_push_char(s, (char)(0xF0 | (cp >> 18))) &&
+           json_push_char(s, (char)(0x80 | ((cp >> 12) & 0x3F))) &&
+           json_push_char(s, (char)(0x80 | ((cp >> 6) & 0x3F))) &&
+           json_push_char(s, (char)(0x80 | (cp & 0x3F)));
 }
 
 /* Parses a JSON string starting at *pp (which must point at the opening
@@ -311,21 +379,24 @@ static char *parse_string_raw(const char **pp) {
                 clay_str_free(&s);
                 return NULL;
             }
-            clay_str_push_char(&s, *p);
+            if (!json_push_char(&s, *p)) {
+                clay_str_free(&s);
+                return NULL;
+            }
             p++;
             continue;
         }
 
         p++;
         switch (*p) {
-            case '"': clay_str_push_char(&s, '"'); p++; break;
-            case '\\': clay_str_push_char(&s, '\\'); p++; break;
-            case '/': clay_str_push_char(&s, '/'); p++; break;
-            case 'n': clay_str_push_char(&s, '\n'); p++; break;
-            case 't': clay_str_push_char(&s, '\t'); p++; break;
-            case 'r': clay_str_push_char(&s, '\r'); p++; break;
-            case 'b': clay_str_push_char(&s, '\b'); p++; break;
-            case 'f': clay_str_push_char(&s, '\f'); p++; break;
+            case '"': if (!json_push_char(&s, '"')) { clay_str_free(&s); return NULL; } p++; break;
+            case '\\': if (!json_push_char(&s, '\\')) { clay_str_free(&s); return NULL; } p++; break;
+            case '/': if (!json_push_char(&s, '/')) { clay_str_free(&s); return NULL; } p++; break;
+            case 'n': if (!json_push_char(&s, '\n')) { clay_str_free(&s); return NULL; } p++; break;
+            case 't': if (!json_push_char(&s, '\t')) { clay_str_free(&s); return NULL; } p++; break;
+            case 'r': if (!json_push_char(&s, '\r')) { clay_str_free(&s); return NULL; } p++; break;
+            case 'b': if (!json_push_char(&s, '\b')) { clay_str_free(&s); return NULL; } p++; break;
+            case 'f': if (!json_push_char(&s, '\f')) { clay_str_free(&s); return NULL; } p++; break;
             case 'u': {
                 p++;
                 unsigned int cp = 0;
@@ -350,7 +421,10 @@ static char *parse_string_raw(const char **pp) {
                     }
                     cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
                 }
-                append_utf8(&s, cp);
+                if (!append_utf8(&s, cp)) {
+                    clay_str_free(&s);
+                    return NULL;
+                }
                 break;
             }
             default:
@@ -365,6 +439,10 @@ static char *parse_string_raw(const char **pp) {
     }
     p++;
 
+    if (!s.data) {
+        clay_str_free(&s);
+        return NULL;
+    }
     *pp = p;
     return s.data;
 }
@@ -381,6 +459,10 @@ static ClayJson *parse_value(const char **pp, unsigned int depth) {
         char *s = parse_string_raw(&p);
         if (!s) return NULL;
         ClayJson *v = json_new(CLAY_JSON_STRING);
+        if (!v) {
+            free(s);
+            return NULL;
+        }
         v->string = s;
         *pp = p;
         return v;
@@ -389,6 +471,7 @@ static ClayJson *parse_value(const char **pp, unsigned int depth) {
     if (*p == '[') {
         p++;
         ClayJson *arr = clay_json_array();
+        if (!arr) return NULL;
         p = skip_ws(p);
         if (*p == ']') {
             p++;
@@ -401,7 +484,11 @@ static ClayJson *parse_value(const char **pp, unsigned int depth) {
                 clay_json_free(arr);
                 return NULL;
             }
-            clay_json_array_push(arr, item);
+            if (!json_array_push(arr, item)) {
+                clay_json_free(item);
+                clay_json_free(arr);
+                return NULL;
+            }
             p = skip_ws(p);
             if (*p == ',') { p++; continue; }
             if (*p == ']') { p++; break; }
@@ -415,6 +502,7 @@ static ClayJson *parse_value(const char **pp, unsigned int depth) {
     if (*p == '{') {
         p++;
         ClayJson *obj = clay_json_object();
+        if (!obj) return NULL;
         p = skip_ws(p);
         if (*p == '}') {
             p++;
@@ -441,7 +529,11 @@ static ClayJson *parse_value(const char **pp, unsigned int depth) {
                 clay_json_free(obj);
                 return NULL;
             }
-            clay_json_object_set(obj, key, val);
+            if (!json_object_set(obj, key, val)) {
+                free(key);
+                clay_json_free(obj);
+                return NULL;
+            }
             free(key);
             p = skip_ws(p);
             if (*p == ',') { p++; continue; }

@@ -21,8 +21,8 @@
   "# Working principles" \
   "\n\n" \
   "Do what the user asked, at the scope they asked. Their instructions " \
-  "outrank every convention below. If an instruction looks wrong, say " \
-  "so in one sentence, then follow it." \
+  "outrank every convention below; if one looks wrong, say so once, " \
+  "then follow it." \
   "\n\n" \
   "Stand on evidence, never on speculation. Read the file, run the " \
   "command, print the value. Never describe code you have not opened, " \
@@ -34,19 +34,16 @@
   "until the symptom disappears is not a fix, and neither is silencing " \
   "an error, widening a catch, or skipping a test." \
   "\n\n" \
-  "Do not reinvent what already exists. Look for a helper in this " \
-  "project, then the standard library, then the tools already " \
-  "installed. Duplicated logic drifts apart and turns into a bug. A new " \
-  "dependency is a last resort." \
+  "Do not reinvent what exists: check this project, the standard " \
+  "library, then installed tools. Duplicated logic drifts into bugs; a " \
+  "new dependency is a last resort." \
   "\n\n" \
-  "Prefer the modern, efficient path: current APIs over deprecated " \
-  "ones, the right data structure over a repeated scan, one pass over " \
+  "Prefer current APIs, the right data structure, and one pass over " \
   "three. Efficient means fewer moving parts, not cleverer code." \
   "\n\n" \
-  "Keep the design honest. Fix causes, not symptoms. No speculative " \
-  "abstraction, no compatibility shim nobody asked for, no config flag " \
-  "standing in for a decision. Three plain lines beat a premature " \
-  "helper." \
+  "Fix causes, not symptoms. No speculative abstraction, compatibility " \
+  "shim, or config flag standing in for a decision. Three plain lines " \
+  "beat a premature helper." \
   "\n\n" \
   "Blend in. Match the project's language level, layout, naming, " \
   "formatting, error handling, and test style, and read the surrounding " \
@@ -85,13 +82,13 @@
   "is big enough to be worth briefing someone else on." \
   "\n\n" \
   "When a job is that big, write the plan first with todowrite, in " \
-  "steps a person could tick off, then work through them one at a time, " \
-  "keeping exactly one step in_progress and marking it completed before " \
-  "starting the next. That checklist is the plan the user reads: do not " \
-  "spell it out in prose as well, do not print a tree of files you are " \
-  "about to create, and do not announce each step before taking it. " \
-  "Write the plan, do the work, then say what came of it. Skip it for a " \
-  "single quick action." \
+  "steps a person could tick off. Keep one step in_progress; when it " \
+  "finishes, complete it and start the next in one todowrite call with " \
+  "that step's first tool call. That checklist is the plan the user " \
+  "reads: do not spell it out in prose as well, do not print a tree of " \
+  "files you are about to create, and do not announce each step before " \
+  "taking it. Write the plan, do the work, then say what came of it. " \
+  "Skip it for a single quick action." \
   "\n\n" \
   "Branches of the work that do not depend on each other go out " \
   "together, in one subagent call: it takes a list of tasks, starts " \
@@ -148,35 +145,44 @@
   "exact, unique match. Reach for shell_exec for everything else: " \
   "builds, tests, git, other programs." \
   "\n\n" \
+  "# Round economy" \
+  "\n\n" \
+  "One assistant message is one round; it may carry several tool calls. " \
+  "Put independent reads, greps, globs and shell commands in the same " \
+  "message (three to six is normal), and combine related read-only shell " \
+  "checks into one command. Do not spend a round narrating the next step: " \
+  "act, then summarize." \
+  "\n\n" \
   "shell_exec runs in /workspace, the sandbox alias of the project " \
-  "directory; do not try to discover its host path or inspect mounts. " \
+  "directory; do not prefix cd, discover its host path, or inspect " \
+  "mounts. " \
   "/scratch is this conversation's private directory under /tmp, for " \
   "temporary files. Sandboxed commands cannot reach host paths outside " \
   "the configured read-only mounts, and their network reaches only each " \
   "other: a server one command starts is reachable from your next " \
   "command over localhost, and from nothing on the user's machine. " \
   "Normal POSIX syntax works (variables, command substitution, globs, " \
-  "redirections) but may need an execution confirmation. Keep commands " \
-  "focused and summarize what came back." \
+  "redirections) but may need an execution confirmation. Group related " \
+  "read-only checks into one command; summarize what came back." \
   "\n\n" \
   "shell_exec kills a command after 120 seconds and hands you what it " \
   "printed by then, so a stuck command never stalls the session; raise " \
   "timeout_seconds for a slow build or test run." \
   "\n\n" \
   "A command that only ends when someone stops it belongs in task_run, " \
-  "not shell_exec: it starts in the background and returns as soon as " \
-  "it has had a moment to fail. task_output shows what a task has " \
+  "not shell_exec: it starts in the background and returns after a " \
+  "moment. task_output shows what a task has " \
   "printed and whether it is still alive, task_stop ends it, and " \
   "task_list shows everything running. The usual shape is task_run the " \
   "server, shell_exec a curl against it, read task_output if the curl " \
   "looks wrong, then task_stop. Stop what you started before your turn " \
   "ends; nothing else will." \
   "\n\n" \
-  "repo_map ranks the workspace's top-level definitions; use it to " \
-  "orient in unfamiliar code before opening files one by one." \
+  "repo_map ranks top-level definitions; use it to orient before " \
+  "opening files one by one." \
   "\n\n" \
-  "The mcp tool reaches the servers the user configured with /mcp: list " \
-  "their tools and arguments, then call one." \
+  "The mcp tool reaches /mcp servers: list their tools and arguments, " \
+  "then call one." \
   "\n\n" \
   "The user can put you in Plan mode with /plan to discuss an approach " \
   "before anything changes: write and edit are refused there and " \
@@ -414,7 +420,6 @@ static void provider_models_free(ClayConnectedProvider *provider) {
 static void provider_free(ClayConnectedProvider *provider) {
   clay_openai_destroy(provider->client);
   clay_openai_codex_destroy(provider->codex_client);
-  clay_grok_destroy(provider->grok_client);
   clay_config_free(provider->config);
   provider_models_free(provider);
 }
@@ -453,6 +458,15 @@ static pthread_mutex_t codex_credentials_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t credential_save_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t codex_refresh_cond = PTHREAD_COND_INITIALIZER;
 static pthread_cond_t grok_refresh_cond = PTHREAD_COND_INITIALIZER;
+
+/* Test-only negative probe: network and tool work must never run while the
+   credential mutex is held. */
+int clay_commands_test_credentials_lock_free(void) {
+  if (pthread_mutex_trylock(&codex_credentials_lock) != 0)
+    return 0;
+  pthread_mutex_unlock(&codex_credentials_lock);
+  return 1;
+}
 
 #define UNPERSISTED_RETRY_SECONDS 5
 
@@ -601,13 +615,6 @@ void clay_commands_load_provider(ClayCommands *commands,
                                       config->account_id, config->expires_at};
   ClayOpenAICodex *codex_client =
       is_codex ? clay_openai_codex_create(&credentials, NULL) : NULL;
-  ClayGrokCredentials grok_credentials = {config->access_token,
-                                          config->refresh_token,
-                                          config->id_token,
-                                          config->expires_at};
-  ClayGrok *grok_client = is_grok_subscription
-                              ? clay_grok_create(&grok_credentials, NULL)
-                              : NULL;
 
   pthread_mutex_lock(&codex_credentials_lock);
   ClayConnectedProvider *existing =
@@ -618,7 +625,6 @@ void clay_commands_load_provider(ClayCommands *commands,
     pthread_mutex_unlock(&codex_credentials_lock);
     clay_openai_destroy(client);
     clay_openai_codex_destroy(codex_client);
-    clay_grok_destroy(grok_client);
     clay_config_free(config);
     provider_replace_end(commands);
     return;
@@ -627,7 +633,6 @@ void clay_commands_load_provider(ClayCommands *commands,
   if (existing) {
     ClayOpenAI *old_client = existing->client;
     ClayOpenAICodex *old_codex_client = existing->codex_client;
-    ClayGrok *old_grok_client = existing->grok_client;
     ClayProviderConfig *old_config = existing->config;
     provider_models_free(existing);
     existing->config = config;
@@ -650,7 +655,7 @@ void clay_commands_load_provider(ClayCommands *commands,
     existing->environment_override = environment_override;
     existing->client = client;
     existing->codex_client = codex_client;
-    existing->grok_client = grok_client;
+    existing->grok_subscription = is_grok_subscription;
     clay_array_init(&existing->models, sizeof(char *));
     existing->models_fetched = 0;
     existing->models_rc = 0;
@@ -659,7 +664,6 @@ void clay_commands_load_provider(ClayCommands *commands,
     pthread_mutex_unlock(&codex_credentials_lock);
     clay_openai_destroy(old_client);
     clay_openai_codex_destroy(old_codex_client);
-    clay_grok_destroy(old_grok_client);
     clay_config_free(old_config);
     provider_replace_end(commands);
     return;
@@ -673,7 +677,7 @@ void clay_commands_load_provider(ClayCommands *commands,
   provider.environment_override = environment_override;
   provider.client = client;
   provider.codex_client = codex_client;
-  provider.grok_client = grok_client;
+  provider.grok_subscription = is_grok_subscription;
   clay_array_init(&provider.models, sizeof(char *));
   ClayConnectedProvider *slot = clay_array_push(&commands->providers);
   if (slot)
@@ -1749,7 +1753,7 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
   int is_codex = strcmp(provider->type->id, "openai-codex") == 0;
   int is_responses = strcmp(provider->type->id, "openai-responses") == 0;
   int is_grok_subscription =
-      strcmp(provider->type->id, "grok") == 0 && provider->grok_client != NULL;
+      strcmp(provider->type->id, "grok") == 0 && provider->grok_subscription;
 
   if (is_codex || is_responses) {
     uint64_t version = 0;
@@ -2232,6 +2236,15 @@ int clay_commands_select_model(ClayCommands *commands, const char *provider,
                                     commands->selected_model);
 }
 
+/* A model-list refresh can wait on another worker's OAuth rotation. Escape or
+   Ctrl-C during that wait cancels the wait, not the token request already in
+   flight: the owner still receives and publishes its rotated credentials. */
+static int model_fetch_should_abort(void *userdata) {
+  (void)userdata;
+  return clay_term_is_interactive() &&
+         (clay_term_take_escape() || clay_term_take_interrupt());
+}
+
 int clay_commands_fetch_models(void *ctx, ClayArray *out) {
   ClayConnectedProvider *provider = ctx;
   ClayCommands *commands = provider->commands;
@@ -2244,6 +2257,7 @@ int clay_commands_fetch_models(void *ctx, ClayArray *out) {
       ClayOpenAICodex *codex = clay_commands_codex_snapshot(provider, NULL, &version);
       CodexRefreshSave save = {provider, provider->generation, version};
       if (codex) {
+        clay_openai_codex_set_refresh_abort(codex, model_fetch_should_abort, NULL);
         clay_openai_codex_set_refresh_observer(codex, save_codex_refresh, &save);
         clay_openai_codex_set_refresh_coordination(codex, begin_codex_refresh, end_codex_refresh, &save);
       }
@@ -2254,11 +2268,12 @@ int clay_commands_fetch_models(void *ctx, ClayArray *out) {
         provider->models_rc = -1;
       clay_openai_codex_destroy(codex);
     } else if (strcmp(provider->type->id, "grok") == 0 &&
-               provider->grok_client) {
+               provider->grok_subscription) {
       uint64_t version = 0;
       ClayGrok *grok = clay_commands_grok_snapshot(provider, NULL, &version);
       GrokRefreshSave save = {provider, provider->generation, version};
       if (grok) {
+        clay_grok_set_refresh_abort(grok, model_fetch_should_abort, NULL);
         clay_grok_set_refresh_observer(grok, save_grok_refresh, &save);
         clay_grok_set_refresh_coordination(grok, begin_grok_refresh, end_grok_refresh, &save);
       }
@@ -2270,6 +2285,14 @@ int clay_commands_fetch_models(void *ctx, ClayArray *out) {
     } else {
       provider->models_rc =
           clay_openai_list_models(provider->client, &provider->models);
+    }
+    if (provider->models_rc == 1) {
+      provider_models_free(provider);
+      clay_array_init(&provider->models, sizeof(char *));
+      provider->models_fetched = 0;
+      clay_task_fail(task, "Cancelled");
+      if (commands) provider_use_end(commands);
+      return 1;
     }
     provider->models_fetched = 1;
     if (provider->models_rc == 0)

@@ -50,6 +50,12 @@ static int test_http(const ClayHttpRequest *request, ClayHttpResponse *response)
 #undef strdup
 #undef clay_http_request
 
+static int cancelled_begin(void *userdata, ClayGrok *client,
+                           int (*should_abort)(void *), void *abort_userdata) {
+  (void)userdata; (void)client; (void)should_abort; (void)abort_userdata;
+  return 2;
+}
+
 int main(void) {
   for (int scenario = 0; scenario < 6; scenario++) {
     ClayGrokCredentials initial = {"old-access", "old-refresh", "old-id", 1};
@@ -160,6 +166,37 @@ int main(void) {
   assert(ensure_access_token(client) == 0);
   assert(seq_n == 1 && !client->openai_key_stale);
   clay_grok_destroy(client);
+
+  /* A model-list refresh wait can be cancelled without a token request. */
+  ClayGrokCredentials expired = {"old-access", "old-refresh", "old-id", 1};
+  client = clay_grok_create(&expired, "model");
+  assert(client);
+  clay_grok_set_refresh_coordination(client, cancelled_begin, NULL, NULL);
+  clay_array_init(&models, sizeof(char *));
+  assert(clay_grok_list_models(client, &models) == 1);
+  assert(models.count == 0);
+  free_models(&models);
+  clay_grok_destroy(client);
+
+  /* A 401-triggered model-list refresh propagates cancellation too. */
+  client = clay_grok_create(&fresh, "model");
+  assert(client);
+  clay_grok_set_refresh_coordination(client, cancelled_begin, NULL, NULL);
+  clay_array_init(&models, sizeof(char *));
+  seq_mode = 1; seq_n = 0;
+  seq_status[0] = 401; seq_body[0] = "{}";
+  assert(clay_grok_list_models(client, &models) == 1);
+  assert(seq_n == 1 && models.count == 0);
+  free_models(&models);
+  clay_grok_destroy(client);
+
+  /* Null arguments are rejected instead of dereferenced. */
+  assert(clay_grok_list_models(NULL, &models) == -1);
+  client = clay_grok_create(&fresh, "model");
+  assert(client);
+  assert(clay_grok_list_models(client, NULL) == -1);
+  clay_grok_destroy(client);
+
   seq_mode = 0;
   puts("grok refresh tests passed");
   return 0;

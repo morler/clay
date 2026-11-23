@@ -57,10 +57,14 @@ void clay_grok_set_refresh_observer(ClayGrok *client,
 void clay_grok_set_refresh_coordination(ClayGrok *client,
     int (*begin)(void *, ClayGrok *, int (*)(void *), void *),
     void (*end)(void *, int), void *userdata);
+/* Cancel a refresh wait; the callback runs without the credential lock. */
+void clay_grok_set_refresh_abort(ClayGrok *client,
+    int (*should_abort)(void *), void *userdata);
 void clay_grok_swap_credentials(ClayGrok *client, ClayGrokCredentials *credentials);
 void clay_grok_set_reasoning_effort(ClayGrok *client, const char *effort);
 /* Stable per-chat routing key for xAI's automatic prompt cache. */
 void clay_grok_set_conversation_id(ClayGrok *client, const char *id);
+/* Returns 0 on success, 1 when a refresh wait was cancelled, -1 on failure. */
 int clay_grok_list_models(ClayGrok *client, ClayArray *models);
 int clay_grok_run(ClayGrok *client, ClayJson *messages, const ClayTool *tools,
                   size_t tool_count, int max_rounds,

@@ -26,8 +26,10 @@ relations:
     related-to:
         - 145
         - 146
+        - 148
+        - 149
 created: "2026-11-17"
-updated: "2026-11-18"
+updated: "2026-11-20"
 ---
 
 目标：以 killi（/var/home/msc802/code/harness/killi）的 prompt-cache 设计为参照，降低 clay 的输入 token 并让缓存命中可测、可回归。killi 侧证据：system prompt + 全部工具 11,714 字符 ≈2,900 tokens（docs/decisions.md:481，tests.rs:5-16 强制预算）；历史只追加、工具列表会话内冻结（decisions 9/26，tools/mod.rs:1-2）；压缩阈值按窗口 60%、85% 上限、输出预留 ≤limit/4、20% 增长门槛、保留用户请求（compact.rs:4-67）；usage 逐请求记录并带 model/context_window（agent/request.rs:182-214），scripts/sessions.py 统计缓存率与 cache-miss streak。

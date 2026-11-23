@@ -44,6 +44,9 @@ void clay_openai_codex_set_refresh_observer(ClayOpenAICodex *client,
 void clay_openai_codex_set_refresh_coordination(ClayOpenAICodex *client,
     int (*begin)(void *, ClayOpenAICodex *, int (*)(void *), void *),
     void (*end)(void *, int), void *userdata);
+/* Cancel a refresh wait; the callback runs without the credential lock. */
+void clay_openai_codex_set_refresh_abort(ClayOpenAICodex *client,
+    int (*should_abort)(void *), void *userdata);
 /* Exchange owned credential strings without allocating. */
 void clay_openai_codex_swap_credentials(ClayOpenAICodex *client,
                                          ClayCodexCredentials *credentials);
@@ -53,6 +56,7 @@ void clay_openai_codex_set_reasoning_effort(ClayOpenAICodex *client,
 /* Stable per-chat key used by the Responses prompt cache. */
 void clay_openai_codex_set_prompt_cache_key(ClayOpenAICodex *client,
                                             const char *key);
+/* Returns 0 on success, 1 when a refresh wait was cancelled, -1 on failure. */
 int clay_openai_codex_list_models(ClayOpenAICodex *client, ClayArray *models);
 long clay_openai_codex_last_status(const ClayOpenAICodex *client);
 /* Caller saves a copied result to its existing credential store after this

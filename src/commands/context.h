@@ -36,7 +36,7 @@ typedef struct {
   ClayProviderConfig *config;
   ClayOpenAI *client;
   ClayOpenAICodex *codex_client;
-  ClayGrok *grok_client;
+  int grok_subscription; /* Grok OAuth mode; no persistent credential client. */
   int environment_override;
   ClayArray models;
   int models_fetched;
@@ -201,6 +201,8 @@ ClayConnectedProvider *clay_commands_find_provider(ClayCommands *commands,
 uint64_t clay_commands_provider_generation(ClayCommands *commands, const char *id);
 const ClayProviderType *clay_commands_find_provider_type(const char *id);
 const ClayProviderType *clay_commands_provider_types(size_t *count);
+/* Returns 0 on success, 1 when the user cancelled a credential-refresh
+   wait, -1 on failure. */
 int clay_commands_fetch_models(void *ctx, ClayArray *out);
 int clay_commands_select_model(ClayCommands *commands, const char *provider,
                                const char *model);
@@ -223,6 +225,8 @@ void clay_commands_set_tokens_below_with_cache(
     ClayCommands *commands, long input_tokens, long output_tokens,
     long cached_input_tokens, int cached_input_tokens_known);
 void clay_commands_reset_conversation(ClayCommands *commands);
+/* Test-only probe: 1 when no thread holds the credential mutex. */
+int clay_commands_test_credentials_lock_free(void);
 /* The build's fixed system prompt, without memory, skills or project
    instructions. Borrowed; the budget test measures it. */
 const char *clay_commands_system_prompt_base(void);

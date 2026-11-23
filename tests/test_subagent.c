@@ -253,6 +253,13 @@ static void subagent_budget_http(const ClayHttpRequest *req) {
 
 int __real_clay_http_request(const ClayHttpRequest *, ClayHttpResponse *);
 int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp) {
+    /* Single-threaded catalog/refresh paths: network runs without the
+       credential lock. Multi-threaded mocks may observe another worker's
+       short critical section, so they are not probed here. */
+    if (review_mock == 3 || review_mock == 4 || review_mock == 5 ||
+        review_mock == 6 || review_mock == 7 || review_mock == 8 ||
+        review_mock == 12)
+        assert(clay_commands_test_credentials_lock_free());
     if (!review_mock) return __real_clay_http_request(req, resp);
     memset(resp, 0, sizeof(*resp));
     if (review_mock == 23) {
@@ -674,12 +681,10 @@ static void test_grok_network_singleflight(void) {
         ClayProviderConfig config = {0};
         config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
         config.expires_at = scenario == 3 ? 4102444800LL : 1;
-        ClayGrokCredentials credentials = {config.access_token, config.refresh_token, NULL, config.expires_at};
         ClayConnectedProvider provider = {0};
         provider.config = &config; provider.environment_override = scenario != 4; provider.generation = 1;
         provider.type = clay_commands_find_provider_type("grok");
-        provider.grok_client = clay_grok_create(&credentials, NULL);
-        assert(provider.grok_client);
+        provider.grok_subscription = 1;
         clay_array_init(&provider.models, sizeof(char *));
         clay_array_push_val(&c.providers, &provider);
         ClayConnectedProvider *shared = clay_array_get(&c.providers, 0);
@@ -724,7 +729,7 @@ static void test_grok_network_singleflight(void) {
         assert(!strcmp(config.refresh_token, scenario == 2 ? "old-refresh" : "new-refresh"));
         if (scenario == 3) assert(stale_old == 2 && stale_new == 2);
         for (size_t i = 0; i < shared->models.count; i++) free(*(char **)clay_array_get(&shared->models, i));
-        clay_array_free(&shared->models); clay_grok_destroy(shared->grok_client);
+        clay_array_free(&shared->models);
         clay_scope_registry_destroy(c.scopes); clay_array_free(&c.providers);
         free(config.access_token); free(config.refresh_token);
     }
@@ -802,13 +807,11 @@ static void test_grok_catalog_refresh_failure(void) {
         ClayProviderConfig config = {0};
         config.access_token = strdup("old"); config.refresh_token = strdup("old-refresh");
         config.expires_at = 1;
-        ClayGrokCredentials initial = {config.access_token, config.refresh_token, NULL, 1};
         ClayConnectedProvider provider = {0};
         provider.config = &config; provider.type = clay_commands_find_provider_type("grok");
         config.id = scenario == 5 ? NULL : "grok-review";
         provider.environment_override = scenario == 4;
-        provider.grok_client = clay_grok_create(&initial, NULL);
-        assert(provider.grok_client);
+        provider.grok_subscription = 1;
         clay_array_init(&provider.models, sizeof(char *));
         ClayArray out; clay_array_init(&out, sizeof(ClayModelItem));
         review_mock = scenario;
@@ -825,7 +828,6 @@ static void test_grok_catalog_refresh_failure(void) {
         }
         for (size_t i = 0; i < provider.models.count; i++) free(*(char **)clay_array_get(&provider.models, i));
         clay_array_free(&provider.models); clay_array_free(&out);
-        clay_grok_destroy(provider.grok_client);
         free(config.access_token); free(config.refresh_token);
     }
     review_mock = 0;
@@ -838,12 +840,10 @@ static void test_grok_invalid_grant_preserves_config(void) {
     config.refresh_token = strdup("old-refresh");
     config.expires_at = 1;
     assert(clay_config_save(&config) == 0);
-    ClayGrokCredentials initial = {config.access_token, config.refresh_token, NULL, 1};
     ClayConnectedProvider provider = {0};
     provider.config = &config;
     provider.type = clay_commands_find_provider_type("grok");
-    provider.grok_client = clay_grok_create(&initial, NULL);
-    assert(provider.grok_client);
+    provider.grok_subscription = 1;
     clay_array_init(&provider.models, sizeof(char *));
     ClayArray out;
     clay_array_init(&out, sizeof(ClayModelItem));
@@ -854,7 +854,6 @@ static void test_grok_invalid_grant_preserves_config(void) {
     clay_config_free(saved);
     clay_array_free(&provider.models);
     clay_array_free(&out);
-    clay_grok_destroy(provider.grok_client);
     free(config.access_token);
     free(config.refresh_token);
     review_mock = 0;
@@ -953,13 +952,10 @@ static void test_grok_concurrent_snapshot(void) {
     ClayProviderConfig config = {0};
     config.access_token = strdup("old");
     config.refresh_token = strdup("refresh");
-    ClayGrokCredentials initial = {config.access_token, config.refresh_token, NULL, 0};
     ClayConnectedProvider provider = {0};
     provider.config = &config;
     provider.environment_override = 1;
-    provider.grok_client = clay_grok_create(&initial, NULL);
-    assert(provider.grok_client);
-    ClayGrok *persistent = provider.grok_client;
+    provider.grok_subscription = 1;
     CodexRace race = {.provider = &provider};
     CodexWorker workers[2] = {{&race, 0}, {&race, 1}};
     pthread_t threads[2];
@@ -967,13 +963,8 @@ static void test_grok_concurrent_snapshot(void) {
     for (int i = 0; i < 2; i++) assert(!pthread_create(&threads[i], NULL, grok_worker, &workers[i]));
     for (int i = 0; i < 2; i++) assert(!pthread_join(threads[i], NULL));
     assert(race.result[0] + race.result[1] == 1);
-    assert(provider.grok_version == 1 && provider.grok_client == persistent);
+    assert(provider.grok_version == 1 && provider.grok_subscription);
     assert(!strcmp(config.access_token, "new-a") || !strcmp(config.access_token, "new-b"));
-    ClayGrokCredentials original = {0};
-    assert(clay_grok_copy_credentials(persistent, &original) == 0);
-    assert(!strcmp(original.access_token, "old"));
-    clay_grok_credentials_free(&original);
-    clay_grok_destroy(persistent);
     assert(!pthread_barrier_destroy(&race.barrier));
     free(config.access_token); free(config.refresh_token);
 }
@@ -2416,7 +2407,7 @@ static void test_completion_scopes(void) {
     assert(unsetenv("GROK_REFRESH_TOKEN") == 0);
     assert(setenv("XAI_API_KEY", "offline-key", 1) == 0);
     clay_commands_load_provider(&c, clay_commands_find_provider_type("grok"));
-    assert(!clay_commands_find_provider(&c, "grok")->grok_client);
+    assert(!clay_commands_find_provider(&c, "grok")->grok_subscription);
     assert(clay_commands_run_completion(&c, NULL, NULL, 1, NULL, NULL) == 0);
     assert(p.main_scope == clay_scope_get(c.scopes,
         clay_commands_provider_generation(&c, "grok"),

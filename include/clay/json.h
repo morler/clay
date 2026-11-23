@@ -55,4 +55,9 @@ void clay_json_stringify(const ClayJson *value, ClayStr *out);
    Caller frees the result with clay_json_free. */
 ClayJson *clay_json_parse(const char *text, const char **end_out);
 
+/* Test seam: fail the Nth JSON node allocation (0 = next), then reset.
+   Used to prove token refreshes preserve rotated credentials when parsing
+   the response cannot allocate. */
+void clay_json_test_fail_allocation(int after);
+
 #endif /* CLAY_JSON_H */

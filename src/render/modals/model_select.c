@@ -89,6 +89,10 @@ static ClayModelSelection model_select_fallback(const ClayModelProvider *provide
     ClayArray items;
     clay_array_init(&items, sizeof(ClayModelItem));
     int fetch_rc = providers[active].fetch(providers[active].ctx, &items);
+    if (fetch_rc == 1) {
+        clay_array_free(&items);
+        return result;
+    }
     if (fetch_rc != 0) {
         printf("%sCould not retrieve models from %s.%s\n", clay_color(CLAY_RED), providers[active].label,
                clay_color(CLAY_RESET));
@@ -165,6 +169,7 @@ ClayModelSelection clay_model_select(const ClayModelProvider *providers, int pro
         if (!cache->fetched) {
             cache->fetch_rc = providers[active_tab].fetch(providers[active_tab].ctx, &cache->items);
             cache->fetched = 1;
+            if (cache->fetch_rc == 1) break;
         }
 
         clay_array_clear(&filtered);

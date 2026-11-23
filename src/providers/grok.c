@@ -472,6 +472,12 @@ void clay_grok_set_refresh_coordination(ClayGrok *client,
   client->refresh_end = end;
   client->refresh_coordination_userdata = userdata;
 }
+void clay_grok_set_refresh_abort(ClayGrok *client,
+    int (*should_abort)(void *), void *userdata) {
+  if (!client) return;
+  client->refresh_should_abort = should_abort;
+  client->refresh_abort_userdata = userdata;
+}
 void clay_grok_swap_credentials(ClayGrok *client, ClayGrokCredentials *credentials) {
   ClayGrokCredentials old = client->credentials;
   client->credentials = *credentials;
@@ -485,7 +491,9 @@ void clay_grok_set_conversation_id(ClayGrok *client, const char *id) {
     clay_openai_set_extra_header(client->openai, "x-grok-conv-id", id);
 }
 int clay_grok_list_models(ClayGrok *client, ClayArray *models) {
-  if (!client || ensure_access_token(client) != 0) return -1;
+  if (!client || !models) return -1;
+  int token_rc = ensure_access_token(client);
+  if (token_rc != 0) return token_rc == 2 ? 1 : -1;
   /* The proxy catalog is subscription/account-specific. Do not seed it with
      public API model names; the default Grok Build route is used only when
      no model has been selected yet. */
@@ -502,8 +510,13 @@ int clay_grok_list_models(ClayGrok *client, ClayArray *models) {
     rc = clay_openai_list_models(catalog, models);
     long status = clay_openai_last_status(catalog);
     clay_openai_destroy(catalog);
-    if (rc == 0 || attempt || (status != 401 && status != 403) || refresh(client) != 0)
+    if (rc == 0 || attempt || (status != 401 && status != 403))
       break;
+    int refresh_rc = refresh(client);
+    if (refresh_rc != 0) {
+      rc = refresh_rc == 2 ? 1 : -1;
+      break;
+    }
   }
   return rc;
 }

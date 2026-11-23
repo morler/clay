@@ -1,4 +1,5 @@
 #include "clay/http.h"
+#include "clay/json.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@ static int transport_failure;
 static const char *reply;
 static int expect_model_failure;
 static int observed;
+static int fail_parse_on_http;
 static int test_http(const ClayHttpRequest *request, ClayHttpResponse *response) {
   memset(response, 0, sizeof(*response));
   if (expect_model_failure && !strcmp(request->method, "GET")) {
@@ -24,6 +26,8 @@ static int test_http(const ClayHttpRequest *request, ClayHttpResponse *response)
   }
   response->status = status;
   if (reply) response->body = strdup(reply);
+  if (fail_parse_on_http && strstr(request->url, "/oauth/token"))
+    clay_json_test_fail_allocation(0);
   return transport_failure ? -1 : 0;
 }
 #define strdup test_strdup
@@ -63,6 +67,12 @@ static void coordinated_end(void *userdata, int result) {
   RefreshCoordination *coordination = userdata;
   coordination->ends++;
   coordination->end_result = result;
+}
+
+static int cancelled_begin(void *userdata, ClayOpenAICodex *client,
+                           int (*should_abort)(void *), void *abort_userdata) {
+  (void)userdata; (void)client; (void)should_abort; (void)abort_userdata;
+  return 2;
 }
 
 int main(void) {
@@ -146,6 +156,59 @@ int main(void) {
   assert(coordination.end_result != 0);
   assert(client->authentication_invalid);
   assert(!strcmp(client->credentials.refresh_token, "old-refresh"));
+  clay_openai_codex_destroy(client);
+
+  /* A model-list refresh wait can be cancelled without a token request. */
+  ClayCodexCredentials expired = {"old-access", "old-refresh", "old-id",
+                                  "account", 1};
+  client = clay_openai_codex_create(&expired, "model");
+  assert(client);
+  clay_openai_codex_set_refresh_coordination(client, cancelled_begin, NULL, NULL);
+  ClayArray cancelled_models;
+  clay_array_init(&cancelled_models, sizeof(char *));
+  assert(clay_openai_codex_list_models(client, &cancelled_models) == 1);
+  assert(cancelled_models.count == 0);
+  clay_array_free(&cancelled_models);
+  clay_openai_codex_destroy(client);
+
+  /* A 401-triggered model-list refresh propagates cancellation too. */
+  ClayCodexCredentials fresh = {"old-access", "old-refresh", "old-id",
+                                "account", (long long)time(NULL) + 3600};
+  status = 401; transport_failure = 0; reply = "{}"; expect_model_failure = 0;
+  client = clay_openai_codex_create(&fresh, "model");
+  assert(client);
+  clay_openai_codex_set_refresh_coordination(client, cancelled_begin, NULL, NULL);
+  clay_array_init(&cancelled_models, sizeof(char *));
+  assert(clay_openai_codex_list_models(client, &cancelled_models) == 1);
+  assert(cancelled_models.count == 0);
+  clay_array_free(&cancelled_models);
+  clay_openai_codex_destroy(client);
+
+  /* JSON node allocation failure returns NULL instead of dereferencing it. */
+  const char *token_json =
+      "{\"access_token\":\"a\",\"refresh_token\":\"r\",\"id_token\":\"i\",\"expires_in\":3600}";
+  for (int fail = 0; fail < 5; fail++) {
+    clay_json_test_fail_allocation(fail);
+    ClayJson *parsed = clay_json_parse(token_json, NULL);
+    clay_json_test_fail_allocation(-1);
+    assert(!parsed);
+  }
+  ClayJson *parsed = clay_json_parse(token_json, NULL);
+  assert(parsed);
+  clay_json_free(parsed);
+
+  /* A token response that cannot allocate must not replace old credentials. */
+  ClayCodexCredentials parse_fail = {"old-access", "old-refresh", "old-id",
+                                     "account", 1};
+  client = clay_openai_codex_create(&parse_fail, "model");
+  assert(client);
+  status = 200; transport_failure = 0; reply = token_json;
+  fail_parse_on_http = 1;
+  assert(refresh(client) != 0);
+  fail_parse_on_http = 0;
+  assert(strcmp(client->credentials.access_token, "old-access") == 0);
+  assert(strcmp(client->credentials.refresh_token, "old-refresh") == 0);
+  assert(!client->authentication_invalid);
   clay_openai_codex_destroy(client);
 
   puts("openai_codex refresh tests passed");

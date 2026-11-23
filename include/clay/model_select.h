@@ -12,6 +12,8 @@ typedef struct {
    Model item strings are borrowed for the duration of clay_model_select.
    Returns 0 on success. */
 typedef int (*ClayModelFetch)(void *ctx, ClayArray *out);
+/* Fetches append ClayModelItem values. Return 0 on success, 1 when the user
+   cancelled the fetch, and any other value on failure. */
 
 typedef struct {
     const char *id;    /* stable provider id returned in ClayModelSelection */

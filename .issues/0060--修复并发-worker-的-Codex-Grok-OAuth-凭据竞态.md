@@ -1,7 +1,7 @@
 ---
 id: 60
 title: 修复并发 worker 的 Codex/Grok OAuth 凭据竞态
-status: in-progress
+status: closed
 priority: high
 labels:
     - source:lif
@@ -16,16 +16,11 @@ relations:
         - 65
         - 66
         - 67
-        - 68
-        - 69
-        - 70
-        - 71
-        - 72
-        - 73
-        - 74
-        - 75
+    related-to:
+        - 149
 created: "2026-11-17"
-updated: "2026-11-17"
+updated: "2026-11-20"
+closed: "2026-11-20"
 ---
 
 二阶段前置：src/commands/context.c:563-629 保存凭据时释放并替换共享配置字符串，:1054-1101 并发 worker 读取这些字符串及 grok_client；Grok 保存还会销毁/替换模型客户端，可能产生数据竞争、悬空引用和使用后释放。src/providers/openai_codex.c 与 src/providers/grok.c 的过期刷新和 401/403 刷新都由各短生命周期客户端独立进行；同时使用可轮换 refresh token 可能导致失败，旧请求随后无条件保存或移除配置，覆盖或删除新凭据。clay_commands_fetch_models 亦使用持久客户端及相同保存路径。
@@ -137,6 +132,23 @@ clay_grok_list_models 在 401/403 时经 refresh(client) 协调刷新后重试�
 本 item 已拆为 #62-#75 共 14 个子项，覆盖 TSAN 基础设施、Codex/Grok 刷新与取消边界、持久化失败恢复、凭据锁与 provider 生命周期、故障注入与确定性交错测试、真实网络验证。所有子项完成前本 item 保持 in-progress；`issues check` 已验证关系一致。
 
 ---
+
+## 2026-11-20 子项合并（#68-#75）
+
+以下 8 个 open 子项已合并回本 issue，不再作为独立执行单元；原 issue 正文为空，范围按标题与本 issue 未完成风险重建。完成一项勾选一项，全部完成后关闭本 issue。
+
+- [x] #68 为 Codex 模型列表刷新等待加入取消：`clay_openai_codex_list_models` 接入 `set_refresh_abort`，取消返回 1；`test_openai_codex_refresh` 覆盖过期与 401 两条路径。
+- [x] #69 修复 Grok 模型列表空指针、刷新失败守卫与取消返回语义：`clay_grok_list_models` 校验 `client/models`，401/403 刷新失败映射 -1、取消映射 1；`test_grok_refresh` 覆盖。
+- [x] #70 为 Grok 模型列表刷新等待加入取消：`clay_grok_set_refresh_abort` + 模型选择器的 fetch_rc=1 取消语义；mock 覆盖。
+- [x] #71 收敛持久 Grok 客户端寿命避免读到过期 token：删除 `ClayConnectedProvider.grok_client`，改为 `grok_subscription` 标志；不再保留携带旧 token 的持久客户端，快照始终从配置创建。
+- [x] #72 修复故障注入测试有效性并覆盖 JSON 解析分配失败：`json_new` 可注入分配失败并返回 NULL，解析器在节点/数组/对象/字符串分配失败时清理；`test_openai_codex_refresh` 覆盖 5 个节点位置与 token 刷新保旧凭据。
+- [x] #73 新增持久化失败与版本交错的确定性回归测试：既有 `test_codex_publication_waits_for_end`、`test_unpersisted_retry`、`test_codex_concurrent_snapshot`、`test_grok_concurrent_snapshot`、`test_stale_completion_results` 覆盖；本轮 `make test` 通过。
+- [x] #74 新增跨模型单飞与不持锁负向探针测试：既有 `test_codex_network_singleflight`、`test_grok_network_singleflight`、`test_codex_stale_http`；新增单线程路径 `clay_commands_test_credentials_lock_free` 探针，`make test-tsan` 通过。
+- [ ] #75 验证真实 OAuth 端点轮换与响应 shape：未验证；当前环境没有可用的真实 Codex/Grok OAuth 凭据。离线请求 shape、轮换与失败路径已由 mock 覆盖，真实端点需在有凭据的环境补跑并记录。
+
+2026-11-20 实施结果：移除 Grok 持久凭据客户端；Codex/Grok 模型列表刷新等待支持 Escape/Ctrl-C 取消并返回 1；JSON 解析分配失败不再崩溃或覆盖旧 token；新增取消、空参数、JSON 分配失败与不持锁探针。验证：`make test`、`make test-tsan`、`git diff --check` 通过。
+
+合并验收：`issues check` 通过；`make test-subagent test-openai-codex test-grok` 通过；可用时运行 TSAN；本 issue 关闭时 8 项全部勾选，或明确记录未验证项（#75 的 needs-env 部分允许记录环境限制）。
 
 ## 迁移来源（lif）
 

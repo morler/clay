@@ -377,14 +377,39 @@ void clay_list_step(int index, const char *verb, const char *target, const char 
     fputc('\n', stdout);
 }
 
+void clay_plan_header(const char *title, size_t done, size_t total,
+                      size_t failed, size_t skipped) {
+    if (!title || !*title) title = "Plan";
+    ClayStr summary;
+    clay_str_init(&summary);
+    clay_str_printf(&summary, "%zu/%zu complete", done, total);
+    if (failed) clay_str_printf(&summary, " \xc2\xb7 %zu failed", failed);
+    if (skipped) clay_str_printf(&summary, " \xc2\xb7 %zu skipped", skipped);
+    printf("  %s%s%s %s%s%s\n", clay_color(CLAY_BOLD), title,
+           clay_color(CLAY_RESET), clay_color(CLAY_GRAY), summary.data,
+           clay_color(CLAY_RESET));
+    clay_str_free(&summary);
+}
+
 void clay_plan_step(ClayStepState state, const char *text) {
-    const char *icon = state == CLAY_STEP_DONE     ? CLAY_ICON_CHECK
-                       : state == CLAY_STEP_ACTIVE ? CLAY_ICON_ARROW
-                                                   : CLAY_ICON_DOT;
-    const char *icon_color = state == CLAY_STEP_DONE     ? CLAY_GREEN
-                             : state == CLAY_STEP_ACTIVE ? CLAY_ORANGE
-                                                         : CLAY_GRAY;
-    const char *text_color = state == CLAY_STEP_ACTIVE ? CLAY_WHITE : CLAY_GRAY;
+    const char *icon, *icon_color, *text_color;
+    switch (state) {
+    case CLAY_STEP_DONE:
+        icon = CLAY_ICON_CHECK; icon_color = CLAY_GREEN; text_color = CLAY_GRAY;
+        break;
+    case CLAY_STEP_ACTIVE:
+        icon = CLAY_ICON_ARROW; icon_color = CLAY_ORANGE; text_color = CLAY_WHITE;
+        break;
+    case CLAY_STEP_FAILED:
+        icon = CLAY_ICON_CROSS; icon_color = CLAY_RED; text_color = CLAY_RED;
+        break;
+    case CLAY_STEP_SKIPPED:
+        icon = "-"; icon_color = CLAY_GRAY; text_color = CLAY_GRAY;
+        break;
+    default:
+        icon = CLAY_ICON_DOT; icon_color = CLAY_GRAY; text_color = CLAY_GRAY;
+        break;
+    }
     printf("  %s%s%s ", clay_color(icon_color), icon, clay_color(CLAY_RESET));
     fputs(clay_color(text_color), stdout);
     int room = clay_term_width() - 5;

@@ -2198,8 +2198,13 @@ void clay_plan_clear(ClayPlan *plan) {
     free(item->content);
     free(item->status);
     free(item->shown);
+    free(item->detail);
   }
   clay_array_clear(&plan->todos);
+  /* A new plan gets a fresh heading, even if its title is the same. */
+  free(plan->title);
+  plan->title = NULL;
+  plan->header_shown = 0;
   if (plan->rendered)
     clay_below_set_enabled("plan", 0);
 }

@@ -62,16 +62,20 @@ typedef struct {
 
 typedef struct {
   char *content;
-  char *status;   /* "pending", "in_progress", or "completed" */
+  char *status;   /* "pending", "in_progress", "completed", "failed", or
+                     "skipped" */
   char *shown;    /* the status already on screen, so a redraw prints only
                      the steps that actually moved. NULL until printed. */
+  char *detail;   /* latest tool activity while this step is in progress */
 } ClayTodoItem;
 
 /* Where a todowrite call writes. The session has one plan, which is drawn
    for the user; every subagent gets its own, which only it ever sees. */
 typedef struct {
-  ClayArray todos; /* ClayTodoItem */
-  int rendered;    /* draw it in the transcript and the status row */
+  char *title;      /* the model's own heading for the plan, or NULL */
+  ClayArray todos;  /* ClayTodoItem */
+  int rendered;     /* draw it in the transcript and the status row */
+  int header_shown; /* the heading row is already on screen */
 } ClayPlan;
 
 /* Approval categories, independent of the sandbox (namespace) axis: whether

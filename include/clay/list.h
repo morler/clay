@@ -71,13 +71,21 @@ void clay_list_header(const char *fmt, ...);
 void clay_list_step(int index, const char *verb, const char *target, const char *info, int link);
 
 /* One line of the model's plan: a green check for a finished step, an
-   orange arrow for the one running, a dim dot for the rest. */
+   orange arrow for the one running, a red cross for a failed one, a dim
+   dash for a skipped one, a dim dot for the rest. */
 typedef enum {
     CLAY_STEP_PENDING,
     CLAY_STEP_ACTIVE,
-    CLAY_STEP_DONE
+    CLAY_STEP_DONE,
+    CLAY_STEP_FAILED,
+    CLAY_STEP_SKIPPED
 } ClayStepState;
 void clay_plan_step(ClayStepState state, const char *text);
+
+/* The plan's heading: the model's own title (or a default) plus a
+   "3/5 complete · 1 failed · 1 skipped" summary. */
+void clay_plan_header(const char *title, size_t done, size_t total,
+                      size_t failed, size_t skipped);
 
 /* Prints a plain bullet item ("  · text"), for simple unordered lists. */
 void clay_list_bullet(const char *fmt, ...);

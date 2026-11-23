@@ -753,7 +753,8 @@ ClayJson *ask_user_schema(void) {
 
 static int valid_todo_status(const char *status) {
   return strcmp(status, "pending") == 0 || strcmp(status, "in_progress") == 0 ||
-         strcmp(status, "completed") == 0;
+         strcmp(status, "completed") == 0 || strcmp(status, "failed") == 0 ||
+         strcmp(status, "skipped") == 0;
 }
 
 ClayJson *todowrite_tool(const ClayJson *arguments, void *userdata) {
@@ -780,41 +781,47 @@ ClayJson *todowrite_tool(const ClayJson *arguments, void *userdata) {
         ClayTodoItem *item = clay_array_get(&items, j);
         free(item->content);
         free(item->status);
+        free(item->detail);
       }
       clay_array_free(&items);
       clay_json_object_set(result, "ok", clay_json_bool(0));
       clay_json_object_set(
           result, "error",
           clay_json_string("each todo needs non-empty content and status "
-                           "pending/in_progress/completed"));
+                           "pending/in_progress/completed/failed/skipped"));
       return result;
     }
     /* Same step text as before means the same step: keep what the screen
        already shows for it, so only real movement gets printed. */
     char *shown = NULL;
+    char *detail = NULL;
     for (size_t j = 0; j < plan->todos.count; j++) {
       ClayTodoItem *previous = clay_array_get(&plan->todos, j);
-      if (strcmp(previous->content, content) == 0 && previous->shown) {
-        shown = strdup(previous->shown);
+      if (strcmp(previous->content, content) == 0) {
+        if (previous->shown) shown = strdup(previous->shown);
+        if (previous->detail) detail = strdup(previous->detail);
         break;
       }
     }
-    ClayTodoItem item = {strdup(content), strdup(status), shown};
+    ClayTodoItem item = {strdup(content), strdup(status), shown, detail};
     clay_array_push_val(&items, &item);
   }
 
   clay_plan_clear(plan);
   clay_array_free(&plan->todos);
   plan->todos = items;
+  const char *title = clay_json_string_value(clay_json_object_get(arguments, "title"));
+  if (title && *title) plan->title = strdup(title);
 
   ClayStr output;
   clay_str_init(&output);
   for (size_t i = 0; i < plan->todos.count; i++) {
     ClayTodoItem *item = clay_array_get(&plan->todos, i);
-    const char *box = strcmp(item->status, "completed") == 0 ? CLAY_ICON_CHECK
+    const char *box = strcmp(item->status, "completed") == 0   ? CLAY_ICON_CHECK
                       : strcmp(item->status, "in_progress") == 0
                           ? CLAY_ICON_ARROW
-                          : CLAY_ICON_DOT;
+                      : strcmp(item->status, "failed") == 0 ? CLAY_ICON_CROSS
+                                                            : CLAY_ICON_DOT;
     clay_str_printf(&output, "[%s] %s\n", box, item->content);
   }
   clay_json_object_set(result, "ok", clay_json_bool(1));
@@ -825,16 +832,22 @@ ClayJson *todowrite_tool(const ClayJson *arguments, void *userdata) {
 }
 
 ClayJson *todowrite_schema(void) {
+  ClayJson *title = clay_json_object();
+  clay_json_object_set(title, "type", clay_json_string("string"));
+  clay_json_object_set(title, "description",
+                       clay_json_string("Plan heading."));
   ClayJson *content = clay_json_object();
   clay_json_object_set(content, "type", clay_json_string("string"));
   clay_json_object_set(content, "description",
-                       clay_json_string("One task, in imperative form."));
+                       clay_json_string("One task, imperative."));
   ClayJson *status = clay_json_object();
   clay_json_object_set(status, "type", clay_json_string("string"));
   ClayJson *status_enum = clay_json_array();
   clay_json_array_push(status_enum, clay_json_string("pending"));
   clay_json_array_push(status_enum, clay_json_string("in_progress"));
   clay_json_array_push(status_enum, clay_json_string("completed"));
+  clay_json_array_push(status_enum, clay_json_string("failed"));
+  clay_json_array_push(status_enum, clay_json_string("skipped"));
   clay_json_object_set(status, "enum", status_enum);
   ClayJson *item_properties = clay_json_object();
   clay_json_object_set(item_properties, "content", content);
@@ -853,8 +866,9 @@ ClayJson *todowrite_schema(void) {
   clay_json_object_set(todos, "items", item_schema);
   clay_json_object_set(
       todos, "description",
-      clay_json_string("The whole plan, resending every task each call."));
+      clay_json_string("Resend every task."));
   ClayJson *properties = clay_json_object();
+  clay_json_object_set(properties, "title", title);
   clay_json_object_set(properties, "todos", todos);
   ClayJson *required = clay_json_array();
   clay_json_array_push(required, clay_json_string("todos"));
@@ -1181,22 +1195,36 @@ static void print_tool_output(const ClayJson *result, int show_command,
    points the live status row at whichever one is running now. */
 static void render_plan(ClayCommands *commands) {
   const ClayTodoItem *active = NULL;
-  size_t done = 0;
+  size_t done = 0, failed = 0, skipped = 0;
   for (size_t i = 0; i < commands->plan.todos.count; i++) {
     ClayTodoItem *item = clay_array_get(&commands->plan.todos, i);
     int completed = strcmp(item->status, "completed") == 0;
     int running = strcmp(item->status, "in_progress") == 0;
-    if (completed)
-      done++;
-    if (running && !active)
-      active = item;
+    if (completed) done++;
+    if (strcmp(item->status, "failed") == 0) failed++;
+    if (strcmp(item->status, "skipped") == 0) skipped++;
+    if (running && !active) active = item;
     if (!item->shown || strcmp(item->shown, item->status) != 0) {
-      clay_plan_step(completed     ? CLAY_STEP_DONE
-                     : running     ? CLAY_STEP_ACTIVE
-                                   : CLAY_STEP_PENDING,
+      /* The heading goes out once, right before the first step. */
+      if (!commands->plan.header_shown) {
+        clay_plan_header(commands->plan.title, done, commands->plan.todos.count,
+                         failed, skipped);
+        commands->plan.header_shown = 1;
+      }
+      clay_plan_step(completed   ? CLAY_STEP_DONE
+                     : running   ? CLAY_STEP_ACTIVE
+                     : strcmp(item->status, "failed") == 0
+                         ? CLAY_STEP_FAILED
+                     : strcmp(item->status, "skipped") == 0 ? CLAY_STEP_SKIPPED
+                                                            : CLAY_STEP_PENDING,
                      item->content);
       free(item->shown);
       item->shown = strdup(item->status);
+      /* A step that stopped running has no current activity any more. */
+      if (!running) {
+        free(item->detail);
+        item->detail = NULL;
+      }
     }
   }
   if (!active || commands->plan.todos.count == 0) {
@@ -1204,7 +1232,9 @@ static void render_plan(ClayCommands *commands) {
     return;
   }
   /* The row is shared with the model, the token counts and the mode, so the
-     step gets a short label rather than its whole sentence. */
+     step gets a short label rather than its whole sentence. The latest tool
+     activity goes after it: that is how the user sees what the running step
+     is actually doing without another transcript line per tool call. */
   size_t bytes = 0;
   int columns = 0;
   while (active->content[bytes] && columns < CLAY_PLAN_STEP_COLUMNS) {
@@ -1219,6 +1249,9 @@ static void render_plan(ClayCommands *commands) {
   clay_str_push_n(&text, active->content, bytes);
   if (active->content[bytes])
     clay_str_push(&text, "\xe2\x80\xa6");
+  if (active->detail && *active->detail)
+    clay_str_printf(&text, "%s \xc2\xb7 %s%s", clay_color(CLAY_GRAY),
+                    active->detail, clay_color(CLAY_RESET));
   clay_below_set_text("plan", text.data);
   clay_below_set_state("plan", CLAY_BELOW_LOADING);
   clay_below_set_enabled("plan", 1);
@@ -1248,6 +1281,20 @@ static void on_tool_call(const char *name, const char *arguments_json,
   if (strcmp(name, "todowrite") != 0) {
     stream->tool_task = clay_task_start("%s", label.data);
     stream->commands->active_tool_task = stream->tool_task;
+    /* Show what the running step is doing in the status row. */
+    ClayTodoItem *step = NULL;
+    for (size_t i = 0; i < stream->commands->plan.todos.count; i++) {
+      ClayTodoItem *item = clay_array_get(&stream->commands->plan.todos, i);
+      if (strcmp(item->status, "in_progress") == 0) {
+        step = item;
+        break;
+      }
+    }
+    if (step) {
+      free(step->detail);
+      step->detail = strdup(label.data);
+      if (stream->commands->plan.rendered) render_plan(stream->commands);
+    }
   }
   clay_str_free(&label);
 }

@@ -85,7 +85,11 @@
   first plan prints once, and later calls print only the steps that actually
   moved, as `✓ done` / `→ running` / `· pending` lines. The step in flight
   also shows in the status row with its own spinner and a `2/3` counter, and
-  clears when the plan finishes.
+  clears when the plan finishes. The first plan now opens with the model's
+  own heading and a `3/5 complete · 1 failed · 1 skipped` summary, and
+  `todowrite` takes `failed` and `skipped` states so a dead end shows as `✗`
+  instead of sitting in the list as pending forever. The running step's row
+  also names the last tool that ran, so a long step says what it is doing.
 - Stopping a background task no longer hangs. A sandboxed command runs as PID
   1 of its own namespace, where the kernel drops SIGTERM, so it outlived the
   child clay was waiting on and kept the output pipe open - the reader spun

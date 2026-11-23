@@ -54,6 +54,26 @@ int main(void) {
     assert(!ok(result));
     clay_json_free(result);
 
+    /* failed and skipped are real states, not unknown ones. */
+    result = call(&commands, "{\"title\":\"Ship the workflow view\",\"todos\":["
+                             "{\"content\":\"Ship it\",\"status\":\"failed\"},"
+                             "{\"content\":\"Write tests\",\"status\":\"skipped\"}]}");
+    assert(ok(result));
+    clay_json_free(result);
+    assert(commands.plan.todos.count == 2);
+    assert(strcmp(commands.plan.title, "Ship the workflow view") == 0);
+    ClayTodoItem *failed = clay_array_get(&commands.plan.todos, 0);
+    assert(strcmp(failed->status, "failed") == 0);
+
+    /* A step keeps its activity note when the same step is resent. */
+    failed->detail = strdup("Running make test");
+    result = call(&commands, "{\"title\":\"Ship the workflow view\",\"todos\":["
+                             "{\"content\":\"Ship it\",\"status\":\"completed\"}]}");
+    assert(ok(result));
+    clay_json_free(result);
+    ClayTodoItem *kept = clay_array_get(&commands.plan.todos, 0);
+    assert(kept->detail && strcmp(kept->detail, "Running make test") == 0);
+
     /* Not an array at all. */
     result = call(&commands, "{\"todos\":\"nope\"}");
     assert(!ok(result));

@@ -213,6 +213,16 @@ int clay_config_set_reasoning_effort(const char *effort) {
   return save_selection_root(root);
 }
 
+int clay_config_show_reasoning(void) {
+  ClayJson *root = load_selection_root();
+  ClayJson *value = clay_json_object_get(root, "show_reasoning");
+  int enabled = clay_json_type(value) == CLAY_JSON_BOOL
+                    ? clay_json_bool_value(value)
+                    : 0;
+  clay_json_free(root);
+  return enabled;
+}
+
 int clay_config_history_preview_count(void) {
   ClayJson *root = load_selection_root();
   ClayJson *value = clay_json_object_get(root, "history_preview_count");

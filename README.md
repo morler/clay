@@ -20,7 +20,6 @@ Bring your own model. Stay in your flow. Ship better work.
 › review this project and find the rough edges
 
 ◆ Agent (your-model)
-  Reasoning finished in 1.2s
   I’ll inspect the structure and trace the main flows first.
 
   ~/your-project · your-model    ↑ 842 ↓ 126 · ✓ 1.2s
@@ -35,7 +34,7 @@ No giant framework to learn. No crowded dashboard. A single self-contained binar
 | | |
 | --- | --- |
 | **Your models, your choice** | Connect OpenAI, OpenAI Codex (ChatGPT Plus/Pro), Grok, OpenRouter, Groq, DeepSeek, Mistral, Together AI, or any OpenAI-compatible endpoint. Browse each provider's models without leaving the terminal. |
-| **Dedicated file tools** | `read`, `write`, `edit`, `glob`, `grep` operate directly on the workspace — `edit` requires an exact, unique text match (no fuzzy diffing), and every path is checked against escaping the workspace root. |
+| **Dedicated file tools** | `read`, `write`, `edit`, `glob`, `grep` operate directly on the workspace — `read`/`grep` take several targets in one call, `edit` takes several replacements in one file and still requires an exact, unique text match (no fuzzy diffing), and every path is checked against escaping the workspace root. |
 | **Sandboxed by default** | On Linux, shell commands run with an isolated filesystem, a private network, and resource limits — `/workspace` is your project and `/scratch`/`/tmp` is conversation scratch space. The session's sandboxed commands share one network namespace, so a dev server started by `task_run` answers a `curl` from the next command, while nothing on your machine can route to it. Opt out with `/sandbox`. |
 | **Four modes, one shortcut** | Shift+Tab cycles **Sandbox (Ask)** → **Sandbox (Auto)** → **Unleashed (Ask)** → **Unleashed (Auto)**. The first half picks where commands run; the second picks whether approvals follow `/permissions` (Ask) or are skipped entirely (Auto). The live status shows both, Ask in pink and Auto in red. |
 | **Permissions & Plan mode** | `/permissions` sets which tool categories (read, edit, safe commands, all commands) run without asking; anything else prompts once, with an "always this session" option. `/plan` goes further and refuses writes/edits and mutating shell commands outright, so you can discuss an approach before anything changes. |
@@ -49,11 +48,13 @@ No giant framework to learn. No crowded dashboard. A single self-contained binar
 | **No command hangs the session** | `shell_exec` kills a command after 120 seconds (`timeout_seconds` raises it, up to an hour) and returns everything it printed first, marked `timed_out`, instead of blocking the run forever. |
 | **Delegation, when it earns it** | For a job with several real parts the model writes a `todowrite` plan, then forks the independent branches to `subagent` — up to four at once, each a fresh agent with the same tools, none of the conversation, and its own private checklist. They run in parallel (two 45s branches finish in 46s), their writes and approvals serialize so they cannot collide, and each returns a summary that feeds whatever comes next. Every run is kept whole under `~/.clay/chats/<chat>/subagents/<run>.json`. Simple tasks skip all of it. |
 | **A visible plan** | `todowrite` keeps a live checklist for multi-step work - each update prints only the steps that moved, and the one in flight shows in the status row with a spinner and a `2/3` counter; `repo_map` gives a ranked overview of top-level definitions, using a built-in heuristic on Linux or `ctags` when available and a heuristic otherwise on other platforms. |
+| **A budget that finishes** | One assistant message is one round, and independent calls share it. At 16, 32 and 48 rounds the model gets a short message to stop exploring and converge; if a 64-round segment is still spent, Clay resumes once from the last tool result and closes with one no-tools request that reports what changed, what was verified and what is left, instead of stopping mid-job. The budget messages are not kept in the journal. |
+| **Quiet, scannable work** | A running call is described in the live status row (`Running $ make test`, `Reading: src/a.c`); once it finishes the transcript keeps one gray receipt line (`· Ran $ make test (1.2s)`) instead of reprinting the output the model already read. Failures still show the error and the start of the output. A turn closes with `3 tools · 12.3s` in the status row. |
 | **Bring your own tools** | `/mcp add <name> <command> [args...]` connects any Model Context Protocol server over stdio, and the `mcp` tool reaches all of them: `action=list` shows each server's tools and their argument schemas, `action=call` invokes one. One fixed tool instead of one per discovered tool, so the tool list — and the prompt prefix a provider caches — does not change when a server connects. stdio transport only: no SSE/HTTP, no OAuth. |
 | **Skills, loaded on demand** | `/skill install <path>` registers any `SKILL.md`-based skill directory in place (no copying) — including ones written for other agents that use the same convention. Only each skill's name and one-line description sit in the system prompt; the model loads the full instructions itself, through a `skill` tool call, the moment a task actually needs them. |
 | **Tests run themselves** | `/autotest <command>` runs your test or lint command after a successful edit (confirmed once per session) and hands any failure straight back to the model. |
 | **Provider-aware token caching** | Normalizes input, output, and cached-input usage when the provider reports it; the live status shows `(cache: N%)`, while unknown cache support stays distinct from a real zero. |
-| **Persistent reasoning and usage** | Reasoning streams on one self-rewriting row while it runs and collapses to a single line, so a minute of thinking never floods the scroll; `Ctrl+O` expands the full text. Logs and token totals are stored with the chat journal and restored by `/resume`. |
+| **Persistent reasoning and usage** | Reasoning is hidden by default, so a minute of thinking never floods the scroll; `Ctrl+O` expands the full text, and `"show_reasoning": true` in `~/.clay/config.json` streams it live on one self-rewriting row instead. Logs and token totals are stored with the chat journal and restored by `/resume`. |
 | **A focused interface** | Streaming output, grouped tool activity, modular live status, reasoning controls, token counts, and instant cancellation stay out of the way of the prompt. |
 | **HTTPS on Windows** | The Windows build uses libcurl with the native Windows certificate store, so HTTPS requests work without shipping a separate CA bundle. |
 
@@ -183,12 +184,14 @@ endpoints receive normal requests unless they explicitly report cache usage.
 The status line exposes only normalized usage, so `(cache: N%)` appears when
 the provider actually reports cached input tokens.
 
-**Reasoning that stays with the chat.** Supported providers stream reasoning
-before the normal assistant response. When generation ends, Clay replaces the
-stream with a compact elapsed-time summary; `Ctrl+O` expands the latest saved
-reasoning log. The reasoning text and its duration are serialized in the chat
-JSON and restored with `/resume`, alongside input, output, and cached-token
-usage.
+**Reasoning that stays out of the way.** Supported providers stream reasoning
+before the normal assistant response. By default none of it is drawn: the
+answer follows the turn header directly. `Ctrl+O` expands the latest saved
+reasoning log, and the reasoning text and its duration are serialized in the
+chat JSON and restored with `/resume`, alongside input, output, and
+cached-token usage. To watch it stream on one self-rewriting row with a
+closing `Reasoning finished in Ns` line, set `"show_reasoning": true` in
+`~/.clay/config.json`.
 
 **A modular status line.** The workspace/model block, token counts, cache
 percentage, sandbox mode, and elapsed time are live modules that can be
@@ -280,7 +283,7 @@ distribution files.
 | `Ctrl-C` on an empty prompt | Exit Clay cleanly. |
 | `Ctrl-L` | Clear the terminal and redraw the current prompt. |
 | `Ctrl-R` | Search backward through prompt history; press again for older matches. |
-| `Ctrl-O` | Expand the latest completed reasoning log. |
+| `Ctrl-O` | Expand the latest completed reasoning log (reasoning is hidden by default). |
 | `Esc` or `Ctrl-C` while generating | Cancel the active response. |
 | `Esc`, then `Esc` again | Clear the current input. |
 
@@ -338,9 +341,10 @@ make test
   blocks repeated calls, run it: a breaker with no repeats to stop only
   costs turns.
 - `scripts/round_report.py` reports how many rounds a turn takes and where they
-  go: round percentiles, turns that hit 48 and 64, calls per assistant message,
-  the tool mix, `cd` prefixed shell calls, and messages that run `issues`/`git`/
-  `make`. Run it after changing prompts or tools to see whether the round cost
-  moved; `--json` is for scripts and `--self-test` checks the arithmetic on a
-  synthetic fixture.
+  go: round percentiles, turns that hit 48 and 64, turns over 64 requests,
+  calls per assistant message, the tool mix, multi-target `paths`/`edits`
+  adoption, `cd` prefixed shell calls, and messages that run
+  `issues`/`git`/`make`. Run it after changing prompts or tools to see whether
+  the round cost moved; `--json` is for scripts and `--self-test` checks the
+  arithmetic on a synthetic fixture.
 

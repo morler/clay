@@ -106,6 +106,10 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
     if (callbacks->on_usage_details)
       callbacks->on_usage_details(&usage, callbacks->userdata);
   }
+  if (callbacks->on_reasoning) {
+    callbacks->on_reasoning("let me think", callbacks->userdata);
+    callbacks->on_reasoning(" about it", callbacks->userdata);
+  }
   if (sse_error) {
     ClayOpenAIError error = {.status = 200, .from_sse = 1,
                              .kind = CLAY_OPENAI_ERROR_RATE_LIMIT,
@@ -127,6 +131,52 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
     clay_str_free(&path);
   }
   return result;
+}
+
+static char *read_stdout_since(FILE *capture, off_t start) {
+  fflush(stdout);
+  off_t end = lseek(STDOUT_FILENO, 0, SEEK_CUR);
+  assert(start >= 0 && end >= start);
+  char *text = calloc((size_t)(end - start) + 1, 1);
+  assert(text);
+  assert(pread(fileno(capture), text, (size_t)(end - start), start) ==
+         end - start);
+  return text;
+}
+
+/* Reasoning is off unless asked for: nothing reaches the transcript while it
+   streams or when it ends, but Ctrl+O still shows the collected text. The
+   turn above ran a completion with reasoning callbacks and wrote none of it. */
+static void test_hidden_reasoning(FILE *output) {
+  assert(!clay_thinking_visible());
+  off_t start = lseek(STDOUT_FILENO, 0, SEEK_CUR);
+  clay_thinking_begin();
+  clay_thinking_write("let me think");
+  clay_thinking_write(" about it");
+  clay_thinking_finish(1.2);
+  char *streamed = read_stdout_since(output, start);
+  assert(strcmp(streamed, "") == 0);
+  free(streamed);
+  assert(clay_thinking_can_toggle());
+  start = lseek(STDOUT_FILENO, 0, SEEK_CUR);
+  clay_thinking_toggle();
+  char *expanded = read_stdout_since(output, start);
+  assert(strstr(expanded, "let me think about it"));
+  free(expanded);
+  clay_thinking_forget();
+  assert(!clay_thinking_can_toggle());
+
+  /* Opting back in restores the streaming row and the closing summary. */
+  clay_thinking_set_visible(1);
+  start = lseek(STDOUT_FILENO, 0, SEEK_CUR);
+  clay_thinking_begin();
+  clay_thinking_write("thinking");
+  clay_thinking_finish(0.5);
+  char *shown = read_stdout_since(output, start);
+  assert(strstr(shown, "Reasoning finished in 0.5s"));
+  free(shown);
+  clay_thinking_forget();
+  clay_thinking_set_visible(0);
 }
 
 /* What reaches the model from a long output: its tail when the command
@@ -742,6 +792,7 @@ int main(void) {
   test_clip_output();
   test_plan_rendering(commands);
   test_tool_receipts(commands);
+  test_hidden_reasoning(output);
   partial_saved = NULL;
   fflush(stdout);
   assert(dup2(original_stdout, STDOUT_FILENO) >= 0);

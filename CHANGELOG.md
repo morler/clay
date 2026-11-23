@@ -2,8 +2,40 @@
 
 ## Unreleased
 
+### Changed
+
+- Reasoning is hidden by default. The `Thinking:` row and the closing
+  `Reasoning finished in Ns` line are gone, so an answer follows the turn
+  header directly; this also skips the status-row handoff that only existed
+  to keep those rows apart. Reasoning is still journaled, restored by
+  `/resume`, and expandable with `Ctrl+O`. Set `"show_reasoning": true` in
+  `~/.clay/config.json` to get the streaming row back.
+
 ### Added
 
+- Tool activity now reads as a live description plus a one-line receipt. While
+  a call runs, the spinner names what it is doing (`Running $ make test`,
+  `Reading: src/a.c`); when it finishes, the transcript keeps a single gray
+  `· Ran $ make test (1.2s)` line. A successful call's output is model input
+  and is no longer reprinted under it; failures still show the error and the
+  start of the output, and `/exec` and failed plan steps are unchanged. The
+  turn's status row ends with the call count and elapsed time
+  (`3 tools · 12.3s`).
+- A turn now treats the 64-round limit as a budget instead of a wall. At 16,
+  32 and 48 rounds the model gets one short synthetic message that says how
+  much of the segment is spent and asks it to stop exploring, batch calls and
+  converge. If a segment still reaches 64, Clay resumes once from the last
+  tool result with a `[clay:auto-continue]` message; after the second segment
+  it sends one tools-off request that consumes the last results and asks for
+  a status. Budget messages are skipped by automatic compaction and
+  `/compact`, and removed before the turn is journaled, so `/resume` never
+  replays a stale count.
+- `edit` takes several replacements for one file in a single call through
+  `edits[]`, each with its own `oldString`/`newString`/`replaceAll`. The
+  replacements apply in order, a failed one stops the batch and reports
+  `failed_index` and how many were applied, and the whole call keeps the
+  existing one-file checkpoint and `/undo` contract. `read` and `grep` now
+  advertise their `paths[]` form in the tool description, not just the schema.
 - `scripts/round_report.py` measures what the 64-round budget costs in
   practice: rounds per turn with p50/p90, turns that reach 48 and 64, calls per
   assistant message, the tool mix, `cd`-prefixed shell calls, and messages that

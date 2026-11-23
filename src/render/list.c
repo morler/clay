@@ -15,6 +15,7 @@ static ClayStr g_thinking;
 static int g_thinking_ready = 0;
 static int g_thinking_streaming = 0;
 static int g_thinking_expanded = 0;
+static int g_thinking_visible = 1;
 static double g_thinking_seconds = 0;
 static int g_response_line_start = 1;
 
@@ -284,11 +285,20 @@ static void thinking_redraw(void) {
     clay_str_free(&line);
 }
 
+void clay_thinking_set_visible(int visible) {
+    g_thinking_visible = visible != 0;
+}
+
+int clay_thinking_visible(void) {
+    return g_thinking_visible;
+}
+
 void clay_thinking_begin(void) {
     ensure_thinking();
     clay_str_clear(&g_thinking);
     g_thinking_streaming = 1;
     g_thinking_expanded = 0;
+    if (!g_thinking_visible) return;
     printf("  %sThinking:%s", clay_color(CLAY_GRAY), clay_color(CLAY_RESET));
     fflush(stdout);
 }
@@ -297,18 +307,19 @@ void clay_thinking_write(const char *text) {
     if (!text || !*text) return;
     ensure_thinking();
     clay_str_push(&g_thinking, text); /* kept whole, for Ctrl+O */
-    thinking_redraw();
+    if (g_thinking_visible) thinking_redraw();
 }
 
 void clay_thinking_finish(double seconds) {
     ensure_thinking();
     if (!g_thinking_streaming) return;
     g_thinking_seconds = seconds;
+    g_thinking_streaming = 0;
+    g_thinking_expanded = 0;
+    if (!g_thinking_visible) return;
     fputc('\r', stdout);
     clay_term_clear_line();
     print_thinking_summary(seconds);
-    g_thinking_streaming = 0;
-    g_thinking_expanded = 0;
     fflush(stdout);
 }
 
@@ -319,7 +330,7 @@ void clay_thinking_restore(const char *text, double seconds) {
     g_thinking_seconds = seconds;
     g_thinking_streaming = 0;
     g_thinking_expanded = 0;
-    if (g_thinking.len) print_thinking_summary(seconds);
+    if (g_thinking.len && g_thinking_visible) print_thinking_summary(seconds);
 }
 
 void clay_thinking_forget(void) {

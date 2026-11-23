@@ -2430,6 +2430,7 @@ ClayCommands *clay_commands_create(ClayApp *app) {
                                    &commands->sandbox_auto_approve);
   free(sandbox_mode);
   commands->use_integrated_shell = clay_config_use_integrated_shell();
+  clay_thinking_set_visible(clay_config_show_reasoning());
   if (!clay_sandbox_supported()) {
     commands->sandbox_mode = CLAY_SANDBOX_MODE_UNLEASHED;
     commands->sandbox_auto_approve = 0;

@@ -53,6 +53,11 @@ int clay_config_set_reasoning_effort(const char *effort);
 /* Number of previous messages shown after /resume. Defaults to 4. */
 int clay_config_history_preview_count(void);
 
+/* Whether the model's reasoning streams in the transcript. Off by default;
+   ~/.clay/config.json with "show_reasoning": true turns it back on. The text
+   is journaled and expandable with Ctrl+O either way. */
+int clay_config_show_reasoning(void);
+
 /* Optional model context window in ~/.clay/config.json, in tokens.
    Returns 0 if missing or invalid. Separate from the compaction budget. */
 long clay_config_context_window(void);

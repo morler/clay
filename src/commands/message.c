@@ -1042,8 +1042,9 @@ static void collapse_thinking(ClayConversationStream *stream) {
   if (!stream->thinking_output_started)
     return;
   /* Hand the pinned row back before clay_thinking_finish rewrites the block:
-     its row math assumes nothing of ours sits underneath. */
-  if (stream->status_visible) {
+     its row math assumes nothing of ours sits underneath. Hidden reasoning
+     never took the row, so the status stays pinned. */
+  if (stream->status_visible && clay_thinking_visible()) {
     clay_below_status_release();
     stream->status_visible = 0;
   }
@@ -1088,10 +1089,10 @@ static void on_reasoning(const char *text, void *userdata) {
   if (!stream->response_active && clay_term_is_interactive()) {
     if (!stream->thinking_output_started) {
       if (stream->status_visible) {
-        /* The animator paints wherever the cursor is; from here the
-           streaming thread repaints the pinned row itself. */
+        /* The animator paints wherever the cursor is. Visible reasoning takes
+           the row over; hidden reasoning leaves it pinned under the cursor. */
         clay_below_set_editing(0);
-        clay_below_status_insert_above();
+        if (clay_thinking_visible()) clay_below_status_insert_above();
       }
       clay_thinking_begin();
       stream->thinking_output_started = 1;

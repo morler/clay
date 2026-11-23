@@ -32,7 +32,11 @@ void clay_turn_header(const char *model);
 /* Streams and toggles the latest assistant reasoning block in the chat. */
 /* Streams reasoning onto a single self-rewriting row: the tail of what the
    model is thinking, never more than one line of scroll. clay_thinking_finish
-   replaces it with a one-line summary; Ctrl+O expands the full text. */
+   replaces it with a one-line summary; Ctrl+O expands the full text.
+   With visibility off, nothing is drawn but the text is still collected for
+   Ctrl+O and the chat journal. */
+void clay_thinking_set_visible(int visible);
+int clay_thinking_visible(void);
 void clay_thinking_begin(void);
 void clay_thinking_write(const char *text);
 

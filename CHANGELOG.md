@@ -4,6 +4,15 @@
 
 ### Added
 
+- `scripts/round_report.py` measures what the 64-round budget costs in
+  practice: rounds per turn with p50/p90, turns that reach 48 and 64, calls per
+  assistant message, the tool mix, `cd`-prefixed shell calls, and messages that
+  run `issues`/`git`/`make`. It reads only `requests.jsonl` and `chat.json`,
+  prints aggregate counts and never message text, counts damaged journals
+  instead of failing on them, and `--self-test` checks its arithmetic on a
+  synthetic fixture. The first run over 25 local chats saw 23 turns, median 17
+  rounds and p90 52, two turns at the 64-round ceiling, 1.57 calls per
+  assistant message and 82% of calls in `shell_exec`.
 - `read` and `grep` take several targets in one call. `read` accepts `paths`
   with an optional per-file offset/limit; `grep` accepts `paths` plus
   `ignore_case`, `context`, `files_with_matches` and `max_results`. Both keep

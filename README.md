@@ -337,3 +337,10 @@ make test
   calls the same tool with the same arguments. Before adding anything that
   blocks repeated calls, run it: a breaker with no repeats to stop only
   costs turns.
+- `scripts/round_report.py` reports how many rounds a turn takes and where they
+  go: round percentiles, turns that hit 48 and 64, calls per assistant message,
+  the tool mix, `cd` prefixed shell calls, and messages that run `issues`/`git`/
+  `make`. Run it after changing prompts or tools to see whether the round cost
+  moved; `--json` is for scripts and `--self-test` checks the arithmetic on a
+  synthetic fixture.
+

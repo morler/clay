@@ -2192,7 +2192,7 @@ int clay_commands_compact_subagent_history(ClayJson *messages, long billed_token
                          saved_results);
 }
 
-void clay_plan_clear(ClayPlan *plan) {
+void clay_plan_clear_steps(ClayPlan *plan) {
   for (size_t i = 0; i < plan->todos.count; i++) {
     ClayTodoItem *item = clay_array_get(&plan->todos, i);
     free(item->content);
@@ -2201,12 +2201,16 @@ void clay_plan_clear(ClayPlan *plan) {
     free(item->detail);
   }
   clay_array_clear(&plan->todos);
+  if (plan->rendered)
+    clay_below_set_enabled("plan", 0);
+}
+
+void clay_plan_clear(ClayPlan *plan) {
+  clay_plan_clear_steps(plan);
   /* A new plan gets a fresh heading, even if its title is the same. */
   free(plan->title);
   plan->title = NULL;
   plan->header_shown = 0;
-  if (plan->rendered)
-    clay_below_set_enabled("plan", 0);
 }
 
 void clay_commands_new_chat(ClayCommands *commands) {

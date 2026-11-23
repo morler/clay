@@ -74,6 +74,25 @@ int main(void) {
     ClayTodoItem *kept = clay_array_get(&commands.plan.todos, 0);
     assert(kept->detail && strcmp(kept->detail, "Running make test") == 0);
 
+    /* An update that omits the optional title keeps the plan's heading,
+       and a heading already on screen stays there. */
+    commands.plan.header_shown = 1;
+    result = call(&commands, "{\"todos\":["
+                             "{\"content\":\"Ship it\",\"status\":\"completed\"}]}");
+    assert(ok(result));
+    clay_json_free(result);
+    assert(commands.plan.title &&
+           strcmp(commands.plan.title, "Ship the workflow view") == 0);
+    assert(commands.plan.header_shown == 1);
+
+    /* A new plan after the old one finished gets a fresh heading. */
+    result = call(&commands, "{\"title\":\"Next job\",\"todos\":["
+                             "{\"content\":\"Start over\",\"status\":\"in_progress\"}]}");
+    assert(ok(result));
+    clay_json_free(result);
+    assert(commands.plan.title && strcmp(commands.plan.title, "Next job") == 0);
+    assert(commands.plan.header_shown == 0);
+
     /* Not an array at all. */
     result = call(&commands, "{\"todos\":\"nope\"}");
     assert(!ok(result));

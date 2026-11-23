@@ -128,6 +128,107 @@ static void test_clip_output(void) {
   clay_str_free(&text);
 }
 
+static void plan_write(ClayPlan *plan, const char *json) {
+  ClayJson *args = clay_json_parse(json, NULL);
+  assert(args);
+  ClayJson *result = todowrite_tool(args, plan);
+  clay_json_free(args);
+  assert(clay_json_bool_value(clay_json_object_get(result, "ok")));
+  clay_json_free(result);
+}
+
+static char *capture_plan_output(ClayCommands *commands, int with_status) {
+  fflush(stdout);
+  FILE *capture = tmpfile();
+  assert(capture);
+  int saved = dup(STDOUT_FILENO);
+  assert(saved >= 0);
+  assert(dup2(fileno(capture), STDOUT_FILENO) >= 0);
+  render_plan(commands);
+  if (with_status) clay_below_render_status();
+  fflush(stdout);
+  assert(fseek(capture, 0, SEEK_END) == 0);
+  long length = ftell(capture);
+  assert(length >= 0 && fseek(capture, 0, SEEK_SET) == 0);
+  char *text = calloc((size_t)length + 1, 1);
+  assert(text);
+  assert(fread(text, 1, (size_t)length, capture) == (size_t)length);
+  assert(dup2(saved, STDOUT_FILENO) >= 0);
+  close(saved);
+  fclose(capture);
+  return text;
+}
+
+static int count_text(const char *text, const char *needle) {
+  int count = 0;
+  for (const char *cursor = text; (cursor = strstr(cursor, needle));
+       cursor += strlen(needle))
+    count++;
+  return count;
+}
+
+/* The heading summarizes the whole plan once; later updates print only the
+   steps that moved, and the live row numbers the step by its position even
+   when failed/skipped steps come before it. */
+static void test_plan_rendering(ClayCommands *commands) {
+  int colors = clay_term_color_enabled();
+  clay_term_set_color_enabled(0);
+  ClayPlan *plan = &commands->plan;
+
+  plan_write(plan, "{\"title\":\"All outcomes\",\"todos\":["
+                   "{\"content\":\"Build\",\"status\":\"completed\"},"
+                   "{\"content\":\"Deploy\",\"status\":\"failed\"},"
+                   "{\"content\":\"Notify\",\"status\":\"skipped\"}]}");
+  char *first = capture_plan_output(commands, 0);
+  assert(count_text(first, "All outcomes") == 1);
+  assert(strstr(first, "1/3 complete \xc2\xb7 1 failed \xc2\xb7 1 skipped"));
+  assert(strstr(first, CLAY_ICON_CHECK " Build"));
+  assert(strstr(first, CLAY_ICON_CROSS " Deploy"));
+  assert(strstr(first, "- Notify"));
+  free(first);
+  clay_plan_clear(plan);
+
+  plan_write(plan, "{\"title\":\"Two steps\",\"todos\":["
+                   "{\"content\":\"First\",\"status\":\"in_progress\"},"
+                   "{\"content\":\"Second\",\"status\":\"pending\"}]}");
+  char *start = capture_plan_output(commands, 0);
+  assert(count_text(start, "Two steps") == 1);
+  assert(strstr(start, "0/2 complete"));
+  free(start);
+
+  plan_write(plan, "{\"title\":\"Two steps\",\"todos\":["
+                   "{\"content\":\"First\",\"status\":\"completed\"},"
+                   "{\"content\":\"Second\",\"status\":\"in_progress\"}]}");
+  char *update = capture_plan_output(commands, 0);
+  assert(!strstr(update, "Two steps"));
+  assert(strstr(update, CLAY_ICON_CHECK " First"));
+  assert(strstr(update, CLAY_ICON_ARROW " Second"));
+  free(update);
+
+  /* The schema makes title optional, so an update that omits it must not
+     turn the heading back into the default. */
+  plan_write(plan, "{\"todos\":["
+                   "{\"content\":\"First\",\"status\":\"completed\"},"
+                   "{\"content\":\"Second\",\"status\":\"failed\"}]}");
+  char *untitled = capture_plan_output(commands, 0);
+  assert(plan->title && strcmp(plan->title, "Two steps") == 0);
+  assert(!strstr(untitled, "Plan"));
+  assert(strstr(untitled, CLAY_ICON_CROSS " Second"));
+  free(untitled);
+  clay_plan_clear(plan);
+
+  plan_write(plan, "{\"title\":\"Counter\",\"todos\":["
+                   "{\"content\":\"Build\",\"status\":\"completed\"},"
+                   "{\"content\":\"Deploy\",\"status\":\"failed\"},"
+                   "{\"content\":\"Verify\",\"status\":\"in_progress\"}]}");
+  char *row = capture_plan_output(commands, 1);
+  assert(strstr(row, "3/3 Verify"));
+  free(row);
+  clay_plan_clear(plan);
+
+  clay_term_set_color_enabled(colors);
+}
+
 int main(void) {
   ClayJson *saved_messages = clay_json_array();
   clay_json_array_push(saved_messages, clay_openai_message("user", "hi"));
@@ -321,6 +422,7 @@ int main(void) {
     commands->chat = NULL;
   }
   test_clip_output();
+  test_plan_rendering(commands);
   partial_saved = NULL;
   fflush(stdout);
   assert(dup2(original_stdout, STDOUT_FILENO) >= 0);

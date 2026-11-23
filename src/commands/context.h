@@ -304,8 +304,13 @@ typedef struct {
 int clay_commands_compact_subagent_history(ClayJson *messages, long billed_tokens,
                                            size_t accounted_messages,
                                            ClayArray *saved_results);
-/* Frees every item and empties `plan` in place (keeping the array, ready
-   for more steps). A rendered plan also clears its row. */
+/* Frees every step and empties the list in place, keeping the plan's title
+   and heading state so a todowrite update can replace the steps without
+   drawing the heading again. A rendered plan also clears its row. */
+void clay_plan_clear_steps(ClayPlan *plan);
+/* Frees every item and empties `plan` in place, including its title and
+   heading state (keeping the array, ready for more steps). A rendered plan
+   also clears its row. */
 void clay_plan_clear(ClayPlan *plan);
 /* Connects to every configured MCP server (src/commands/mcp.c) the first
    time it's called in this session; later calls are a no-op. Best-effort -

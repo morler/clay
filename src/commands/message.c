@@ -757,6 +757,52 @@ static int valid_todo_status(const char *status) {
          strcmp(status, "skipped") == 0;
 }
 
+static int todo_is_open(const ClayTodoItem *item) {
+  return strcmp(item->status, "pending") == 0 ||
+         strcmp(item->status, "in_progress") == 0;
+}
+
+static int plan_is_finished(ClayPlan *plan) {
+  if (plan->todos.count == 0) return 0;
+  for (size_t i = 0; i < plan->todos.count; i++) {
+    ClayTodoItem *item = clay_array_get(&plan->todos, i);
+    if (todo_is_open(item)) return 0;
+  }
+  return 1;
+}
+
+static int plan_has_step(ClayPlan *plan, const char *content) {
+  for (size_t i = 0; i < plan->todos.count; i++) {
+    ClayTodoItem *item = clay_array_get(&plan->todos, i);
+    if (strcmp(item->content, content) == 0) return 1;
+  }
+  return 0;
+}
+
+static int items_have_open_step(ClayArray *items) {
+  for (size_t i = 0; i < items->count; i++) {
+    ClayTodoItem *item = clay_array_get(items, i);
+    if (todo_is_open(item)) return 1;
+  }
+  return 0;
+}
+
+/* A todowrite call usually resends the same plan with a step moved. A list
+   that shares no step with the old one, or that starts work again after the
+   old plan finished, is a new plan and gets a fresh heading. */
+static int starts_new_plan(ClayPlan *plan, ClayArray *items) {
+  if (plan->todos.count == 0) return 1;
+  int shares = 0;
+  for (size_t i = 0; i < items->count; i++) {
+    ClayTodoItem *item = clay_array_get(items, i);
+    if (plan_has_step(plan, item->content)) {
+      shares = 1;
+      break;
+    }
+  }
+  return !shares || (plan_is_finished(plan) && items_have_open_step(items));
+}
+
 ClayJson *todowrite_tool(const ClayJson *arguments, void *userdata) {
   ClayPlan *plan = userdata;
   const ClayJson *todos = clay_json_object_get(arguments, "todos");
@@ -807,11 +853,28 @@ ClayJson *todowrite_tool(const ClayJson *arguments, void *userdata) {
     clay_array_push_val(&items, &item);
   }
 
-  clay_plan_clear(plan);
+  int new_plan = starts_new_plan(plan, &items);
+  const char *title = clay_json_string_value(clay_json_object_get(arguments, "title"));
+  if (new_plan) {
+    clay_plan_clear(plan);
+    /* Nothing in a new plan was drawn yet, even if it reuses a step name. */
+    for (size_t i = 0; i < items.count; i++) {
+      ClayTodoItem *item = clay_array_get(&items, i);
+      free(item->shown);
+      item->shown = NULL;
+      free(item->detail);
+      item->detail = NULL;
+    }
+    if (title && *title) plan->title = strdup(title);
+  } else {
+    clay_plan_clear_steps(plan);
+    if (title && *title) {
+      free(plan->title);
+      plan->title = strdup(title);
+    }
+  }
   clay_array_free(&plan->todos);
   plan->todos = items;
-  const char *title = clay_json_string_value(clay_json_object_get(arguments, "title"));
-  if (title && *title) plan->title = strdup(title);
 
   ClayStr output;
   clay_str_init(&output);
@@ -1195,36 +1258,47 @@ static void print_tool_output(const ClayJson *result, int show_command,
    points the live status row at whichever one is running now. */
 static void render_plan(ClayCommands *commands) {
   const ClayTodoItem *active = NULL;
+  size_t active_index = 0;
   size_t done = 0, failed = 0, skipped = 0;
+  int any_changed = 0;
+  for (size_t i = 0; i < commands->plan.todos.count; i++) {
+    ClayTodoItem *item = clay_array_get(&commands->plan.todos, i);
+    if (strcmp(item->status, "completed") == 0) done++;
+    if (strcmp(item->status, "failed") == 0) failed++;
+    if (strcmp(item->status, "skipped") == 0) skipped++;
+    if (strcmp(item->status, "in_progress") == 0 && !active) {
+      active = item;
+      active_index = i + 1;
+    }
+    if (!item->shown || strcmp(item->shown, item->status) != 0)
+      any_changed = 1;
+  }
+  /* The heading is a snapshot of the whole plan, not of the steps seen so
+     far, so count every status before drawing it. */
+  if (any_changed && commands->plan.todos.count > 0 &&
+      !commands->plan.header_shown) {
+    clay_plan_header(commands->plan.title, done, commands->plan.todos.count,
+                     failed, skipped);
+    commands->plan.header_shown = 1;
+  }
   for (size_t i = 0; i < commands->plan.todos.count; i++) {
     ClayTodoItem *item = clay_array_get(&commands->plan.todos, i);
     int completed = strcmp(item->status, "completed") == 0;
     int running = strcmp(item->status, "in_progress") == 0;
-    if (completed) done++;
-    if (strcmp(item->status, "failed") == 0) failed++;
-    if (strcmp(item->status, "skipped") == 0) skipped++;
-    if (running && !active) active = item;
-    if (!item->shown || strcmp(item->shown, item->status) != 0) {
-      /* The heading goes out once, right before the first step. */
-      if (!commands->plan.header_shown) {
-        clay_plan_header(commands->plan.title, done, commands->plan.todos.count,
-                         failed, skipped);
-        commands->plan.header_shown = 1;
-      }
-      clay_plan_step(completed   ? CLAY_STEP_DONE
-                     : running   ? CLAY_STEP_ACTIVE
-                     : strcmp(item->status, "failed") == 0
-                         ? CLAY_STEP_FAILED
-                     : strcmp(item->status, "skipped") == 0 ? CLAY_STEP_SKIPPED
-                                                            : CLAY_STEP_PENDING,
-                     item->content);
-      free(item->shown);
-      item->shown = strdup(item->status);
-      /* A step that stopped running has no current activity any more. */
-      if (!running) {
-        free(item->detail);
-        item->detail = NULL;
-      }
+    if (item->shown && strcmp(item->shown, item->status) == 0) continue;
+    clay_plan_step(completed   ? CLAY_STEP_DONE
+                   : running   ? CLAY_STEP_ACTIVE
+                   : strcmp(item->status, "failed") == 0
+                       ? CLAY_STEP_FAILED
+                   : strcmp(item->status, "skipped") == 0 ? CLAY_STEP_SKIPPED
+                                                          : CLAY_STEP_PENDING,
+                   item->content);
+    free(item->shown);
+    item->shown = strdup(item->status);
+    /* A step that stopped running has no current activity any more. */
+    if (!running) {
+      free(item->detail);
+      item->detail = NULL;
     }
   }
   if (!active || commands->plan.todos.count == 0) {
@@ -1244,7 +1318,7 @@ static void render_plan(ClayCommands *commands) {
   }
   ClayStr text;
   clay_str_init(&text);
-  clay_str_printf(&text, "%s%zu/%zu%s ", clay_color(CLAY_GRAY), done + 1,
+  clay_str_printf(&text, "%s%zu/%zu%s ", clay_color(CLAY_GRAY), active_index,
                   commands->plan.todos.count, clay_color(CLAY_RESET));
   clay_str_push_n(&text, active->content, bytes);
   if (active->content[bytes])

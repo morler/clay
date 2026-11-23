@@ -441,25 +441,3 @@ void clay_list_bullet(const char *fmt, ...) {
     va_end(args);
     fputc('\n', stdout);
 }
-
-/* One row per line: a wrapped tool line reads as two entries and pushes the
-   real output off screen. */
-void clay_tool_output_line(const char *fmt, ...) {
-    printf("    %s%s%s ", clay_color(CLAY_GRAY), CLAY_ICON_DOT,
-           clay_color(CLAY_RESET));
-    ClayStr line;
-    clay_str_init(&line);
-    va_list args;
-    va_start(args, fmt);
-    clay_str_vprintf(&line, fmt, args);
-    va_end(args);
-    int room = clay_term_width() - 7; /* indent, bullet, space, last column */
-    if (room > 1 && (int)clay_utf8_width(line.data) > room) {
-        clay_term_write_clipped(line.data, room - 1);
-        printf("%s…%s", clay_color(CLAY_GRAY), clay_color(CLAY_RESET));
-    } else {
-        fputs(line.data, stdout);
-    }
-    clay_str_free(&line);
-    fputc('\n', stdout);
-}

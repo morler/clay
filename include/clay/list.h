@@ -94,7 +94,4 @@ void clay_plan_header(const char *title, size_t done, size_t total,
 /* Prints a plain bullet item ("  · text"), for simple unordered lists. */
 void clay_list_bullet(const char *fmt, ...);
 
-/* Prints a nested line belonging to a tool result ("    · text"). */
-void clay_tool_output_line(const char *fmt, ...);
-
 #endif /* CLAY_LIST_H */

@@ -336,8 +336,8 @@ static char *capture_tool_output(ClayCommands *commands, const char *name,
   return text;
 }
 
-/* A completed tool leaves one quiet receipt and no body; a failure keeps
-   the error and the start of the output so the user can act on it. */
+/* A completed tool leaves one quiet receipt and no body; a failure keeps the
+   same single line, naming the command or target and the reason. */
 static void test_tool_receipts(ClayCommands *commands) {
   int colors = clay_term_color_enabled();
   clay_term_set_color_enabled(0);
@@ -358,9 +358,9 @@ static void test_tool_receipts(ClayCommands *commands) {
   clay_json_object_set(result, "error", clay_json_string("permission denied"));
   clay_json_object_set(result, "output", clay_json_string("boom line\n"));
   char *failure = capture_tool_output(commands, "read", result);
-  assert(strstr(failure, CLAY_ICON_CROSS " Failed to read: src/a.c"));
-  assert(strstr(failure, "permission denied"));
-  assert(strstr(failure, "boom line"));
+  assert(strstr(failure, CLAY_ICON_CROSS " Failed to read: src/a.c - permission denied"));
+  assert(!strstr(failure, "boom line"));
+  assert(count_text(failure, "\n") == 1);
   free(failure);
   clay_json_free(result);
 
@@ -380,10 +380,9 @@ static void test_tool_receipts(ClayCommands *commands) {
   clay_json_object_set(result, "exit_code", clay_json_number(1));
   clay_json_object_set(result, "output", clay_json_string("boom\n"));
   char *failed = capture_tool_output(commands, "shell_exec", result);
-  assert(strstr(failed, CLAY_ICON_CROSS " Failed"));
-  assert(strstr(failed, "exit 1"));
-  assert(strstr(failed, "$ false"));
-  assert(strstr(failed, "boom"));
+  assert(strstr(failed, CLAY_ICON_CROSS " Failed $ false exit 1"));
+  assert(!strstr(failed, "boom"));
+  assert(count_text(failed, "\n") == 1);
   free(failed);
   clay_json_free(result);
 

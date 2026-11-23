@@ -11,7 +11,6 @@
 #define CLAY_SHELL_OUTPUT_LIMIT (64 * 1024) /* shown inline to the model */
 #define CLAY_SHELL_CAPTURE_LIMIT                                               \
   (4 * 1024 * 1024) /* captured, for the scratch dump */
-#define CLAY_TOOL_VISIBLE_LINES 8
 #define CLAY_PLAN_STEP_COLUMNS 28
 #define CLAY_THINKING_LIMIT (4 * 1024 * 1024)
 #define CLAY_ASK_USER_MAX_OPTIONS 6
@@ -1158,9 +1157,14 @@ static void tool_label(ClayStr *out, const char *name, int completed,
                        int success, const char *detail) {
   const char *verb = NULL;
   if (strcmp(name, "shell_exec") == 0) {
-    if (completed && !success)
-      clay_str_push(out, "Failed");
-    else {
+    if (completed && !success) {
+      if (detail && *detail) {
+        clay_str_push(out, "Failed $ ");
+        append_label_text(out, detail);
+      } else {
+        clay_str_push(out, "Failed");
+      }
+    } else {
       clay_str_push(out, completed ? "Ran $ " : "Running $ ");
       if (detail && *detail) append_label_text(out, detail);
     }
@@ -1253,64 +1257,6 @@ static int command_fits_inline(const char *command) {
                  clay_utf8_width(label.data) + 8;
   clay_str_free(&label);
   return width < (size_t)clay_term_width();
-}
-
-/* Failures keep what the user needs to act on: the command, the error and
-   the start of the output. A successful call's output is model input and
-   already recorded in the receipt above it. */
-static void print_tool_failure(const ClayJson *result, int show_error) {
-  const char *command =
-      clay_json_string_value(clay_json_object_get(result, "command"));
-  const char *output =
-      clay_json_string_value(clay_json_object_get(result, "output"));
-  const char *error =
-      clay_json_string_value(clay_json_object_get(result, "error"));
-  int truncated =
-      clay_json_bool_value(clay_json_object_get(result, "output_truncated"));
-  if (*command) {
-    ClayStr display;
-    clay_str_init(&display);
-    append_label_text(&display, command);
-    clay_tool_output_line("$ %s", display.data);
-    clay_str_free(&display);
-  }
-  if (!*output) {
-    /* A failure with nothing on stdout still has something to say, unless
-       the status line above already said it. */
-    if (show_error && *error)
-      clay_tool_output_line("%s", error);
-    else if (!*error)
-      clay_tool_output_line("(no output)");
-    return;
-  }
-  ClayStr line;
-  clay_str_init(&line);
-  int shown = 0;
-  int omitted = 0;
-  for (const unsigned char *p = (const unsigned char *)output;; p++) {
-    if (*p == '\n' || *p == '\0') {
-      if (line.len > 0 && shown < CLAY_TOOL_VISIBLE_LINES) {
-        clay_tool_output_line("%s", line.data);
-        shown++;
-      } else if (line.len > 0)
-        omitted = 1;
-      clay_str_clear(&line);
-      if (*p == '\0')
-        break;
-    } else if (*p != '\r') {
-      if (*p == 0x1b)
-        clay_str_push(&line, "\\x1b");
-      else if (*p == '\t')
-        clay_str_push_char(&line, ' ');
-      else if (*p < 0x20)
-        clay_str_push_char(&line, '?');
-      else
-        clay_str_push_char(&line, (char)*p);
-    }
-  }
-  if (omitted || truncated)
-    clay_tool_output_line("%s…%s", clay_color(CLAY_GRAY), clay_color(CLAY_RESET));
-  clay_str_free(&line);
 }
 
 /* Prints the steps that moved since the last time the plan was drawn, and
@@ -1442,7 +1388,6 @@ static void on_tool_result(const char *name, const ClayJson *result,
       (long)clay_json_number_value(clay_json_object_get(result, "exit_code"));
   const char *command =
       clay_json_string_value(clay_json_object_get(result, "command"));
-  int error_in_label = 0;
   const char *detail_key = tool_detail_key(name);
   const char *detail =
       detail_key
@@ -1481,12 +1426,10 @@ static void on_tool_result(const char *name, const ClayJson *result,
       if (clay_json_object_get(result, "exit_code"))
         clay_task_fail_with_label(stream->tool_task, label.data, "exit %ld",
                                   exit_code);
-      else if (*error) {
+      else if (*error)
         clay_task_fail_with_label(stream->tool_task, label.data, "- %s", error);
-        error_in_label = 1;
-      } else {
+      else
         clay_task_fail_with_label(stream->tool_task, label.data, "");
-      }
     }
     clay_str_free(&label);
     stream->tool_task = NULL;
@@ -1494,8 +1437,6 @@ static void on_tool_result(const char *name, const ClayJson *result,
   } else
     clay_sayc(ok ? CLAY_GRAY : CLAY_RED, "%s: %s", ok ? "Executed" : "Failed",
               name);
-  if (!ok)
-    print_tool_failure(result, !error_in_label);
   if (clay_term_is_interactive())
     clay_term_raw_enable();
   show_thinking(stream);

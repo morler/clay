@@ -140,6 +140,7 @@ static void test_codex_publication_waits_for_end(void) {
     free(config.access_token); free(config.refresh_token); free(config.account_id);
 }
 #include "clay/http.h"
+static void subagent_exhaust_http(const ClayHttpRequest *req, ClayHttpResponse *resp);
 static int review_mock;
 static int http_inflight, http_peak; /* review mock 18 */
 static int http_calls; /* review mock 19 */
@@ -262,6 +263,11 @@ int __wrap_clay_http_request(const ClayHttpRequest *req, ClayHttpResponse *resp)
         assert(clay_commands_test_credentials_lock_free());
     if (!review_mock) return __real_clay_http_request(req, resp);
     memset(resp, 0, sizeof(*resp));
+    if (review_mock == 24) {
+        resp->status = 200;
+        subagent_exhaust_http(req, resp);
+        return 0;
+    }
     if (review_mock == 23) {
         resp->status = 200;
         subagent_budget_http(req);
@@ -1070,6 +1076,157 @@ static void test_unpersisted_retry(void) {
     assert(system(cmd) == 0);
 }
 
+typedef struct {
+    pthread_mutex_t lock;
+    int calls;
+} ExhaustMock;
+static ExhaustMock *exhaust_mock;
+static ClayJson *call(ClayCommands *commands, const char *json_args);
+static void subagent_exhaust_http(const ClayHttpRequest *req, ClayHttpResponse *resp);
+
+static void stress_commands_init(ClayCommands *commands);
+static void stress_commands_free(ClayCommands *commands, const char *logout_id);
+static void stress_assert_transcript(ClayJson *entry, int tool_calls, const char *summary);
+static int ok(ClayJson *result);
+static const char *error_of(ClayJson *result);
+
+/* A mock tool result whose serialized size is large enough that the provider's
+   context budget compaction never collapses it back into the transcript. */
+static void exhaust_tool_event(ClayHttpResponse *resp, const ClayHttpRequest *req,
+                               int round) {
+    ClayStr event;
+    clay_str_init(&event);
+    clay_str_printf(&event,
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-%d\","
+        "\"function\":{\"name\":\"todowrite\",\"arguments\":"
+        "\"{\\\"todos\\\":[{\\\"content\\\":\\\"", round);
+    for (int i = 0; i < 300; i++) clay_str_push_char(&event, 'x');
+    clay_str_push(&event, "exhaust-marker");
+    clay_str_printf(&event,
+        "\\\",\\\"status\\\":\\\"completed\\\"}]}\"}}]}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900}}\n\n");
+    resp->status = 200;
+    assert(req->on_chunk);
+    req->on_chunk(event.data, event.len, req->userdata);
+    clay_str_free(&event);
+}
+
+static void subagent_exhaust_http(const ClayHttpRequest *req, ClayHttpResponse *resp) {
+    ExhaustMock *mock = exhaust_mock;
+    assert(mock && req->body);
+    pthread_mutex_lock(&mock->lock);
+    int call = ++mock->calls;
+    pthread_mutex_unlock(&mock->lock);
+    resp->status = 200;
+    assert(req->on_chunk);
+    const char *empty = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900}}\n\n";
+    if (strstr(req->body, "Summarize what you just did")) {
+        /* The one no-tools round after exhaustion. */
+        if (strstr(req->body, "summarize-tail")) {
+            const char *event =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"summarize-tail summary\"}}]}\n\n";
+            req->on_chunk(event, strlen(event), req->userdata);
+        } else {
+            req->on_chunk(empty, strlen(empty), req->userdata);
+        }
+        return;
+    }
+    if (strstr(req->body, "empty-tail")) {
+        /* A finished run that simply said nothing. */
+        req->on_chunk(empty, strlen(empty), req->userdata);
+        return;
+    }
+    exhaust_tool_event(resp, req, call);
+}
+
+static int http_calls_seen(void) {
+    pthread_mutex_lock(&exhaust_mock->lock);
+    int calls = exhaust_mock->calls;
+    pthread_mutex_unlock(&exhaust_mock->lock);
+    return calls;
+}
+
+/* The round budget is a ceiling on the branch, not an excuse to drop it: a
+   branch that spent all 32 rounds still returns its summary, says it was
+   exhausted, and leaves a transcript the caller can continue from. */
+static void test_subagent_exhausted_summary(void) {
+    ClayCommands commands;
+    stress_commands_init(&commands);
+    assert(setenv("OPENAI_API_KEY", "offline-key", 1) == 0);
+    clay_commands_load_provider(&commands, clay_commands_find_provider_type("openai"));
+    commands.selected_provider = "openai";
+    commands.selected_model = "exhaust-model";
+
+    ExhaustMock mock = {0};
+    assert(!pthread_mutex_init(&mock.lock, NULL));
+    exhaust_mock = &mock;
+    review_mock = 24;
+
+    /* The one no-tools round comes back empty too: the error names the
+       spent budget and points at the transcript instead of dropping work. */
+    int before = http_calls_seen();
+    ClayJson *result = call(&commands,
+        "{\"tasks\":[{\"description\":\"nothing\",\"prompt\":\"nothing-tail\"}]}");
+    assert(http_calls_seen() - before == CLAY_SUBAGENT_MAX_ROUNDS + 1);
+    ClayJson *entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
+    assert(!ok(entry));
+    assert(clay_json_bool_value(clay_json_object_get(entry, "exhausted")));
+    assert((int)clay_json_number_value(clay_json_object_get(entry, "rounds")) ==
+           CLAY_SUBAGENT_MAX_ROUNDS);
+    const char *error = error_of(entry);
+    assert(strstr(error, "round budget was spent") &&
+           strstr(error, "transcript is at"));
+    assert(!strstr(error, "no summary"));
+    stress_assert_transcript(entry, CLAY_SUBAGENT_MAX_ROUNDS, "");
+    const char *output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "round budget spent"));
+    clay_json_free(result);
+
+    /* Exhausted with tool work done: one no-tools round recovers the report. */
+    before = http_calls_seen();
+    result = call(&commands,
+        "{\"tasks\":[{\"description\":\"summarize\",\"prompt\":\"summarize-tail\"}]}");
+    assert(http_calls_seen() - before == CLAY_SUBAGENT_MAX_ROUNDS + 1);
+    assert(!ok(result));
+    entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
+    assert(!ok(entry));
+    assert(clay_json_bool_value(clay_json_object_get(entry, "exhausted")));
+    assert(strstr(error_of(entry), "partial work only"));
+    stress_assert_transcript(entry, CLAY_SUBAGENT_MAX_ROUNDS,
+                             "summarize-tail summary");
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "[summarize] summarize-tail summary"));
+    clay_json_free(result);
+
+    /* Exhausted without a word: the transcript stands in for the report. */
+    result = call(&commands,
+        "{\"tasks\":[{\"description\":\"exhaust\",\"prompt\":\"exhaust-tail\"}]}");
+    assert(!ok(result));
+    entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
+    assert(clay_json_bool_value(clay_json_object_get(entry, "exhausted")));
+    stress_assert_transcript(entry, CLAY_SUBAGENT_MAX_ROUNDS, "");
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "[exhaust] (round budget spent; see transcript)"));
+    clay_json_free(result);
+
+    /* A run that finished without a word keeps the old no-summary error. */
+    result = call(&commands,
+        "{\"tasks\":[{\"description\":\"empty\",\"prompt\":\"empty-tail\"}]}");
+    assert(!ok(result));
+    entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
+    assert(!clay_json_object_get(entry, "exhausted"));
+    assert(strstr(error_of(entry), "no summary came back"));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "[empty] (no summary came back)"));
+    clay_json_free(result);
+
+    review_mock = 0;
+    exhaust_mock = NULL;
+    pthread_mutex_destroy(&mock.lock);
+    assert(unsetenv("OPENAI_API_KEY") == 0);
+    stress_commands_free(&commands, "openai");
+}
+
 static ClayJson *call(ClayCommands *commands, const char *json_args) {
     ClayJson *args = clay_json_parse(json_args, NULL);
     assert(args);
@@ -1320,7 +1477,7 @@ static void test_subagent_stress_http(void) {
         ClayJson *entry = clay_json_array_get(results, i);
         if (i == 3) {
             assert(!ok(entry));
-            assert(strstr(error_of(entry), "no summary"));
+            assert(strstr(error_of(entry), "failed before reporting"));
             assert((int)clay_json_number_value(clay_json_object_get(entry, "tool_calls")) == 0);
             stress_assert_transcript(entry, 0, "");
         } else {
@@ -2472,6 +2629,7 @@ int main(void) {
     test_subagent_budget_and_summary();
     test_subagent_stress_http();
     test_subagent_stress_mixed();
+    test_subagent_exhausted_summary();
 
     ClayCommands commands;
     memset(&commands, 0, sizeof(commands));

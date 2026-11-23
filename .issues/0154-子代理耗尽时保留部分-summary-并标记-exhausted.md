@@ -1,7 +1,7 @@
 ---
 id: 154
 title: 子代理耗尽时保留部分 summary 并标记 exhausted
-status: open
+status: closed
 priority: high
 labels:
     - type:bug
@@ -12,7 +12,8 @@ relations:
         - 155
         - 148
 created: "2026-11-20"
-updated: "2026-11-20"
+updated: "2026-11-23"
+closed: "2026-11-23"
 ---
 
 ## 现状

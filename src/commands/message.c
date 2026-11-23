@@ -1684,10 +1684,26 @@ static void save_unrecorded_response(ClayJson *messages, size_t turn_start,
 /* The budget messages exist only while the turn runs. Keeping them in the
    journal would make the next turn (or /resume) read a stale "48 of 64". */
 static void drop_synthetic_messages(ClayJson *messages) {
-  for (size_t i = clay_json_array_count(messages); i-- > 1;) {
-    if (clay_commands_is_synthetic_message(clay_json_array_get(messages, i)))
-      clay_json_array_remove(messages, i);
-  }
+  clay_commands_drop_synthetic_messages(messages);
+}
+
+static void begin_segment(int final, void *userdata) {
+  ClayConversationStream *stream = userdata;
+  stream->segment_round = 0;
+  /* The closing round has no tools, so it has no next request to nudge. */
+  stream->nudges_sent = final ? 7 : 0;
+}
+
+static void segment_continued(int segment, int max_segments, void *userdata) {
+  (void)userdata;
+  clay_sayc(CLAY_GRAY,
+            "Round budget reached; continuing automatically (%d/%d).", segment,
+            max_segments);
+}
+
+static long billed_tokens(void *userdata) {
+  ClayConversationStream *stream = userdata;
+  return stream->usage.input_tokens + stream->usage.output_tokens;
 }
 
 /* A turn gets CLAY_AGENT_MAX_SEGMENTS provider runs. When a run spends all
@@ -1698,36 +1714,24 @@ static void drop_synthetic_messages(ClayJson *messages) {
 static int run_agent_segments(ClayCommands *commands, ClayJson *messages,
                               const ClayToolSet *tools,
                               ClayConversationStream *stream,
-                              const ClayOpenAICallbacks *callbacks) {
-  for (int segment = 0; segment < CLAY_AGENT_MAX_SEGMENTS; segment++) {
-    stream->segment_round = 0;
-    stream->nudges_sent = 0;
-    int rc = clay_commands_run_completion(commands, messages, tools,
-                                          CLAY_AGENT_MAX_ROUNDS,
-                                          clay_chat_id(commands->chat),
-                                          callbacks);
-    if (rc != CLAY_RUN_OUT_OF_ROUNDS) return rc;
-    if (segment + 1 < CLAY_AGENT_MAX_SEGMENTS && callbacks->should_abort &&
-        callbacks->should_abort(callbacks->userdata))
-      return 1;
-    /* Stale "16 of 64" messages would refer to the segment that just ended. */
-    drop_synthetic_messages(messages);
-    if (segment + 1 >= CLAY_AGENT_MAX_SEGMENTS) break;
-    clay_sayc(CLAY_GRAY,
-              "Round budget reached; continuing automatically (%d/%d).",
-              segment + 2, CLAY_AGENT_MAX_SEGMENTS);
-    clay_json_array_push(messages,
-                         clay_openai_message("user", CLAY_AUTO_CONTINUE_PROMPT));
-  }
-  if (callbacks->should_abort && callbacks->should_abort(callbacks->userdata))
-    return 1;
-  /* Consume the last tool results even when the budget is gone. */
-  clay_json_array_push(messages,
-                       clay_openai_message("user", CLAY_FINAL_SUMMARY_PROMPT));
-  stream->segment_round = 0;
-  stream->nudges_sent = 7;
-  return clay_commands_run_completion(commands, messages, NULL, 1,
-                                      clay_chat_id(commands->chat), callbacks);
+                              const ClayOpenAICallbacks *callbacks,
+                              int *exhausted, int *forced_summary) {
+  ClaySegmentPlan plan = {
+      .run = clay_commands_run_completion,
+      .max_segments = CLAY_AGENT_MAX_SEGMENTS,
+      .max_rounds = CLAY_AGENT_MAX_ROUNDS,
+      .max_tokens = CLAY_AGENT_MAX_TURN_TOKENS,
+      .max_seconds = CLAY_AGENT_MAX_TURN_SECONDS,
+      .auto_continue = CLAY_AUTO_CONTINUE_PROMPT,
+      .final_summary = CLAY_FINAL_SUMMARY_PROMPT,
+      .begin_segment = begin_segment,
+      .continuing = segment_continued,
+      .billed_tokens = billed_tokens,
+      .userdata = stream,
+  };
+  return clay_commands_run_segments(commands, messages, tools,
+                                    clay_chat_id(commands->chat), callbacks,
+                                    &plan, exhausted, forced_summary);
 }
 
 int clay_commands_run_message(ClayCommands *commands, const char *input) {
@@ -1797,7 +1801,9 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   clay_commands_tools_build(commands, &commands->plan, &tools, 1);
   if (clay_term_is_interactive())
     clay_term_raw_enable();
-  int rc = run_agent_segments(commands, messages, &tools, &stream, &callbacks);
+  int exhausted = 0, forced_summary = 0;
+  int rc = run_agent_segments(commands, messages, &tools, &stream, &callbacks,
+                              &exhausted, &forced_summary);
   if (clay_term_is_interactive())
     clay_term_raw_disable();
   clay_commands_tools_free(&tools);
@@ -1838,13 +1844,15 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
     return 0;
   }
   /* Running out of rounds is an unfinished turn, not a failed one: the tool
-     results are real and the user can say "keep going". */
+     results are real and the user can say "keep going". The state says so,
+     so /resume reports a turn that stopped mid-job as one. */
   int save_failed;
   int ok = rc == 0 || rc == CLAY_RUN_OUT_OF_ROUNDS;
   if (ok) {
     persist_thinking(commands, &stream);
     save_failed =
-        clay_chat_finish_turn(commands->chat, messages, turn_start, "completed") != 0;
+        clay_chat_finish_turn(commands->chat, messages, turn_start,
+                              forced_summary ? "incomplete" : "completed") != 0;
     clay_json_free(commands->conversation);
     commands->conversation = messages;
     set_status(seconds, rc == 0, stream.tool_calls);

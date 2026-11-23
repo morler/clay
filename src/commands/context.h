@@ -483,6 +483,15 @@ void clay_commands_tools_free(ClayToolSet *set);
 #define CLAY_AGENT_SOFT_ROUNDS 48
 #define CLAY_AGENT_MAX_SEGMENTS 2
 #define CLAY_SUBAGENT_MAX_ROUNDS 32
+#define CLAY_SUBAGENT_MAX_SEGMENTS 2
+
+/* Whole-turn safety nets, checked between segments. A real maxed turn cost
+   about 3.5M input tokens and 19 minutes; these stop a runaway run a little
+   past that instead of letting it double. */
+#define CLAY_AGENT_MAX_TURN_TOKENS 4000000L
+#define CLAY_AGENT_MAX_TURN_SECONDS 1200
+#define CLAY_SUBAGENT_MAX_TURN_TOKENS 2000000L
+#define CLAY_SUBAGENT_MAX_TURN_SECONDS 900
 
 /* Synthetic user messages carry the round budget inside a turn. They are
    instructions about the run, not the user's words: compaction and
@@ -503,6 +512,49 @@ int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
                                  const ClayToolSet *tools, int max_rounds,
                                  const char *cache_key,
                                  const ClayOpenAICallbacks *callbacks);
+
+/* One agent run of `max_rounds`, same shape as clay_commands_run_completion.
+   The segment driver takes it as a function pointer so a test can script the
+   runs; production callers pass clay_commands_run_completion. */
+typedef int (*ClaySegmentRun)(ClayCommands *commands, ClayJson *messages,
+                              const ClayToolSet *tools, int max_rounds,
+                              const char *cache_key,
+                              const ClayOpenAICallbacks *callbacks);
+
+typedef struct {
+  ClaySegmentRun run;
+  int max_segments;
+  int max_rounds;    /* per segment */
+  long max_tokens;   /* billed input+output for the whole turn; 0 = no cap */
+  int max_seconds;   /* wall clock for the whole turn; 0 = no cap */
+  const char *auto_continue; /* appended before each further segment */
+  const char *final_summary; /* appended before the closing no-tools round;
+                                NULL skips that round */
+  /* index 0 for the first segment, `final` 1 for the no-tools closing round. */
+  void (*begin_segment)(int final, void *userdata);
+  /* Called before appending the continuation, already past the budget check. */
+  void (*continuing)(int segment, int max_segments, void *userdata);
+  /* Billed input+output tokens so far this turn; NULL ignores max_tokens. */
+  long (*billed_tokens)(void *userdata);
+  void *userdata;
+} ClaySegmentPlan;
+
+/* Runs up to `max_segments` segments, then one no-tools round that consumes
+   the last tool results and asks for a status. Stops early at a segment
+   boundary when the token or wall-clock budget is spent. Sets *exhausted
+   when any segment spent all its rounds and *forced_summary when the report
+   had to come from that closing round, i.e. the work is partial. Returns 0,
+   1 when cancelled, CLAY_RUN_OUT_OF_ROUNDS when the closing round itself
+   could not finish, -1 on provider failure. */
+int clay_commands_run_segments(ClayCommands *commands, ClayJson *messages,
+                               const ClayToolSet *tools, const char *cache_key,
+                               const ClayOpenAICallbacks *callbacks,
+                               const ClaySegmentPlan *plan, int *exhausted,
+                               int *forced_summary);
+
+/* Removes the round-budget messages from a live turn. They must not reach
+   the journal, /resume, or a compaction request. */
+void clay_commands_drop_synthetic_messages(ClayJson *messages);
 
 /* Delegation tool (src/commands/subagent.c). Runs one step of a plan in a
    fresh agent with no conversation history and returns its summary.

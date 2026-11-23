@@ -495,7 +495,15 @@ static void test_final_summary(ClayCommands *commands, const char *home) {
   char *journal = read_chat_file(commands, home, "chat.json");
   assert(journal);
   assert(!strstr(journal, CLAY_SYNTHETIC_MESSAGE_PREFIX));
+  assert(strstr(journal, "\"state\":\"incomplete\""));
   free(journal);
+  /* The turn stopped mid-job, but what it did is real: a replay keeps it. */
+  ClayJson *replay = clay_chat_openai_messages(commands->chat);
+  assert(clay_json_array_count(replay) == 1);
+  assert(strcmp(clay_json_string_value(
+                    clay_json_object_get(clay_json_array_get(replay, 0), "content")),
+                "hello") == 0);
+  clay_json_free(replay);
   char *requests = read_chat_file(commands, home, "requests.jsonl");
   assert(requests);
   assert(request_rounds(requests) == 3);
@@ -527,8 +535,12 @@ static void test_segment_cancel(ClayCommands *commands, const char *home) {
   scripted_count = 1;
   scripted_index = 0;
   scripted_results[0] = CLAY_RUN_OUT_OF_ROUNDS;
-  int rc = run_agent_segments(commands, messages, &tools, &stream, &callbacks);
+  int exhausted = 0, forced = 0;
+  int rc = run_agent_segments(commands, messages, &tools, &stream, &callbacks,
+                              &exhausted, &forced);
   assert(rc == 1);
+  assert(exhausted);
+  assert(!forced);
   assert(scripted_index == 1);
   assert(!has_synthetic_marker(messages));
   scripted = 0;
@@ -536,6 +548,54 @@ static void test_segment_cancel(ClayCommands *commands, const char *home) {
   remove_chat_files(commands, home);
   clay_chat_destroy(commands->chat);
   commands->chat = NULL;
+}
+
+/* The whole-turn token net is checked between segments: once a turn has
+   billed past the cap, no further segment starts, but the closing round still
+   runs so the user gets a status instead of silence. */
+static int netted_segment_calls;
+static int netted_segment(ClayCommands *commands, ClayJson *messages,
+                          const ClayToolSet *tools, int max_rounds,
+                          const char *cache_key,
+                          const ClayOpenAICallbacks *callbacks) {
+  (void)commands;
+  (void)messages;
+  (void)cache_key;
+  (void)callbacks;
+  netted_segment_calls++;
+  if (tools)
+    return max_rounds == CLAY_AGENT_MAX_ROUNDS ? CLAY_RUN_OUT_OF_ROUNDS : 0;
+  return 0;
+}
+
+static long netted_billed(void *userdata) {
+  (void)userdata;
+  return CLAY_AGENT_MAX_TURN_TOKENS;
+}
+
+static void test_turn_token_net(void) {
+  ClayJson *messages = clay_json_array();
+  clay_json_array_push(messages, clay_openai_message("user", "work"));
+  ClayToolSet tools = {0};
+  ClaySegmentPlan plan = {
+      .run = netted_segment,
+      .max_segments = CLAY_AGENT_MAX_SEGMENTS,
+      .max_rounds = CLAY_AGENT_MAX_ROUNDS,
+      .max_tokens = CLAY_AGENT_MAX_TURN_TOKENS,
+      .auto_continue = CLAY_AUTO_CONTINUE_PROMPT,
+      .final_summary = CLAY_FINAL_SUMMARY_PROMPT,
+      .billed_tokens = netted_billed,
+  };
+  int exhausted = 0, forced = 0;
+  int rc = clay_commands_run_segments(NULL, messages, &tools, NULL, NULL,
+                                      &plan, &exhausted, &forced);
+  assert(rc == 0);
+  /* Segment one, then straight to the closing round: segment two is skipped. */
+  assert(netted_segment_calls == 2);
+  assert(exhausted && forced);
+  assert(clay_commands_is_synthetic_message(
+      clay_json_array_get(messages, clay_json_array_count(messages) - 1)));
+  clay_json_free(messages);
 }
 
 /* The soft limit speaks once per segment, not once per request. */
@@ -699,6 +759,7 @@ int main(void) {
   test_segment_cancel(commands, home);
   test_auto_continue(commands, home);
   test_final_summary(commands, home);
+  test_turn_token_net();
   collapse_during_turn = 1;
   collapsed_once = 0;
   commands->chat = clay_chat_create("test");

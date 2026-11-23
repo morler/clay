@@ -23,7 +23,9 @@ void clay_cmd_resume(const char *args, void *user_data) {
         clay_str_init(&title);
         clay_str_init(&description);
         clay_str_push(&title, chat->id);
-        clay_str_printf(&description, "%s · %zu messages", relative, chat->message_count);
+        clay_str_printf(&description, "%s · %zu messages%s", relative,
+                        chat->message_count,
+                        chat->incomplete ? " · stopped mid-job" : "");
         free(relative);
         clay_array_push_val(&titles, &title);
         clay_array_push_val(&descriptions, &description);
@@ -63,6 +65,10 @@ void clay_cmd_resume(const char *args, void *user_data) {
             int preview = clay_config_history_preview_count();
             if (preview > 0) {
                 clay_sayc(CLAY_CYAN, "Resumed %zu previous messages.", clay_chat_message_count(chat));
+                if (summary->incomplete)
+                    clay_sayc(CLAY_YELLOW,
+                              "The last turn stopped mid-job (round budget spent); "
+                              "its work is kept - send a message to continue.");
                 clay_commands_print_history(commands, (size_t)preview);
             }
         }

@@ -112,7 +112,6 @@ int main(void) {
     /* The replay has two messages; the first turn's are replaced. */
     assert(clay_chat_message_count(chat) == 2);
     clay_chat_destroy(chat);
-    free(compacted_id);
     /* Remove the compacted chat's directory too. */
     {
         ClayStr path;
@@ -126,11 +125,36 @@ int main(void) {
         assert(rmdir(path.data) == 0);
         clay_str_free(&path);
     }
+    free(compacted_id);
 
     ClayArray summaries;
     assert(clay_chat_list(&summaries) == 0);
     assert(summaries.count == 1);
     assert(strcmp(((ClayChatSummary *)clay_array_get(&summaries, 0))->id, id) == 0);
+    assert(!((ClayChatSummary *)clay_array_get(&summaries, 0))->incomplete);
+    clay_chat_list_free(&summaries);
+
+    /* A turn that stopped mid-job replays like a finished one and marks the
+       chat as incomplete, for /resume and the chat list. */
+    chat = clay_chat_load(id);
+    assert(chat);
+    assert(clay_chat_begin_turn(chat, "second") == 0);
+    ClayJson *partial = clay_json_array();
+    clay_json_array_push(partial, clay_openai_message("user", "second"));
+    clay_json_array_push(partial, clay_openai_message("assistant", "mid-job"));
+    assert(clay_chat_finish_turn(chat, partial, 0, "incomplete") == 0);
+    clay_json_free(partial);
+    ClayJson *after_partial = clay_chat_openai_messages(chat);
+    assert(clay_json_array_count(after_partial) == 4);
+    clay_json_free(after_partial);
+    clay_chat_destroy(chat);
+    chat = clay_chat_load(id);
+    assert(chat);
+    assert(clay_chat_message_count(chat) == 4);
+    clay_chat_destroy(chat);
+    assert(clay_chat_list(&summaries) == 0);
+    assert(summaries.count == 1);
+    assert(((ClayChatSummary *)clay_array_get(&summaries, 0))->incomplete);
     clay_chat_list_free(&summaries);
 
     ClayStr path;

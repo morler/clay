@@ -12,6 +12,7 @@ typedef struct {
     char *id;
     long long updated_at;
     size_t message_count;
+    int incomplete; /* the last turn stopped mid-job (ran out of rounds) */
 } ClayChatSummary;
 
 typedef struct {

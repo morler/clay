@@ -36,6 +36,22 @@ const char *clay_subagent_prompt_suffix(void) {
   return CLAY_SUBAGENT_PROMPT_SUFFIX;
 }
 
+/* A branch that spends its first segment's rounds gets one more, then one
+   no-tools round: the same shape as the main turn, so a long branch reports
+   instead of dying at 32. */
+#define CLAY_SUBAGENT_CONTINUE_PROMPT                                           \
+  CLAY_AUTO_CONTINUE_MARKER                                                     \
+  " The previous segment reached its round limit mid-task. Continue from "      \
+  "exactly where you stopped: do not repeat calls that already ran, batch "     \
+  "independent checks, finish the remaining work, and end with your summary "   \
+  "for the agent that called you."
+
+#define CLAY_SUBAGENT_FINAL_PROMPT                                              \
+  CLAY_FINAL_SUMMARY_MARKER                                                     \
+  " The round budget is exhausted. Do not call tools. Report in plain text "    \
+  "what you changed and verified, what is unfinished, and the exact next step "  \
+  "for the agent that called you."
+
 /* Per-run budget, so a subagent folds its own old tool results instead of
    reading the parent's counters or touching the parent's history. */
 typedef struct {
@@ -55,7 +71,8 @@ typedef struct {
   ClayStr summary; /* whatever it said after its last tool call */
   int tool_calls;
   int finished;
-  int exhausted; /* the first run spent its whole round budget */
+  int exhausted; /* some segment spent its whole round budget */
+  int partial;   /* the report came from the forced closing round */
   int rc;
   double seconds;
   ClayTokenUsage usage;
@@ -136,21 +153,20 @@ static void set_run_error(ClayJson *entry, const ClaySubagentRun *run) {
   clay_str_init(&message);
   if (run->rc == 1) {
     clay_str_push(&message, "the user cancelled the run");
-  } else if (run->exhausted) {
+  } else if (run->partial) {
     if (run->summary.len > 0)
       clay_str_printf(&message,
                       "the %d-round budget was spent; the summary covers "
                       "partial work only",
-                      CLAY_SUBAGENT_MAX_ROUNDS);
+                      CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS);
     else if (run->transcript)
       clay_str_printf(&message,
-                      "the %d-round budget was spent before the branch "
+                      "the round budget was spent before the branch "
                       "reported; its transcript is at %s",
-                      CLAY_SUBAGENT_MAX_ROUNDS, run->transcript);
+                      run->transcript);
     else
-      clay_str_printf(&message,
-                      "the %d-round budget was spent before the branch "
-                      "reported", CLAY_SUBAGENT_MAX_ROUNDS);
+      clay_str_push(&message,
+                    "the round budget was spent before the branch reported");
   } else if (run->rc == 0) {
     clay_str_push(&message, "no summary came back; do this branch yourself "
                             "or split it further");
@@ -190,6 +206,11 @@ static char *save_transcript(ClayCommands *commands, const ClaySubagentRun *run,
   clay_json_object_set(root, "seconds", clay_json_number(run->seconds));
   clay_json_object_set(root, "tool_calls", clay_json_number(run->tool_calls));
   clay_json_object_set(root, "summary", clay_json_string(run->summary.data));
+  clay_json_object_set(root, "rounds_spent",
+                       clay_json_number(CLAY_SUBAGENT_MAX_ROUNDS *
+                                        CLAY_SUBAGENT_MAX_SEGMENTS));
+  clay_json_object_set(root, "exhausted", clay_json_bool(run->exhausted));
+  clay_json_object_set(root, "partial", clay_json_bool(run->partial));
   clay_json_object_set(root, "messages", clay_json_clone(messages));
   ClayStr text;
   clay_str_init(&text);
@@ -202,6 +223,11 @@ static char *save_transcript(ClayCommands *commands, const ClaySubagentRun *run,
     return NULL;
   }
   return path;
+}
+
+static long billed_tokens(void *userdata) {
+  const ClaySubagentRun *run = userdata;
+  return run->usage.input_tokens + run->usage.output_tokens;
 }
 
 static void *run_subagent(void *argument) {
@@ -232,25 +258,22 @@ static void *run_subagent(void *argument) {
   clock_gettime(CLOCK_MONOTONIC, &started);
   /* Shares the chat's cache key: the prefix is the same system prompt, so
      the provider can reuse the same cached prefix. */
-  int rc = clay_commands_run_completion(commands, messages, &tools,
-                                        CLAY_SUBAGENT_MAX_ROUNDS,
-                                        clay_chat_id(commands->chat),
-                                        &callbacks);
-  run->exhausted = rc == CLAY_RUN_OUT_OF_ROUNDS;
-  /* A model that stops right after its last tool call, or that spent its
-     rounds without a closing message, still did the work. Ask once, with no
-     tools, instead of losing the whole run. */
-  if ((rc == 0 || run->exhausted) && run->summary.len == 0 &&
-      run->tool_calls > 0) {
-    clay_json_array_push(
-        messages,
-        clay_openai_message(
-            "user", "Summarize what you just did for the agent that called "
-                    "you: what you changed and where, what you verified and "
-                    "how, and anything left undone."));
-    rc = clay_commands_run_completion(commands, messages, NULL, 1,
-                                      clay_chat_id(commands->chat), &callbacks);
-  }
+  ClaySegmentPlan plan = {
+      .run = clay_commands_run_completion,
+      .max_segments = CLAY_SUBAGENT_MAX_SEGMENTS,
+      .max_rounds = CLAY_SUBAGENT_MAX_ROUNDS,
+      .max_tokens = CLAY_SUBAGENT_MAX_TURN_TOKENS,
+      .max_seconds = CLAY_SUBAGENT_MAX_TURN_SECONDS,
+      .auto_continue = CLAY_SUBAGENT_CONTINUE_PROMPT,
+      .final_summary = CLAY_SUBAGENT_FINAL_PROMPT,
+      .billed_tokens = billed_tokens,
+      .userdata = run,
+  };
+  int forced_summary = 0;
+  int rc = clay_commands_run_segments(commands, messages, &tools,
+                                      clay_chat_id(commands->chat), &callbacks,
+                                      &plan, &run->exhausted, &forced_summary);
+  run->partial = forced_summary;
   clay_commands_tools_free(&tools);
   struct timespec finished;
   clock_gettime(CLOCK_MONOTONIC, &finished);
@@ -387,7 +410,7 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
       reported++;
       summary_bytes += run->summary.len;
     }
-    if (run->rc == 0 && !run->exhausted && run->summary.len > 0)
+    if (run->rc == 0 && !run->partial && run->summary.len > 0)
       succeeded++;
   }
   size_t share = summary_bytes > CLAY_SUBAGENT_SUMMARY_LIMIT
@@ -396,7 +419,7 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
   ClayTokenUsage usage = {0};
   for (size_t i = 0; i < count; i++) {
     ClaySubagentRun *run = &batch->runs[i];
-    int ok = run->rc == 0 && !run->exhausted && run->summary.len > 0;
+    int ok = run->rc == 0 && !run->partial && run->summary.len > 0;
     clay_token_usage_add(&usage, &run->usage);
     ClayJson *entry = clay_json_object();
     clay_json_object_set(entry, "description",
@@ -408,7 +431,8 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
     if (run->exhausted) {
       clay_json_object_set(entry, "exhausted", clay_json_bool(1));
       clay_json_object_set(entry, "rounds",
-                           clay_json_number(CLAY_SUBAGENT_MAX_ROUNDS));
+                           clay_json_number(CLAY_SUBAGENT_MAX_ROUNDS *
+                                            CLAY_SUBAGENT_MAX_SEGMENTS));
     }
     if (!ok)
       set_run_error(entry, run);
@@ -421,7 +445,7 @@ ClayJson *subagent_tool(const ClayJson *arguments, void *userdata) {
     if (run->summary.len == 0) {
       if (run->rc == 1)
         clay_str_push(&output, "(cancelled)");
-      else if (run->exhausted)
+      else if (run->partial)
         clay_str_push(&output, "(round budget spent; see transcript)");
       else
         clay_str_push(&output, "(no summary came back)");

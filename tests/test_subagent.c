@@ -1120,8 +1120,8 @@ static void subagent_exhaust_http(const ClayHttpRequest *req, ClayHttpResponse *
     resp->status = 200;
     assert(req->on_chunk);
     const char *empty = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900}}\n\n";
-    if (strstr(req->body, "Summarize what you just did")) {
-        /* The one no-tools round after exhaustion. */
+    if (strstr(req->body, "round budget is exhausted")) {
+        /* The final no-tools round after both segments spent their rounds. */
         if (strstr(req->body, "summarize-tail")) {
             const char *event =
                 "data: {\"choices\":[{\"delta\":{\"content\":\"summarize-tail summary\"}}]}\n\n";
@@ -1147,7 +1147,7 @@ static int http_calls_seen(void) {
 }
 
 /* The round budget is a ceiling on the branch, not an excuse to drop it: a
-   branch that spent all 32 rounds still returns its summary, says it was
+   branch that spent both segments' rounds still reports, says it was
    exhausted, and leaves a transcript the caller can continue from. */
 static void test_subagent_exhausted_summary(void) {
     ClayCommands commands;
@@ -1162,37 +1162,43 @@ static void test_subagent_exhausted_summary(void) {
     exhaust_mock = &mock;
     review_mock = 24;
 
-    /* The one no-tools round comes back empty too: the error names the
+    /* Both segments and the final round come back empty: the error names the
        spent budget and points at the transcript instead of dropping work. */
     int before = http_calls_seen();
     ClayJson *result = call(&commands,
         "{\"tasks\":[{\"description\":\"nothing\",\"prompt\":\"nothing-tail\"}]}");
-    assert(http_calls_seen() - before == CLAY_SUBAGENT_MAX_ROUNDS + 1);
+    assert(http_calls_seen() - before ==
+           CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS + 1);
     ClayJson *entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
     assert(!ok(entry));
     assert(clay_json_bool_value(clay_json_object_get(entry, "exhausted")));
     assert((int)clay_json_number_value(clay_json_object_get(entry, "rounds")) ==
-           CLAY_SUBAGENT_MAX_ROUNDS);
+           CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS);
     const char *error = error_of(entry);
     assert(strstr(error, "round budget was spent") &&
            strstr(error, "transcript is at"));
     assert(!strstr(error, "no summary"));
-    stress_assert_transcript(entry, CLAY_SUBAGENT_MAX_ROUNDS, "");
+    stress_assert_transcript(entry,
+                             CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS,
+                             "");
     const char *output = clay_json_string_value(clay_json_object_get(result, "output"));
     assert(strstr(output, "round budget spent"));
     clay_json_free(result);
 
-    /* Exhausted with tool work done: one no-tools round recovers the report. */
+    /* Exhausted with tool work done: the closing no-tools round recovers the
+       report, and the entry says it is partial. */
     before = http_calls_seen();
     result = call(&commands,
         "{\"tasks\":[{\"description\":\"summarize\",\"prompt\":\"summarize-tail\"}]}");
-    assert(http_calls_seen() - before == CLAY_SUBAGENT_MAX_ROUNDS + 1);
+    assert(http_calls_seen() - before ==
+           CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS + 1);
     assert(!ok(result));
     entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
     assert(!ok(entry));
     assert(clay_json_bool_value(clay_json_object_get(entry, "exhausted")));
     assert(strstr(error_of(entry), "partial work only"));
-    stress_assert_transcript(entry, CLAY_SUBAGENT_MAX_ROUNDS,
+    stress_assert_transcript(entry,
+                             CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS,
                              "summarize-tail summary");
     output = clay_json_string_value(clay_json_object_get(result, "output"));
     assert(strstr(output, "[summarize] summarize-tail summary"));
@@ -1204,7 +1210,9 @@ static void test_subagent_exhausted_summary(void) {
     assert(!ok(result));
     entry = clay_json_array_get(clay_json_object_get(result, "results"), 0);
     assert(clay_json_bool_value(clay_json_object_get(entry, "exhausted")));
-    stress_assert_transcript(entry, CLAY_SUBAGENT_MAX_ROUNDS, "");
+    stress_assert_transcript(entry,
+                             CLAY_SUBAGENT_MAX_ROUNDS * CLAY_SUBAGENT_MAX_SEGMENTS,
+                             "");
     output = clay_json_string_value(clay_json_object_get(result, "output"));
     assert(strstr(output, "[exhaust] (round budget spent; see transcript)"));
     clay_json_free(result);

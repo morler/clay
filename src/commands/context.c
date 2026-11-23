@@ -1842,6 +1842,70 @@ done:
   return rc;
 }
 
+void clay_commands_drop_synthetic_messages(ClayJson *messages) {
+  for (size_t i = clay_json_array_count(messages); i-- > 1;) {
+    if (clay_commands_is_synthetic_message(clay_json_array_get(messages, i)))
+      clay_json_array_remove(messages, i);
+  }
+}
+
+static int segment_aborted(const ClayOpenAICallbacks *callbacks) {
+  return callbacks && callbacks->should_abort &&
+         callbacks->should_abort(callbacks->userdata);
+}
+
+/* The token and wall-clock caps are whole-turn safety nets, not part of the
+   round budget: they are checked between segments, so a segment in flight is
+   never cut off halfway through a tool result. */
+static int turn_budget_spent(const ClaySegmentPlan *plan, double elapsed) {
+  if (plan->max_seconds > 0 && elapsed >= plan->max_seconds)
+    return 1;
+  if (plan->max_tokens > 0 && plan->billed_tokens &&
+      plan->billed_tokens(plan->userdata) >= plan->max_tokens)
+    return 1;
+  return 0;
+}
+
+int clay_commands_run_segments(ClayCommands *commands, ClayJson *messages,
+                               const ClayToolSet *tools, const char *cache_key,
+                               const ClayOpenAICallbacks *callbacks,
+                               const ClaySegmentPlan *plan, int *exhausted,
+                               int *forced_summary) {
+  *exhausted = 0;
+  *forced_summary = 0;
+  struct timespec started;
+  clock_gettime(CLOCK_MONOTONIC, &started);
+  for (int segment = 0; segment < plan->max_segments; segment++) {
+    if (plan->begin_segment) plan->begin_segment(0, plan->userdata);
+    int rc = plan->run(commands, messages, tools, plan->max_rounds, cache_key,
+                       callbacks);
+    if (rc != CLAY_RUN_OUT_OF_ROUNDS) return rc;
+    *exhausted = 1;
+    if (segment + 1 >= plan->max_segments) break;
+    if (segment_aborted(callbacks)) return 1;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (double)(now.tv_sec - started.tv_sec) +
+                     (double)(now.tv_nsec - started.tv_nsec) / 1e9;
+    if (turn_budget_spent(plan, elapsed)) break;
+    /* Stale "16 of 64" messages would refer to the segment that just ended. */
+    clay_commands_drop_synthetic_messages(messages);
+    if (plan->continuing)
+      plan->continuing(segment + 2, plan->max_segments, plan->userdata);
+    clay_json_array_push(messages, clay_openai_message("user", plan->auto_continue));
+  }
+  if (!plan->final_summary) return CLAY_RUN_OUT_OF_ROUNDS;
+  if (segment_aborted(callbacks)) return 1;
+  /* The closing round is one request that consumes the last tool results and
+     asks for a status, so it runs even when the safety net is spent: without
+     it the user would have no account of what the turn did. */
+  *forced_summary = 1;
+  if (plan->begin_segment) plan->begin_segment(1, plan->userdata);
+  clay_json_array_push(messages,
+                       clay_openai_message("user", plan->final_summary));
+  return plan->run(commands, messages, NULL, 1, cache_key, callbacks);
+}
+
 /* The environment is re-read before every turn; the listing alone can run to
    50 names. Sending the whole block again for each change grows the history
    quadratically in the number of turns, so after the first block only what

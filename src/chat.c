@@ -54,6 +54,22 @@ static int ensure_chat_dir(const char *id) {
     return rc;
 }
 
+static int last_turn_incomplete(const ClayJson *journal) {
+    ClayJson *turns = clay_json_object_get(journal, "turns");
+    size_t count = clay_json_array_count(turns);
+    if (count == 0) return 0;
+    const char *state = clay_json_string_value(
+        clay_json_object_get(clay_json_array_get(turns, count - 1), "state"));
+    return state && strcmp(state, "incomplete") == 0;
+}
+
+static int journal_turn_keeps_history(const char *state) {
+    /* An incomplete turn is a turn that stopped mid-job; its tool results are
+       real work, so a continued conversation (and /resume) starts from them. */
+    return state && (strcmp(state, "completed") == 0 ||
+                     strcmp(state, "incomplete") == 0);
+}
+
 static size_t journal_message_count(const ClayJson *journal) {
     ClayJson *turns = clay_json_object_get(journal, "turns");
     size_t count = 0;
@@ -64,7 +80,7 @@ static size_t journal_message_count(const ClayJson *journal) {
         /* A compaction replaced what came before it, so it counts as these
            messages only. */
         if (state && strcmp(state, "compaction") == 0) count = 0;
-        else if (!state || strcmp(state, "completed") != 0) continue;
+        else if (!journal_turn_keeps_history(state)) continue;
         ClayJson *records = clay_json_object_get(turn, "messages");
         for (size_t j = 0; j < clay_json_array_count(records); j++) {
             ClayJson *record = clay_json_array_get(records, j);
@@ -110,6 +126,9 @@ static int chat_summary_read(const char *id, ClayChatSummary *summary) {
                     summary->id = strdup(id);
                     summary->updated_at = (long long)updated;
                     summary->message_count = (size_t)count;
+                    /* Old journals lack the key; false is the right default. */
+                    summary->incomplete =
+                        strstr(prefix, "\"last_turn_incomplete\":true") != NULL;
                     free(path);
                     return summary->id ? 0 : -1;
                 }
@@ -124,6 +143,13 @@ static int chat_summary_read(const char *id, ClayChatSummary *summary) {
     summary->updated_at = (long long)clay_json_number_value(
         clay_json_object_get(chat->journal, "updated_at"));
     summary->message_count = clay_chat_message_count(chat);
+    const char *last_state = NULL;
+    ClayJson *turns = clay_json_object_get(chat->journal, "turns");
+    size_t count = clay_json_array_count(turns);
+    if (count > 0)
+        last_state = clay_json_string_value(
+            clay_json_object_get(clay_json_array_get(turns, count - 1), "state"));
+    summary->incomplete = last_state && strcmp(last_state, "incomplete") == 0;
     clay_chat_destroy(chat);
     return summary->id ? 0 : -1;
 }
@@ -161,7 +187,11 @@ static int chat_index_load(ClayArray *summaries) {
         ClayChatSummary summary = {
             strdup(clay_json_string_value(id_value)),
             (long long)clay_json_number_value(updated_value),
-            (size_t)count};
+            (size_t)count,
+            clay_json_type(clay_json_object_get(item, "last_turn_incomplete")) ==
+                CLAY_JSON_NULL
+                ? 0
+                : clay_json_bool_value(clay_json_object_get(item, "last_turn_incomplete"))};
         if (summary.id) clay_array_push_val(summaries, &summary);
     }
     clay_json_free(root);
@@ -180,6 +210,8 @@ static int chat_index_save(const ClayArray *summaries) {
         clay_json_object_set(item, "id", clay_json_string(summary->id));
         clay_json_object_set(item, "updated_at", clay_json_number((double)summary->updated_at));
         clay_json_object_set(item, "message_count", clay_json_number((double)summary->message_count));
+        clay_json_object_set(item, "last_turn_incomplete",
+                             clay_json_bool(summary->incomplete));
         clay_json_array_push(items, item);
     }
     clay_json_object_set(root, "chats", items);
@@ -219,7 +251,8 @@ static void chat_index_update(const ClayChat *chat) {
     }
     ClayChatSummary current = {strdup(chat->id),
                                (long long)clay_json_number_value(clay_json_object_get(chat->journal, "updated_at")),
-                               journal_message_count(chat->journal)};
+                               journal_message_count(chat->journal),
+                               last_turn_incomplete(chat->journal)};
     int replaced = 0;
     for (size_t i = 0; i < summaries.count; i++) {
         ClayChatSummary *entry = clay_array_get(&summaries, i);
@@ -240,6 +273,10 @@ static void chat_index_update(const ClayChat *chat) {
 
 static int save(ClayChat *chat) {
     if (ensure_chat_dir(chat->id) != 0) return -1;
+    /* Set before the text fields so the flag lands near the file's head,
+       where chat_summary_read stops looking. */
+    clay_json_object_set(chat->journal, "last_turn_incomplete",
+                         clay_json_bool(last_turn_incomplete(chat->journal)));
     clay_json_object_set(chat->journal, "updated_at", clay_json_number(clay_time_now()));
     clay_json_object_set(chat->journal, "message_count",
                          clay_json_number((double)journal_message_count(chat->journal)));
@@ -686,8 +723,8 @@ ClayJson *clay_chat_openai_messages(const ClayChat *chat) {
         if (turn_replaces_history(turn)) {
             clay_json_free(messages);
             messages = clay_json_array();
-        } else if (strcmp(clay_json_string_value(clay_json_object_get(turn, "state")),
-                          "completed") != 0) {
+        } else if (!journal_turn_keeps_history(
+                       clay_json_string_value(clay_json_object_get(turn, "state")))) {
             continue;
         }
         ClayJson *records = clay_json_object_get(turn, "messages");

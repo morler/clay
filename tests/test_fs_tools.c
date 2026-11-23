@@ -1146,7 +1146,55 @@ int main(void) {
     assert(strstr(output, "bar bar bar"));
     clay_json_free(result);
 
+    /* Several known replacements in one file are one call and one round.
+       A later failure stops the batch and names the edit that failed. */
+    result = call(clay_fs_tool_write,
+                  "{\"path\":\"multi.txt\",\"content\":\"alpha\\nbeta\\ngamma\\n\"}");
+    assert(ok(result));
+    clay_json_free(result);
+    result = call(
+        clay_fs_tool_edit,
+        "{\"path\":\"multi.txt\",\"edits\":[{\"oldString\":\"alpha\",\"newString\":\"ALPHA\"},"
+        "{\"oldString\":\"gamma\",\"newString\":\"GAMMA\"}]}");
+    assert(ok(result));
+    assert(clay_json_number_value(clay_json_object_get(result, "edits")) == 2);
+    assert(clay_json_number_value(clay_json_object_get(result, "applied")) == 2);
+    assert(clay_json_number_value(clay_json_object_get(result, "replacements")) == 2);
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(output);
+    assert(strstr(output, "ALPHA") && strstr(output, "GAMMA"));
+    clay_json_free(result);
+    result = call(clay_fs_tool_read, "{\"path\":\"multi.txt\"}");
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "ALPHA") && strstr(output, "beta") && strstr(output, "GAMMA"));
+    clay_json_free(result);
+
+    result = call(
+        clay_fs_tool_edit,
+        "{\"path\":\"multi.txt\",\"edits\":[{\"oldString\":\"ALPHA\",\"newString\":\"one\"},"
+        "{\"oldString\":\"missing\",\"newString\":\"two\"},"
+        "{\"oldString\":\"beta\",\"newString\":\"three\"}]}");
+    assert(!ok(result));
+    assert(clay_json_number_value(clay_json_object_get(result, "applied")) == 1);
+    assert(clay_json_number_value(clay_json_object_get(result, "failed_index")) == 2);
+    error = clay_json_string_value(clay_json_object_get(result, "error"));
+    assert(error && strstr(error, "edit 2 of 3"));
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(output && strstr(output, "one"));
+    clay_json_free(result);
+    result = call(clay_fs_tool_read, "{\"path\":\"multi.txt\"}");
+    output = clay_json_string_value(clay_json_object_get(result, "output"));
+    assert(strstr(output, "one") && strstr(output, "beta") && !strstr(output, "three"));
+    clay_json_free(result);
+
+    result = call(clay_fs_tool_edit, "{\"path\":\"multi.txt\",\"edits\":[]}");
+    assert(!ok(result));
+    error = clay_json_string_value(clay_json_object_get(result, "error"));
+    assert(error && strstr(error, "at least one"));
+    clay_json_free(result);
+
     remove("a.txt");
+    remove("multi.txt");
     remove("dup.txt");
     remove("sub/dir/b.c");
     rmdir("sub/dir");

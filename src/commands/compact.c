@@ -132,6 +132,7 @@ char *clay_commands_build_reduced_transcript(ClayJson *conversation) {
     const char *content =
         clay_json_string_value(clay_json_object_get(message, "content"));
     if (!role) continue;
+    if (clay_commands_is_synthetic_message(message)) continue;
     if (strcmp(role, "user") == 0) {
       clay_str_printf(&out, "User: %s\n\n", content ? content : "");
     } else if (strcmp(role, "assistant") == 0) {
@@ -179,6 +180,7 @@ char *clay_commands_build_compact_transcript(ClayJson *conversation) {
         clay_json_string_value(clay_json_object_get(message, "content"));
 
     if (strcmp(role, "user") == 0) {
+      if (clay_commands_is_synthetic_message(message)) continue;
       clay_str_printf(&out, "User: %s\n\n", content ? content : "");
     } else if (strcmp(role, "assistant") == 0) {
       if (content && *content)
@@ -223,6 +225,7 @@ char *clay_commands_collect_user_requests(const ClayJson *conversation) {
         const char *role =
             clay_json_string_value(clay_json_object_get(message, "role"));
         if (!role || strcmp(role, "user") != 0) continue;
+        if (clay_commands_is_synthetic_message(message)) continue;
         const char *content =
             clay_json_string_value(clay_json_object_get(message, "content"));
         if (!content || !*content) continue;

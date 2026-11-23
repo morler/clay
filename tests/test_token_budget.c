@@ -22,14 +22,16 @@ extern const char *clay_subagent_prompt_suffix(void);
    in the commit message. killy spends 12,000 characters here (system prompt
    plus its 17 tools), and this is the number #89 has to bring clay toward.
    Raised to 17800 for the multi-target read/grep schemas (#151), then to
-   18500 so a few hundred bytes of schema growth does not force a raise. */
-#define CLAY_PROMPT_AND_TOOL_BUDGET 18500
+   18500 so a few hundred bytes of schema growth does not force a raise.
+   Raised to 19200 for the single-call multi-edit schema (#157): one extra
+   call shape that replaces a dozen sequential edits per turn. */
+#define CLAY_PROMPT_AND_TOOL_BUDGET 19200
 
 /* A subagent's own ceiling, measured at 16406 B and raised for the
    multi-target read/grep schemas (#151) and the todowrite workflow fields
-   (#156). Kept apart from the main budget, so a change that only hurts
-   subagents still fails. */
-#define CLAY_SUBAGENT_FIXED_COST_BUDGET 18000
+   (#156), then for the multi-edit schema (#157). Kept apart from the main
+   budget, so a change that only hurts subagents still fails. */
+#define CLAY_SUBAGENT_FIXED_COST_BUDGET 18500
 
 /* The base prompt plus a maximal store: memory, skills, global and project
    instructions each at their own ceiling still add up to a fixed amount,
@@ -48,7 +50,7 @@ extern const char *clay_subagent_prompt_suffix(void);
     (CLAY_GLOBAL_INSTRUCTIONS_MAX_BYTES + CLAY_SECTION_FRAMING_CEILING)
 #define CLAY_SYSTEM_PROMPT_BUDGET (60 * 1024)
 
-/* Each tool's own line: with the descriptions and schemas at 8.5 KB, a
+/* Each tool's own line: with the descriptions and schemas near 9.5 KB, a
    regression has to name the tool that caused it, not move the total. */
 /* Name, description and parameters of every tool, in build order: what the
    provider receives, without the JSON framing around it. */

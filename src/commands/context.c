@@ -149,9 +149,12 @@
   "\n\n" \
   "One assistant message is one round; it may carry several tool calls. " \
   "Put independent reads, greps, globs and shell commands in the same " \
-  "message (three to six is normal), and combine related read-only shell " \
-  "checks into one command. Do not spend a round narrating the next step: " \
-  "act, then summarize." \
+  "message (three to six is normal), pass read/grep several targets with " \
+  "paths[], and put every replacement in one file in a single edit call " \
+  "with edits[]. Combine related read-only shell checks into one command. " \
+  "If a job will take more than about ten tool calls, write the plan " \
+  "first. Do not spend a round narrating the next step: act, then " \
+  "summarize." \
   "\n\n" \
   "shell_exec runs in /workspace, the sandbox alias of the project " \
   "directory; do not prefix cd, discover its host path, or inspect " \
@@ -2079,7 +2082,28 @@ void clay_commands_reset_conversation(ClayCommands *commands) {
 
 static int is_user_message(const ClayJson *message) {
   return strcmp(clay_json_string_value(clay_json_object_get(message, "role")),
-                "user") == 0;
+                "user") == 0 &&
+         !clay_commands_is_synthetic_message(message);
+}
+
+/* A synthetic user message is the round-budget machinery talking to the
+   model, never the user. The known markers are checked rather than a loose
+   prefix, so a real prompt starting with "[clay:" survives. They are part
+   of the content because that is what the live array, compaction and the
+   journal cleaner can recognize. */
+int clay_commands_is_synthetic_message(const ClayJson *message) {
+  if (!message) return 0;
+  const char *role = clay_json_string_value(clay_json_object_get(message, "role"));
+  if (!role || strcmp(role, "user") != 0) return 0;
+  const char *content =
+      clay_json_string_value(clay_json_object_get(message, "content"));
+  if (!content) return 0;
+  const char *markers[] = {CLAY_SOFT_ROUND_MARKER, CLAY_AUTO_CONTINUE_MARKER,
+                           CLAY_FINAL_SUMMARY_MARKER};
+  for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+    if (strncmp(content, markers[i], strlen(markers[i])) == 0) return 1;
+  }
+  return 0;
 }
 
 static int collapse_tool_content(ClayJson *message, ClayArray *saved_results) {

@@ -473,14 +473,32 @@ void clay_commands_tools_free(ClayToolSet *set);
 /* Rounds of tool calls one agent gets before the provider loop stops and
    hands the turn back. Real work runs long: a scaffold plus a build plus a
    verification pass is dozens of calls, and the old ceiling of 8 cut turns
-   off mid-job. Escape still cancels, and each command has its own timeout. */
+   off mid-job. Escape still cancels, and each command has its own timeout.
+
+   A segment is one provider run of at most `*_MAX_ROUNDS`. The main agent
+   gets a second segment and a final no-tools summary before the turn ends;
+   the soft limit injects a convergence message so a segment usually does
+   not reach its hard limit at all. */
 #define CLAY_AGENT_MAX_ROUNDS 64
+#define CLAY_AGENT_SOFT_ROUNDS 48
+#define CLAY_AGENT_MAX_SEGMENTS 2
 #define CLAY_SUBAGENT_MAX_ROUNDS 32
+
+/* Synthetic user messages carry the round budget inside a turn. They are
+   instructions about the run, not the user's words: compaction and
+   /compact skip them, and they are removed before the turn is journaled so
+   a later turn (or /resume) never replays a stale budget. */
+#define CLAY_SYNTHETIC_MESSAGE_PREFIX "[clay:"
+#define CLAY_SOFT_ROUND_MARKER "[clay:round-budget]"
+#define CLAY_AUTO_CONTINUE_MARKER "[clay:auto-continue]"
+#define CLAY_FINAL_SUMMARY_MARKER "[clay:final-summary]"
+int clay_commands_is_synthetic_message(const ClayJson *message);
 
 /* Runs `messages` against the selected provider until the model answers or
    `max_rounds` is spent, appending the reply and tool results in place.
    `cache_key` groups the request for the provider's prefix cache. Returns 0
-   on success, 1 when cancelled, -1 on failure. */
+   on success, 1 when cancelled, CLAY_RUN_OUT_OF_ROUNDS when the round limit
+   was reached, -1 on failure. */
 int clay_commands_run_completion(ClayCommands *commands, ClayJson *messages,
                                  const ClayToolSet *tools, int max_rounds,
                                  const char *cache_key,

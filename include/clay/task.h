@@ -29,4 +29,10 @@ void clay_task_fail(ClayTask *task, const char *fmt, ...);
 void clay_task_success_with_label(ClayTask *task, const char *label, const char *fmt, ...);
 void clay_task_fail_with_label(ClayTask *task, const char *label, const char *fmt, ...);
 
+/* Stops the spinner and leaves one quiet record of the completed work: a
+   gray dot, the past-tense label and the elapsed time. Routine successes
+   form an activity trail, so their green checks stay reserved for plan
+   steps and the turn status. */
+void clay_task_receipt(ClayTask *task, const char *label);
+
 #endif /* CLAY_TASK_H */

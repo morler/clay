@@ -19,10 +19,42 @@ static int sse_error;
 static int usage_reports;
 static const char *partial_saved;
 
+/* Scripted provider runs for the segment tests. A turn can call the
+   completion helper more than once, and each call has to see what the
+   previous one left in `messages`. */
+static int scripted;
+static int scripted_results[4];
+static int scripted_count;
+static int scripted_index;
+static int scripted_max_rounds[4];
+static int scripted_toolless[4];
+static int scripted_saw_marker[4];
+
+static int has_synthetic_marker(const ClayJson *messages) {
+  for (size_t i = 0; i < clay_json_array_count(messages); i++) {
+    const ClayJson *message = clay_json_array_get(messages, i);
+    const char *content =
+        clay_json_string_value(clay_json_object_get(message, "content"));
+    if (content && strncmp(content, CLAY_SYNTHETIC_MESSAGE_PREFIX,
+                           strlen(CLAY_SYNTHETIC_MESSAGE_PREFIX)) == 0)
+      return 1;
+  }
+  return 0;
+}
+
 int test_run_completion(ClayCommands *commands, ClayJson *messages,
                         const ClayToolSet *tools, int max_rounds,
                         const char *cache_key, const ClayOpenAICallbacks *callbacks) {
-  (void)messages; (void)tools; (void)max_rounds; (void)cache_key; (void)callbacks;
+  (void)cache_key;
+  int result = completion_result;
+  if (scripted) {
+    int index = scripted_index++;
+    assert(index < 4);
+    result = index < scripted_count ? scripted_results[index] : 0;
+    scripted_max_rounds[index] = max_rounds;
+    scripted_toolless[index] = tools == NULL;
+    scripted_saw_marker[index] = has_synthetic_marker(messages);
+  }
   /* Pretend the provider reported a nearly full window, then let the
      request hook shrink the live array: a single turn's own tool results must
      be reachable, which is what the old per-turn check could not do. */
@@ -94,7 +126,7 @@ int test_run_completion(ClayCommands *commands, ClayJson *messages,
     assert(mkdir(path.data, 0700) == 0);
     clay_str_free(&path);
   }
-  return completion_result;
+  return result;
 }
 
 /* What reaches the model from a long output: its tail when the command
@@ -229,6 +261,286 @@ static void test_plan_rendering(ClayCommands *commands) {
   clay_term_set_color_enabled(colors);
 }
 
+static char *capture_tool_output(ClayCommands *commands, const char *name,
+                                 const ClayJson *result) {
+  ClayConversationStream stream = {0};
+  stream.commands = commands;
+  stream.tool_task = clay_task_start("reading: %s", name);
+  fflush(stdout);
+  FILE *capture = tmpfile();
+  assert(capture);
+  int saved = dup(STDOUT_FILENO);
+  assert(saved >= 0);
+  assert(dup2(fileno(capture), STDOUT_FILENO) >= 0);
+  on_tool_result(name, result, &stream);
+  fflush(stdout);
+  assert(fseek(capture, 0, SEEK_END) == 0);
+  long length = ftell(capture);
+  assert(length >= 0 && fseek(capture, 0, SEEK_SET) == 0);
+  char *text = calloc((size_t)length + 1, 1);
+  assert(text);
+  assert(fread(text, 1, (size_t)length, capture) == (size_t)length);
+  assert(dup2(saved, STDOUT_FILENO) >= 0);
+  close(saved);
+  fclose(capture);
+  return text;
+}
+
+/* A completed tool leaves one quiet receipt and no body; a failure keeps
+   the error and the start of the output so the user can act on it. */
+static void test_tool_receipts(ClayCommands *commands) {
+  int colors = clay_term_color_enabled();
+  clay_term_set_color_enabled(0);
+  ClayJson *result = clay_json_object();
+  clay_json_object_set(result, "ok", clay_json_bool(1));
+  clay_json_object_set(result, "path", clay_json_string("src/a.c"));
+  clay_json_object_set(result, "output", clay_json_string("int a = 1;\nint b = 2;\n"));
+  char *receipt = capture_tool_output(commands, "read", result);
+  assert(strstr(receipt, CLAY_ICON_DOT " Read: src/a.c"));
+  assert(!strstr(receipt, "int a = 1"));
+  assert(count_text(receipt, "\n") == 1);
+  free(receipt);
+  clay_json_free(result);
+
+  result = clay_json_object();
+  clay_json_object_set(result, "ok", clay_json_bool(0));
+  clay_json_object_set(result, "path", clay_json_string("src/a.c"));
+  clay_json_object_set(result, "error", clay_json_string("permission denied"));
+  clay_json_object_set(result, "output", clay_json_string("boom line\n"));
+  char *failure = capture_tool_output(commands, "read", result);
+  assert(strstr(failure, CLAY_ICON_CROSS " Failed to read: src/a.c"));
+  assert(strstr(failure, "permission denied"));
+  assert(strstr(failure, "boom line"));
+  free(failure);
+  clay_json_free(result);
+
+  result = clay_json_object();
+  clay_json_object_set(result, "ok", clay_json_bool(1));
+  clay_json_object_set(result, "command", clay_json_string("make test"));
+  clay_json_object_set(result, "output", clay_json_string("ok\n"));
+  char *ran = capture_tool_output(commands, "shell_exec", result);
+  assert(strstr(ran, CLAY_ICON_DOT " Ran $ make test"));
+  assert(!strstr(ran, "ok\n"));
+  free(ran);
+  clay_json_free(result);
+
+  result = clay_json_object();
+  clay_json_object_set(result, "ok", clay_json_bool(0));
+  clay_json_object_set(result, "command", clay_json_string("false"));
+  clay_json_object_set(result, "exit_code", clay_json_number(1));
+  clay_json_object_set(result, "output", clay_json_string("boom\n"));
+  char *failed = capture_tool_output(commands, "shell_exec", result);
+  assert(strstr(failed, CLAY_ICON_CROSS " Failed"));
+  assert(strstr(failed, "exit 1"));
+  assert(strstr(failed, "$ false"));
+  assert(strstr(failed, "boom"));
+  free(failed);
+  clay_json_free(result);
+
+  clay_term_set_color_enabled(colors);
+}
+
+static char *read_chat_file(ClayCommands *commands, const char *home,
+                            const char *name) {
+  ClayStr path;
+  clay_str_init(&path);
+  clay_str_printf(&path, "%s/.clay/chats/%s/%s", home,
+                  clay_chat_id(commands->chat), name);
+  ClayStr text;
+  if (clay_storage_read_limited(path.data, 4 * 1024 * 1024, &text) != 0)
+    clay_str_init(&text);
+  clay_str_free(&path);
+  return text.data;
+}
+
+static void remove_chat_files(ClayCommands *commands, const char *home) {
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/.clay/chats/%s/requests.jsonl", home,
+           clay_chat_id(commands->chat));
+  remove(path);
+  snprintf(path, sizeof(path), "%s/.clay/chats/%s/chat.json", home,
+           clay_chat_id(commands->chat));
+  remove(path);
+  snprintf(path, sizeof(path), "%s/.clay/chats/%s", home,
+           clay_chat_id(commands->chat));
+  rmdir(path);
+}
+
+static size_t request_rounds(const char *text) {
+  size_t count = 0;
+  for (const char *cursor = text; cursor && *cursor;) {
+    const char *end = strchr(cursor, '\n');
+    assert(end);
+    size_t length = (size_t)(end - cursor);
+    char *line = malloc(length + 1);
+    assert(line);
+    memcpy(line, cursor, length);
+    line[length] = '\0';
+    ClayJson *record = clay_json_parse(line, NULL);
+    assert(record);
+    assert(clay_json_number_value(clay_json_object_get(record, "round")) ==
+           (double)count);
+    clay_json_free(record);
+    free(line);
+    count++;
+    cursor = end + 1;
+  }
+  return count;
+}
+
+/* One exhausted segment resumes with the tool results already in the
+   conversation, and the synthetic marker never reaches the journal. */
+static void test_auto_continue(ClayCommands *commands, const char *home) {
+  commands->chat = clay_chat_create("test");
+  assert(commands->chat);
+  scripted = 1;
+  scripted_count = 2;
+  scripted_index = 0;
+  scripted_results[0] = CLAY_RUN_OUT_OF_ROUNDS;
+  scripted_results[1] = 0;
+  usage_reports = 1;
+  clay_commands_run_message(commands, "hello");
+  assert(scripted_index == 2);
+  assert(scripted_max_rounds[0] == CLAY_AGENT_MAX_ROUNDS);
+  assert(scripted_max_rounds[1] == CLAY_AGENT_MAX_ROUNDS);
+  assert(!scripted_toolless[0] && !scripted_toolless[1]);
+  assert(!scripted_saw_marker[0]);
+  assert(scripted_saw_marker[1]);
+
+  char *journal = read_chat_file(commands, home, "chat.json");
+  assert(journal);
+  assert(!strstr(journal, CLAY_SYNTHETIC_MESSAGE_PREFIX));
+  free(journal);
+  char *requests = read_chat_file(commands, home, "requests.jsonl");
+  assert(requests);
+  assert(request_rounds(requests) == 2);
+  free(requests);
+
+  scripted = 0;
+  usage_reports = 0;
+  remove_chat_files(commands, home);
+  clay_chat_destroy(commands->chat);
+  commands->chat = NULL;
+}
+
+/* Two exhausted segments still leave one request that consumes the final
+   tool results and asks for a status, with no tools attached. */
+static void test_final_summary(ClayCommands *commands, const char *home) {
+  commands->chat = clay_chat_create("test");
+  scripted = 1;
+  scripted_count = 3;
+  scripted_index = 0;
+  scripted_results[0] = CLAY_RUN_OUT_OF_ROUNDS;
+  scripted_results[1] = CLAY_RUN_OUT_OF_ROUNDS;
+  scripted_results[2] = 0;
+  usage_reports = 1;
+  clay_commands_run_message(commands, "hello");
+  assert(scripted_index == 3);
+  assert(scripted_max_rounds[0] == CLAY_AGENT_MAX_ROUNDS);
+  assert(scripted_max_rounds[1] == CLAY_AGENT_MAX_ROUNDS);
+  assert(scripted_max_rounds[2] == 1);
+  assert(!scripted_toolless[0] && !scripted_toolless[1]);
+  assert(scripted_toolless[2]);
+  assert(scripted_saw_marker[2]);
+
+  char *journal = read_chat_file(commands, home, "chat.json");
+  assert(journal);
+  assert(!strstr(journal, CLAY_SYNTHETIC_MESSAGE_PREFIX));
+  free(journal);
+  char *requests = read_chat_file(commands, home, "requests.jsonl");
+  assert(requests);
+  assert(request_rounds(requests) == 3);
+  free(requests);
+
+  scripted = 0;
+  usage_reports = 0;
+  remove_chat_files(commands, home);
+  clay_chat_destroy(commands->chat);
+  commands->chat = NULL;
+}
+
+/* Escape between segments stops the turn without appending a continuation. */
+static int abort_immediately(void *userdata) {
+  (void)userdata;
+  return 1;
+}
+
+static void test_segment_cancel(ClayCommands *commands, const char *home) {
+  commands->chat = clay_chat_create("test");
+  ClayJson *messages = clay_json_array();
+  ClayConversationStream stream = {0};
+  stream.commands = commands;
+  ClayOpenAICallbacks callbacks = {0};
+  callbacks.should_abort = abort_immediately;
+  callbacks.userdata = &stream;
+  ClayToolSet tools = {0};
+  scripted = 1;
+  scripted_count = 1;
+  scripted_index = 0;
+  scripted_results[0] = CLAY_RUN_OUT_OF_ROUNDS;
+  int rc = run_agent_segments(commands, messages, &tools, &stream, &callbacks);
+  assert(rc == 1);
+  assert(scripted_index == 1);
+  assert(!has_synthetic_marker(messages));
+  scripted = 0;
+  clay_json_free(messages);
+  remove_chat_files(commands, home);
+  clay_chat_destroy(commands->chat);
+  commands->chat = NULL;
+}
+
+/* The soft limit speaks once per segment, not once per request. */
+static void test_soft_budget_nudge(ClayCommands *commands, const char *home) {
+  commands->chat = clay_chat_create("test");
+  commands->last_prompt_tokens = 0;
+  commands->accounted_messages = 0;
+  ClayJson *messages = clay_json_array();
+  clay_json_array_push(messages, clay_openai_message("system", "system"));
+  clay_json_array_push(messages, clay_openai_message("user", "work"));
+  ClayConversationStream stream = {0};
+  stream.commands = commands;
+  stream.segment_round = CLAY_AGENT_SOFT_ROUNDS / 3 - 1; /* 15 */
+  before_request(messages, &stream);
+  assert(stream.nudges_sent == 0);
+  assert(clay_json_array_count(messages) == 2);
+
+  stream.segment_round = CLAY_AGENT_SOFT_ROUNDS / 3; /* 16 */
+  before_request(messages, &stream);
+  assert(stream.nudges_sent == 1);
+  assert(clay_json_array_count(messages) == 3);
+  const char *content = clay_json_string_value(
+      clay_json_object_get(clay_json_array_get(messages, 2), "content"));
+  assert(content &&
+         strncmp(content, CLAY_SOFT_ROUND_MARKER,
+                 strlen(CLAY_SOFT_ROUND_MARKER)) == 0);
+  assert(strstr(content, "16 of 64"));
+
+  stream.segment_round = (CLAY_AGENT_SOFT_ROUNDS * 2) / 3; /* 32 */
+  before_request(messages, &stream);
+  assert(stream.nudges_sent == 3);
+  assert(clay_json_array_count(messages) == 4);
+  content = clay_json_string_value(
+      clay_json_object_get(clay_json_array_get(messages, 3), "content"));
+  assert(content && strstr(content, "32 of 64"));
+
+  stream.segment_round = CLAY_AGENT_SOFT_ROUNDS; /* 48 */
+  before_request(messages, &stream);
+  assert(stream.nudges_sent == 7);
+  assert(clay_json_array_count(messages) == 5);
+  content = clay_json_string_value(
+      clay_json_object_get(clay_json_array_get(messages, 4), "content"));
+  assert(content && strstr(content, "48 of 64"));
+
+  before_request(messages, &stream);
+  assert(clay_json_array_count(messages) == 5);
+  assert(stream.nudges_sent == 7);
+
+  clay_json_free(messages);
+  remove_chat_files(commands, home);
+  clay_chat_destroy(commands->chat);
+  commands->chat = NULL;
+}
+
 int main(void) {
   ClayJson *saved_messages = clay_json_array();
   clay_json_array_push(saved_messages, clay_openai_message("user", "hi"));
@@ -260,7 +572,7 @@ int main(void) {
   fflush(stdout);
   assert(dup2(fileno(output), STDOUT_FILENO) >= 0);
 
-  int results[] = {0, CLAY_RUN_OUT_OF_ROUNDS, 1, -1};
+  int results[] = {0, 1, -1};
   usage_reports = 2;
   for (size_t i = 0; i < sizeof(results) / sizeof(results[0]); i++) {
     for (fail_save = 0; fail_save <= 1; fail_save++) {
@@ -332,6 +644,12 @@ int main(void) {
   }
   sse_error = 0;
   usage_reports = 0;
+  fail_save = 0;
+  completion_result = 0;
+  test_soft_budget_nudge(commands, home);
+  test_segment_cancel(commands, home);
+  test_auto_continue(commands, home);
+  test_final_summary(commands, home);
   collapse_during_turn = 1;
   collapsed_once = 0;
   commands->chat = clay_chat_create("test");
@@ -423,6 +741,7 @@ int main(void) {
   }
   test_clip_output();
   test_plan_rendering(commands);
+  test_tool_receipts(commands);
   partial_saved = NULL;
   fflush(stdout);
   assert(dup2(original_stdout, STDOUT_FILENO) >= 0);

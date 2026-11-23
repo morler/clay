@@ -749,7 +749,7 @@ ClayJson *clay_fs_tool_read_schema(void) {
     ClayJson *paths = clay_json_object();
     clay_json_object_set(paths, "type", clay_json_string("array"));
     clay_json_object_set(paths, "items", item);
-    clay_json_object_set(paths, "description", clay_json_string("Several files."));
+    clay_json_object_set(paths, "description", clay_json_string("Several files; pass every file you need in one call."));
     ClayJson *properties = clay_json_object();
     clay_json_object_set(properties, "path", path);
     clay_json_object_set(properties, "paths", paths);
@@ -952,11 +952,8 @@ static void describe_mismatch(ClayStr *out, const char *content,
     push_line_number(out, line);
 }
 
-ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
-    (void)userdata;
-    const char *old_string = clay_json_string_value(clay_json_object_get(arguments, "oldString"));
-    const char *new_string = clay_json_string_value(clay_json_object_get(arguments, "newString"));
-    int replace_all = clay_json_bool_value(clay_json_object_get(arguments, "replaceAll"));
+static ClayJson *edit_file(const char *path, const char *old_string,
+                           const char *new_string, int replace_all) {
     if (!new_string) new_string = "";
     if (!old_string || !*old_string) {
         ClayJson *result = clay_json_object();
@@ -968,9 +965,8 @@ ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
     ClayStr abs;
     char *workspace_dir = NULL;
     ClayJson *result = NULL;
-    if (resolve_arg_path(arguments, &abs, &workspace_dir, &result) != 0) return result;
+    if (resolve_path(path, &abs, &workspace_dir, &result) != 0) return result;
     free(workspace_dir);
-    const char *path = clay_json_string_value(clay_json_object_get(arguments, "path"));
 
     result = clay_json_object();
     clay_json_object_set(result, "path", clay_json_string(path));
@@ -1071,10 +1067,104 @@ ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
     return result;
 }
 
+/* Multi-edit keeps the single-file checkpoint/undo contract: one path, one
+   checkpoint, and the whole file before/after. The provider's input size
+   limit is the only bound on how many replacements fit in one call. */
+#define CLAY_FS_EDIT_OUTPUT_LIMIT (64 * 1024)
+
+ClayJson *clay_fs_tool_edit(const ClayJson *arguments, void *userdata) {
+    (void)userdata;
+    const ClayJson *edits = clay_json_object_get(arguments, "edits");
+    if (edits && clay_json_type(edits) == CLAY_JSON_ARRAY) {
+        size_t count = clay_json_array_count(edits);
+        const char *path =
+            clay_json_string_value(clay_json_object_get(arguments, "path"));
+        ClayJson *result = clay_json_object();
+        clay_json_object_set(result, "path", clay_json_string(path ? path : ""));
+        clay_json_object_set(result, "edits", clay_json_number((double)count));
+        if (count == 0) {
+            clay_json_object_set(result, "ok", clay_json_bool(0));
+            clay_json_object_set(
+                result, "error",
+                clay_json_string("edits must contain at least one replacement"));
+            return result;
+        }
+
+        ClayJson *results = clay_json_array();
+        ClayStr output;
+        clay_str_init(&output);
+        size_t applied = 0, replacements = 0;
+        int truncated = 0, failed = 0;
+        for (size_t i = 0; i < count && !failed; i++) {
+            ClayJson *item = clay_json_array_get(edits, i);
+            const char *old_string = clay_json_string_value(
+                clay_json_object_get(item, "oldString"));
+            const char *new_string = clay_json_string_value(
+                clay_json_object_get(item, "newString"));
+            int replace_all = clay_json_bool_value(
+                clay_json_object_get(item, "replaceAll"));
+            ClayJson *one = edit_file(path, old_string, new_string, replace_all);
+            if (clay_json_bool_value(clay_json_object_get(one, "ok"))) {
+                applied++;
+                replacements += (size_t)clay_json_number_value(
+                    clay_json_object_get(one, "replacements"));
+                const char *diff =
+                    clay_json_string_value(clay_json_object_get(one, "output"));
+                if (diff && *diff && !truncated) {
+                    if (output.len + strlen(diff) + 32 >
+                        CLAY_FS_EDIT_OUTPUT_LIMIT) {
+                        clay_str_printf(&output, "\n[output truncated]\n");
+                        truncated = 1;
+                    } else {
+                        clay_str_printf(&output, "--- edit %zu ---\n%s\n", i + 1,
+                                        diff);
+                    }
+                }
+            } else {
+                const char *error =
+                    clay_json_string_value(clay_json_object_get(one, "error"));
+                ClayStr prefixed;
+                clay_str_init(&prefixed);
+                clay_str_printf(&prefixed, "edit %zu of %zu: %s", i + 1, count,
+                                error ? error : "failed");
+                clay_json_object_set(result, "failed_index",
+                                     clay_json_number((double)(i + 1)));
+                clay_json_object_set(result, "error",
+                                     clay_json_string(prefixed.data));
+                clay_str_free(&prefixed);
+                failed = 1;
+            }
+            clay_json_array_push(results, one);
+        }
+        clay_json_object_set(result, "ok", clay_json_bool(!failed));
+        clay_json_object_set(result, "applied", clay_json_number((double)applied));
+        clay_json_object_set(result, "replacements",
+                             clay_json_number((double)replacements));
+        clay_json_object_set(result, "output", clay_json_string(output.data));
+        clay_json_object_set(result, "output_truncated", clay_json_bool(truncated));
+        if (failed)
+            clay_json_object_set(result, "results", results);
+        else
+            clay_json_free(results);
+        clay_str_free(&output);
+        return result;
+    }
+
+    const char *path =
+        clay_json_string_value(clay_json_object_get(arguments, "path"));
+    const char *old_string =
+        clay_json_string_value(clay_json_object_get(arguments, "oldString"));
+    const char *new_string =
+        clay_json_string_value(clay_json_object_get(arguments, "newString"));
+    int replace_all =
+        clay_json_bool_value(clay_json_object_get(arguments, "replaceAll"));
+    return edit_file(path, old_string, new_string, replace_all);
+}
+
 ClayJson *clay_fs_tool_edit_schema(void) {
     ClayJson *path = clay_json_object();
     clay_json_object_set(path, "type", clay_json_string("string"));
-    clay_json_object_set(path, "description", clay_json_string("File path, relative to the workspace root or absolute."));
+    clay_json_object_set(path, "description", clay_json_string("File path, relative to the workspace root or absolute. Every edit in this call applies to this file."));
     ClayJson *old_string = clay_json_object();
     clay_json_object_set(old_string, "type", clay_json_string("string"));
     clay_json_object_set(
@@ -1088,15 +1178,46 @@ ClayJson *clay_fs_tool_edit_schema(void) {
     clay_json_object_set(replace_all, "type", clay_json_string("boolean"));
     clay_json_object_set(replace_all, "description",
                          clay_json_string("Replace every occurrence instead of requiring oldString to be unique."));
+    ClayJson *item_old_string = clay_json_object();
+    clay_json_object_set(item_old_string, "type", clay_json_string("string"));
+    clay_json_object_set(item_old_string, "description",
+                         clay_json_string("Exact text to replace."));
+    ClayJson *item_new_string = clay_json_object();
+    clay_json_object_set(item_new_string, "type", clay_json_string("string"));
+    clay_json_object_set(item_new_string, "description",
+                         clay_json_string("Replacement text."));
+    ClayJson *item_replace_all = clay_json_object();
+    clay_json_object_set(item_replace_all, "type", clay_json_string("boolean"));
+    clay_json_object_set(item_replace_all, "description",
+                         clay_json_string("Replace every occurrence."));
+    ClayJson *item_properties = clay_json_object();
+    clay_json_object_set(item_properties, "oldString", item_old_string);
+    clay_json_object_set(item_properties, "newString", item_new_string);
+    clay_json_object_set(item_properties, "replaceAll", item_replace_all);
+    ClayJson *item_required = clay_json_array();
+    clay_json_array_push(item_required, clay_json_string("oldString"));
+    clay_json_array_push(item_required, clay_json_string("newString"));
+    ClayJson *item = clay_json_object();
+    clay_json_object_set(item, "type", clay_json_string("object"));
+    clay_json_object_set(item, "properties", item_properties);
+    clay_json_object_set(item, "required", item_required);
+    clay_json_object_set(item, "additionalProperties", clay_json_bool(0));
+    ClayJson *edits = clay_json_object();
+    clay_json_object_set(edits, "type", clay_json_string("array"));
+    clay_json_object_set(edits, "items", item);
+    clay_json_object_set(
+        edits, "description",
+        clay_json_string("Several replacements in this file, applied in order. Put every replacement "
+                         "you already know in this one call instead of calling edit once per change; "
+                         "use the top-level oldString/newString for a single replacement."));
     ClayJson *properties = clay_json_object();
     clay_json_object_set(properties, "path", path);
     clay_json_object_set(properties, "oldString", old_string);
     clay_json_object_set(properties, "newString", new_string);
     clay_json_object_set(properties, "replaceAll", replace_all);
+    clay_json_object_set(properties, "edits", edits);
     ClayJson *required = clay_json_array();
     clay_json_array_push(required, clay_json_string("path"));
-    clay_json_array_push(required, clay_json_string("oldString"));
-    clay_json_array_push(required, clay_json_string("newString"));
     ClayJson *schema = clay_json_object();
     clay_json_object_set(schema, "type", clay_json_string("object"));
     clay_json_object_set(schema, "properties", properties);
@@ -1871,7 +1992,7 @@ ClayJson *clay_fs_tool_grep_schema(void) {
     ClayJson *paths = clay_json_object();
     clay_json_object_set(paths, "type", clay_json_string("array"));
     clay_json_object_set(paths, "items", paths_items);
-    clay_json_object_set(paths, "description", clay_json_string("Several targets."));
+    clay_json_object_set(paths, "description", clay_json_string("Several files or directories; pass every target in one call."));
     ClayJson *glob = clay_json_object();
     clay_json_object_set(glob, "type", clay_json_string("string"));
     clay_json_object_set(glob, "description", clay_json_string("File glob, e.g. *.c."));

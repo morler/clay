@@ -11,7 +11,8 @@ Two sources, both read-only:
   request (`kind`, `round`, token counts, duration). A `round` that does not
   increase starts a new turn.
 - `chat.json` holds the turns and the tool calls each assistant message made,
-  which is what "calls per round" and the tool mix are measured from.
+  which is what "calls per round", the tool mix and multi-target adoption
+  are measured from.
 
     scripts/round_report.py                  # ~/.clay/chats
     scripts/round_report.py --root DIR
@@ -32,14 +33,18 @@ import re
 import sys
 import tempfile
 
-# The provider loops from src/commands/context.h: a turn spends one round per
-# request, and one of the records below per round, so a 64-round turn logs 65.
+# The provider loops from src/commands/context.h: one record per request, so
+# a 64-round segment logs 64 records. A turn can run two segments plus one
+# final summary, so a continued turn logs up to 129 rounds and `round` stays
+# continuous across the segment boundary.
 AGENT_MAX_ROUNDS = 64
 AGENT_SOFT_ROUNDS = 48
 # Commands a turn should need only a handful of: look up the next task, check
 # what changed, run the suite. Counted per assistant message, not per call.
 FIXED_COMMANDS = ("issues", "git", "make")
 COMMAND_SEPARATORS = re.compile(r"&&|\|\||[;|\n]")
+REQUESTS_FILE = "requests.jsonl"
+CHAT_FILE = "chat.json"
 
 
 def read_records(path):
@@ -118,18 +123,36 @@ def percentile(values, fraction):
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def shell_command(call):
-    """The command string of a shell_exec call, or None when it has none."""
+def call_arguments(call):
+    """The parsed arguments object of a tool call, or None when it has none."""
     arguments = call.get("arguments")
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except ValueError:
-            return arguments
+            return None
+    return arguments if isinstance(arguments, dict) else None
+
+
+def shell_command(call):
+    """The command string of a shell_exec call, or None when it has none."""
+    arguments = call_arguments(call)
     if not isinstance(arguments, dict):
         return None
     command = arguments.get("command")
     return command if isinstance(command, str) else None
+
+
+def multi_target(call):
+    """Whether one call asked a tool to handle several targets at once."""
+    arguments = call_arguments(call)
+    if not isinstance(arguments, dict):
+        return False
+    for key in ("paths", "edits"):
+        value = arguments.get(key)
+        if isinstance(value, list) and len(value) > 1:
+            return True
+    return False
 
 
 def runs_fixed_command(command):
@@ -140,36 +163,54 @@ def runs_fixed_command(command):
     return False
 
 
+def call_list(message):
+    """The named tool calls of one assistant message."""
+    return [
+        call
+        for call in message.get("calls") or []
+        if isinstance(call, dict) and call.get("name")
+    ]
+
+
+def usage_for_calls(calls):
+    """Shell habits and multi-target use over one message's calls."""
+    shell_total = shell_cd = multi = 0
+    fixed = False
+    for call in calls:
+        if multi_target(call):
+            multi += 1
+        if call["name"] != "shell_exec":
+            continue
+        command = shell_command(call)
+        if command is None:
+            continue
+        shell_total += 1
+        if command.lstrip().startswith("cd "):
+            shell_cd += 1
+        fixed = fixed or runs_fixed_command(command)
+    return shell_total, shell_cd, fixed, multi
+
+
 def journal_usage(journal):
     """Calls per assistant message, the tool mix, and shell habits."""
     calls_per_round, tool_names = [], collections.Counter()
-    shell_total = shell_cd = fixed_rounds = 0
+    shell_total = shell_cd = fixed_rounds = multi = 0
     for turn in journal.get("turns") or []:
         if not isinstance(turn, dict):
             continue
         for message in turn.get("messages") or []:
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
-            calls = [
-                call
-                for call in message.get("calls") or []
-                if isinstance(call, dict) and call.get("name")
-            ]
+            calls = call_list(message)
             calls_per_round.append(len(calls))
-            fixed_here = False
             for call in calls:
                 tool_names[call["name"]] += 1
-                if call["name"] != "shell_exec":
-                    continue
-                command = shell_command(call)
-                if command is None:
-                    continue
-                shell_total += 1
-                if command.lstrip().startswith("cd "):
-                    shell_cd += 1
-                fixed_here = fixed_here or runs_fixed_command(command)
-            fixed_rounds += fixed_here
-    return calls_per_round, tool_names, shell_total, shell_cd, fixed_rounds
+            shell, cd, fixed, here_multi = usage_for_calls(calls)
+            shell_total += shell
+            shell_cd += cd
+            fixed_rounds += fixed
+            multi += here_multi
+    return calls_per_round, tool_names, shell_total, shell_cd, fixed_rounds, multi
 
 
 def share(part, whole):
@@ -186,24 +227,25 @@ def collect(root):
     unreadable_lines = non_main_requests = 0
     journal_errors = journals = 0
     calls_per_round, tool_names = [], collections.Counter()
-    shell_total = shell_cd = fixed_rounds = 0
+    shell_total = shell_cd = fixed_rounds = multi_target_calls = 0
     for directory in chats:
-        records, unreadable = read_records(os.path.join(directory, "requests.jsonl"))
+        records, unreadable = read_records(os.path.join(directory, REQUESTS_FILE))
         unreadable_lines += unreadable
         non_main_requests += sum(1 for r in records if r.get("kind", "main") != "main")
         turns.extend(turn_cost(turn) for turn in main_turns(records))
 
-        journal = load_journal(os.path.join(directory, "chat.json"))
+        journal = load_journal(os.path.join(directory, CHAT_FILE))
         if journal is None:
             journal_errors += 1
             continue
         journals += 1
-        calls, names, shell, cd, fixed = journal_usage(journal)
+        calls, names, shell, cd, fixed, multi = journal_usage(journal)
         calls_per_round += calls
         tool_names += names
         shell_total += shell
         shell_cd += cd
         fixed_rounds += fixed
+        multi_target_calls += multi
 
     rounds = [turn["rounds"] for turn in turns]
     walls = [turn["wall_seconds"] for turn in turns]
@@ -236,6 +278,7 @@ def collect(root):
             "at_hard_limit_share": share(
                 sum(1 for n in rounds if n >= AGENT_MAX_ROUNDS), len(rounds)
             ),
+            "continued": sum(1 for n in rounds if n > AGENT_MAX_ROUNDS),
             "wall_seconds": {
                 "median": percentile(walls, 0.5),
                 "total": round(sum(walls), 1),
@@ -253,6 +296,8 @@ def collect(root):
                 key: per_round.get(key, 0) for key in ("0", "1", "2", "3+")
             },
             "tools": dict(tool_names.most_common()),
+            "multi_target_calls": multi_target_calls,
+            "multi_target_share": share(multi_target_calls, calls_total),
             "shell_share": share(tool_names.get("shell_exec", 0), calls_total),
             "shell_cd_share": share(shell_cd, shell_total),
             "fixed_command_rounds": fixed_rounds,
@@ -297,6 +342,7 @@ def format_text(summary):
             f"  >={AGENT_MAX_ROUNDS}: {requests['at_hard_limit']} turns "
             f"({requests['at_hard_limit_share']:.1f}%)"
         ),
+        f"  over 64 requests (continued or retried): {requests['continued']} turns",
         (
             f"wall per turn: median {requests['wall_seconds']['median']:.0f}s, "
             f"total {requests['wall_seconds']['total'] / 3600:.1f}h"
@@ -313,6 +359,10 @@ def format_text(summary):
         "  messages with 0/1/2/3+ calls: "
         + " / ".join(str(counts[key]) for key in ("0", "1", "2", "3+")),
         f"tools: shell_exec {journal['shell_share']:.1f}%, {tools}",
+        (
+            f"multi-target calls: {journal['multi_target_calls']} "
+            f"({journal['multi_target_share']:.1f}%)"
+        ),
         f"shell: {journal['shell_cd_share']:.1f}% of calls start with cd",
         (
             f"fixed commands ({'/'.join(FIXED_COMMANDS)}): "
@@ -325,6 +375,16 @@ def format_text(summary):
 def write(path, text):
     with open(path, "w", encoding="utf-8") as file:
         file.write(text)
+
+
+def check(condition, detail):
+    """The self-test assertions stay real checks under python -O too."""
+    if not condition:
+        raise SystemExit(f"round_report self-test failed: {detail}")
+
+
+def check_close(actual, expected, detail):
+    check(abs(actual - expected) < 0.001, f"{detail}: {actual} != {expected}")
 
 
 def self_test():
@@ -358,7 +418,7 @@ def self_test():
             timestamp += 1
         records.append({"ts": timestamp, "kind": "subagent", "round": 0})
         write(
-            os.path.join(chat, "requests.jsonl"),
+            os.path.join(chat, REQUESTS_FILE),
             "".join(json.dumps(record) + "\n" for record in records) + "not json\n",
         )
         journal = {
@@ -380,7 +440,10 @@ def self_test():
                         {
                             "role": "assistant",
                             "calls": [
-                                {"name": "read", "arguments": '{"path": "a.c"}'},
+                                {
+                                    "name": "read",
+                                    "arguments": '{"paths": ["a.c", "b.c"]}',
+                                },
                                 {"name": "grep", "arguments": '{"pattern": "x"}'},
                                 {
                                     "name": "shell_exec",
@@ -393,41 +456,44 @@ def self_test():
                 }
             ]
         }
-        write(os.path.join(chat, "chat.json"), json.dumps(journal))
+        write(os.path.join(chat, CHAT_FILE), json.dumps(journal))
 
         damaged = os.path.join(root, "chat-two")
         os.makedirs(damaged)
-        with open(os.path.join(damaged, "chat.json"), "wb") as file:
+        with open(os.path.join(damaged, CHAT_FILE), "wb") as file:
             file.write(b'{"turns": [\xff\xfe\x00')
-        write(os.path.join(damaged, "requests.jsonl"), '{"round": 0}\n')
+        write(os.path.join(damaged, REQUESTS_FILE), '{"round": 0}\n')
 
         summary = collect(root)
         requests, stats = summary["requests"], summary["journal"]
-        assert summary["chats"]["scanned"] == 2, summary
-        assert summary["chats"]["with_journal"] == 1, summary
-        assert summary["chats"]["journal_errors"] == 1, summary
-        assert requests["turns"] == 3, requests
-        assert requests["total"] == 69, requests
-        assert requests["unreadable_lines"] == 1, requests
-        assert requests["non_main"] == 1, requests
-        assert requests["rounds"]["max"] == 64, requests
-        assert requests["at_soft_limit"] == 1, requests
-        assert requests["at_hard_limit"] == 1, requests
-        assert requests["at_hard_limit_share"] == 33.3, requests
-        assert requests["input_tokens"] == 6600, requests
-        assert stats["assistant_messages"] == 3, stats
-        assert stats["calls"] == 4, stats
-        assert stats["calls_per_round"] == {"0": 1, "1": 1, "2": 0, "3+": 1}, stats
-        assert stats["tools"] == {"shell_exec": 2, "read": 1, "grep": 1}, stats
-        assert stats["shell_share"] == 50.0, stats
-        assert stats["shell_cd_share"] == 50.0, stats
-        assert stats["fixed_command_rounds"] == 2, stats
+        check(summary["chats"]["scanned"] == 2, summary)
+        check(summary["chats"]["with_journal"] == 1, summary)
+        check(summary["chats"]["journal_errors"] == 1, summary)
+        check(requests["turns"] == 3, requests)
+        check(requests["total"] == 69, requests)
+        check(requests["unreadable_lines"] == 1, requests)
+        check(requests["non_main"] == 1, requests)
+        check(requests["rounds"]["max"] == 64, requests)
+        check(requests["at_soft_limit"] == 1, requests)
+        check(requests["at_hard_limit"] == 1, requests)
+        check(requests["continued"] == 0, requests)
+        check_close(requests["at_hard_limit_share"], 33.3, requests)
+        check(requests["input_tokens"] == 6600, requests)
+        check(stats["assistant_messages"] == 3, stats)
+        check(stats["calls"] == 4, stats)
+        check(stats["calls_per_round"] == {"0": 1, "1": 1, "2": 0, "3+": 1}, stats)
+        check(stats["multi_target_calls"] == 1, stats)
+        check_close(stats["multi_target_share"], 25.0, stats)
+        check(stats["tools"] == {"shell_exec": 2, "read": 1, "grep": 1}, stats)
+        check_close(stats["shell_share"], 50.0, stats)
+        check_close(stats["shell_cd_share"], 50.0, stats)
+        check(stats["fixed_command_rounds"] == 2, stats)
 
         encoded = json.dumps(summary, sort_keys=True)
-        assert "go" not in encoded and "a.c" not in encoded, "no message text in output"
-        assert "chat-one" not in encoded, "no chat ids in output"
+        check("go" not in encoded and "a.c" not in encoded, "no message text in output")
+        check("chat-one" not in encoded, "no chat ids in output")
         text = format_text(summary)
-        assert "2 scanned" in text and ">=" + str(AGENT_MAX_ROUNDS) in text, text
+        check("2 scanned" in text and ">=" + str(AGENT_MAX_ROUNDS) in text, text)
     print("round_report self-test passed")
     return 0
 

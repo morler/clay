@@ -22,6 +22,7 @@ static void test_user_requests_kept(void) {
     push_message(conversation, "system", "you are clay");
     push_message(conversation, "user", "Keep every public API stable.");
     push_message(conversation, "assistant", "Understood.");
+    push_message(conversation, "user", CLAY_SOFT_ROUND_MARKER " hidden budget instruction");
     ClayStr huge;
     clay_str_init(&huge);
     for (int i = 0; i < 6000; i++) clay_str_push_char(&huge, 'p');
@@ -33,6 +34,7 @@ static void test_user_requests_kept(void) {
     char *requests = clay_commands_collect_user_requests(conversation);
     assert(requests);
     assert(strstr(requests, "Keep every public API stable."));
+    assert(!strstr(requests, "hidden budget instruction"));
     /* 4,000 of the 6,000 pasted characters survive, and the cut is named. */
     assert(strstr(requests, "2000 characters cut"));
     assert(strlen(requests) < 6000);

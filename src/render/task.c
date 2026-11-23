@@ -149,7 +149,7 @@ void clay_task_relabel(ClayTask *task, const char *fmt, ...) {
 }
 
 static void finish(ClayTask *task, const char *icon_color, const char *icon, const char *label,
-                   const char *fmt, va_list args) {
+                   const char *result) {
     pthread_mutex_lock(&task->lock);
     task->running = 0;
     pthread_mutex_unlock(&task->lock);
@@ -160,14 +160,10 @@ static void finish(ClayTask *task, const char *icon_color, const char *icon, con
         clay_str_push(&task->label, label);
     }
 
-    ClayStr result;
-    clay_str_init(&result);
-    clay_str_vprintf(&result, fmt, args);
-
     ClayStr suffix;
     clay_str_init(&suffix);
-    if (result.len > 0) {
-        clay_str_printf(&suffix, "%s%s%s ", clay_color(icon_color), result.data, clay_color(CLAY_RESET));
+    if (result && *result) {
+        clay_str_printf(&suffix, "%s%s%s ", clay_color(icon_color), result, clay_color(CLAY_RESET));
     }
     clay_str_printf(&suffix, "%s(%.1fs)%s", clay_color(CLAY_GRAY), elapsed_seconds(&task->start),
                     clay_color(CLAY_RESET));
@@ -176,37 +172,49 @@ static void finish(ClayTask *task, const char *icon_color, const char *icon, con
     fputc('\n', stdout);
     clay_term_show_cursor();
 
-    clay_str_free(&result);
     clay_str_free(&suffix);
     clay_str_free(&task->label);
     pthread_mutex_destroy(&task->lock);
     free(task);
 }
 
+static void finish_format(ClayTask *task, const char *icon_color, const char *icon,
+                          const char *label, const char *fmt, va_list args) {
+    ClayStr result;
+    clay_str_init(&result);
+    clay_str_vprintf(&result, fmt, args);
+    finish(task, icon_color, icon, label, result.data);
+    clay_str_free(&result);
+}
+
 void clay_task_success(ClayTask *task, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    finish(task, CLAY_GREEN, CLAY_ICON_CHECK, NULL, fmt, args);
+    finish_format(task, CLAY_GREEN, CLAY_ICON_CHECK, NULL, fmt, args);
     va_end(args);
 }
 
 void clay_task_fail(ClayTask *task, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    finish(task, CLAY_RED, CLAY_ICON_CROSS, NULL, fmt, args);
+    finish_format(task, CLAY_RED, CLAY_ICON_CROSS, NULL, fmt, args);
     va_end(args);
 }
 
 void clay_task_success_with_label(ClayTask *task, const char *label, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    finish(task, CLAY_GREEN, CLAY_ICON_CHECK, label, fmt, args);
+    finish_format(task, CLAY_GREEN, CLAY_ICON_CHECK, label, fmt, args);
     va_end(args);
 }
 
 void clay_task_fail_with_label(ClayTask *task, const char *label, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    finish(task, CLAY_RED, CLAY_ICON_CROSS, label, fmt, args);
+    finish_format(task, CLAY_RED, CLAY_ICON_CROSS, label, fmt, args);
     va_end(args);
+}
+
+void clay_task_receipt(ClayTask *task, const char *label) {
+    finish(task, CLAY_GRAY, CLAY_ICON_DOT, label, "");
 }

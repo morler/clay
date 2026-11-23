@@ -42,8 +42,47 @@ typedef struct {
      one. */
   const char *request_kind;
   int request_round;
+  int segment_round; /* completed requests in this segment */
+  int nudges_sent;   /* bits for the 16/32/48-round messages */
+  size_t tool_calls; /* work calls this turn, for the closing status row */
   int64_t last_usage_at;
 } ClayConversationStream;
+
+/* The budget speaks at three points in a segment. Early enough to stop a
+   fifty-round exploration, again when half is gone, and once at the soft
+   limit. Each message is a user message so the model treats it as an
+   instruction, and each carries a marker that compaction and the journal
+   strip. */
+#define CLAY_EARLY_ROUND_PROMPT                                                \
+  CLAY_SOFT_ROUND_MARKER                                                        \
+  " 16 of 64 rounds used in this segment. If the job has several parts, "      \
+  "write the plan now. Batch independent reads, greps and checks into one "      \
+  "message instead of one call per round."
+
+#define CLAY_MID_ROUND_PROMPT                                                  \
+  CLAY_SOFT_ROUND_MARKER                                                        \
+  " 32 of 64 rounds used in this segment. Stop exploring: work the "           \
+  "remaining plan steps, verify what changed, and do not start new "            \
+  "investigations."
+
+#define CLAY_SOFT_ROUND_PROMPT                                                  \
+  CLAY_SOFT_ROUND_MARKER                                                        \
+  " 48 of 64 rounds used in this segment. Stop exploring: check the "          \
+  "remaining plan steps, verify what you changed, and finish or report what "   \
+  "is left. Put independent calls in the same message."
+
+#define CLAY_AUTO_CONTINUE_PROMPT                                               \
+  CLAY_AUTO_CONTINUE_MARKER                                                      \
+  " The previous segment reached its 64-round limit mid-task. Continue from "   \
+  "exactly where you stopped: do not repeat calls that already ran, batch "     \
+  "independent checks, and finish the remaining work. If it cannot be "         \
+  "finished in this segment, leave a short status."
+
+#define CLAY_FINAL_SUMMARY_PROMPT                                               \
+  CLAY_FINAL_SUMMARY_MARKER                                                      \
+  " The round budget is exhausted. Do not call tools. Report in plain text "    \
+  "what you changed and verified, what is unfinished, and the exact next "      \
+  "step."
 
 void clay_commands_checkpoint(ClayCommands *commands, const char *label) {
   if (!commands->chat)
@@ -981,9 +1020,13 @@ static void hide_status(ClayConversationStream *stream) {
   stream->status_visible = 0;
 }
 
-static void set_status(double seconds, int success) {
+static void set_status(double seconds, int success, size_t tool_calls) {
   ClayStr text;
   clay_str_init(&text);
+  if (tool_calls > 0)
+    clay_str_printf(&text, "%s%zu tool%s%s \xc2\xb7 ", clay_color(CLAY_GRAY),
+                    tool_calls, tool_calls == 1 ? "" : "s",
+                    clay_color(CLAY_RESET));
   clay_str_printf(&text, "%s%.1fs%s",
                   clay_color(success ? CLAY_GREEN : CLAY_RED), seconds,
                   clay_color(CLAY_RESET));
@@ -1113,10 +1156,16 @@ static void append_label_text(ClayStr *out, const char *text) {
 static void tool_label(ClayStr *out, const char *name, int completed,
                        int success, const char *detail) {
   const char *verb = NULL;
-  if (strcmp(name, "shell_exec") == 0)
-    verb = completed ? (success ? "Executed" : "Failed")
-                     : "Executing shell command";
-  else if (strcmp(name, "memory_save") == 0)
+  if (strcmp(name, "shell_exec") == 0) {
+    if (completed && !success)
+      clay_str_push(out, "Failed");
+    else {
+      clay_str_push(out, completed ? "Ran $ " : "Running $ ");
+      if (detail && *detail) append_label_text(out, detail);
+    }
+    return;
+  }
+  if (strcmp(name, "memory_save") == 0)
     verb = completed ? (success ? "Saved memory" : "Failed to save memory")
                      : "Saving memory";
   else if (strcmp(name, "memory_read") == 0)
@@ -1159,6 +1208,12 @@ static void tool_label(ClayStr *out, const char *name, int completed,
   else if (strcmp(name, "subagent") == 0)
     verb = completed ? (success ? "Subagent done" : "Subagent failed")
                      : "Delegating";
+  else if (strcmp(name, "mcp") == 0)
+    verb = completed ? (success ? "Called MCP tool" : "MCP call failed")
+                     : "Calling MCP tool";
+  else if (strcmp(name, "skill") == 0)
+    verb = completed ? (success ? "Loaded skill" : "Could not load skill")
+                     : "Loading skill";
   if (verb) {
     clay_str_push(out, verb);
     if (detail && *detail) {
@@ -1178,7 +1233,8 @@ static const char *tool_detail_key(const char *name) {
   if (strcmp(name, "read") == 0 || strcmp(name, "write") == 0 ||
       strcmp(name, "edit") == 0)
     return "path";
-  if (strcmp(name, "task_run") == 0)
+  /* The live row should name the command, not just "shell command". */
+  if (strcmp(name, "shell_exec") == 0 || strcmp(name, "task_run") == 0)
     return "command";
   if (strcmp(name, "subagent") == 0)
     return "description";
@@ -1190,7 +1246,7 @@ static const char *tool_detail_key(const char *name) {
 static int command_fits_inline(const char *command) {
   ClayStr label;
   clay_str_init(&label);
-  clay_str_push(&label, "Executed $");
+  clay_str_push(&label, "Ran $ ");
   append_label_text(&label, command);
   size_t width = clay_utf8_width("  ") +
                  clay_utf8_width(label.data) + 8;
@@ -1198,8 +1254,10 @@ static int command_fits_inline(const char *command) {
   return width < (size_t)clay_term_width();
 }
 
-static void print_tool_output(const ClayJson *result, int show_command,
-                              int show_error) {
+/* Failures keep what the user needs to act on: the command, the error and
+   the start of the output. A successful call's output is model input and
+   already recorded in the receipt above it. */
+static void print_tool_failure(const ClayJson *result, int show_error) {
   const char *command =
       clay_json_string_value(clay_json_object_get(result, "command"));
   const char *output =
@@ -1208,7 +1266,7 @@ static void print_tool_output(const ClayJson *result, int show_command,
       clay_json_string_value(clay_json_object_get(result, "error"));
   int truncated =
       clay_json_bool_value(clay_json_object_get(result, "output_truncated"));
-  if (show_command && *command) {
+  if (*command) {
     ClayStr display;
     clay_str_init(&display);
     append_label_text(&display, command);
@@ -1353,6 +1411,7 @@ static void on_tool_call(const char *name, const char *arguments_json,
   tool_label(&label, name, 0, 0, detail);
   clay_json_free(args);
   if (strcmp(name, "todowrite") != 0) {
+    stream->tool_calls++;
     stream->tool_task = clay_task_start("%s", label.data);
     stream->commands->active_tool_task = stream->tool_task;
     /* Show what the running step is doing in the status row. */
@@ -1382,14 +1441,12 @@ static void on_tool_result(const char *name, const ClayJson *result,
       (long)clay_json_number_value(clay_json_object_get(result, "exit_code"));
   const char *command =
       clay_json_string_value(clay_json_object_get(result, "command"));
-  int inline_command = ok && strcmp(name, "shell_exec") == 0 && *command &&
-                       command_fits_inline(command);
+  int error_in_label = 0;
   const char *detail_key = tool_detail_key(name);
   const char *detail =
       detail_key
           ? clay_json_string_value(clay_json_object_get(result, detail_key))
           : NULL;
-  int error_in_label = 0;
   if (strcmp(name, "todowrite") == 0) {
     if (ok)
       render_plan(stream->commands);
@@ -1404,13 +1461,17 @@ static void on_tool_result(const char *name, const ClayJson *result,
   if (stream->tool_task) {
     ClayStr label;
     clay_str_init(&label);
+    /* A one-line receipt names the command itself, so the body (which is
+       model input anyway) can stay hidden. */
+    int inline_command = ok && strcmp(name, "shell_exec") == 0 && *command &&
+                         command_fits_inline(command);
     if (inline_command) {
-      clay_str_push(&label, "Executed $");
+      clay_str_push(&label, "Ran $ ");
       append_label_text(&label, command);
     } else
       tool_label(&label, name, 1, ok, detail);
     if (ok) {
-      clay_task_success_with_label(stream->tool_task, label.data, "");
+      clay_task_receipt(stream->tool_task, label.data);
     } else {
       /* An exit code only means something for a command; everything else
          fails with a message worth reading. */
@@ -1430,9 +1491,10 @@ static void on_tool_result(const char *name, const ClayJson *result,
     stream->tool_task = NULL;
     stream->commands->active_tool_task = NULL;
   } else
-    clay_sayc(ok ? CLAY_GREEN : CLAY_RED, "%s: %s", ok ? "Executed" : "Failed",
+    clay_sayc(ok ? CLAY_GRAY : CLAY_RED, "%s: %s", ok ? "Executed" : "Failed",
               name);
-  print_tool_output(result, !inline_command, !error_in_label);
+  if (!ok)
+    print_tool_failure(result, !error_in_label);
   if (clay_term_is_interactive())
     clay_term_raw_enable();
   show_thinking(stream);
@@ -1507,6 +1569,23 @@ static void before_request(ClayJson *messages, void *userdata) {
               "Compacted %d old tool result%s to stay within the context "
               "budget.",
               collapsed, collapsed == 1 ? "" : "s");
+  /* One message at each milestone, in the request that follows it. */
+  int nudge = 0;
+  const char *text = NULL;
+  if (stream->segment_round >= CLAY_AGENT_SOFT_ROUNDS) {
+    nudge = 4;
+    text = CLAY_SOFT_ROUND_PROMPT;
+  } else if (stream->segment_round >= (CLAY_AGENT_SOFT_ROUNDS * 2) / 3) {
+    nudge = 2;
+    text = CLAY_MID_ROUND_PROMPT;
+  } else if (stream->segment_round >= CLAY_AGENT_SOFT_ROUNDS / 3) {
+    nudge = 1;
+    text = CLAY_EARLY_ROUND_PROMPT;
+  }
+  if (nudge && !(stream->nudges_sent & nudge)) {
+    stream->nudges_sent |= nudge;
+    clay_json_array_push(messages, clay_openai_message("user", text));
+  }
 }
 
 static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
@@ -1516,6 +1595,7 @@ static void on_usage_details(const ClayTokenUsage *usage, void *userdata) {
   stream->last_prompt_tokens = usage->input_tokens;
   clay_token_usage_add(&stream->usage, usage);
   stream->has_usage = 1;
+  stream->segment_round++;
 
   ClayCommands *commands = stream->commands;
   int64_t now = clay_provider_retry_now_ms(NULL);
@@ -1555,21 +1635,24 @@ void clay_commands_tools_build(ClayCommands *commands, ClayPlan *plan,
            "conversation every turn.",
            remember_schema(), remember_tool, commands);
   add_tool(set, "read",
-           "Reads a file from the workspace, with line numbers. Prefer this over "
-           "shell_exec for reading files.",
+           "Reads one or more files from the workspace, with line numbers. Pass "
+           "every file you need in one call via paths[], each with optional "
+           "offset/limit. Prefer this over shell_exec for reading files.",
            clay_fs_tool_read_schema(), read_tool_gated, commands);
   add_tool(set, "write",
            "Creates or overwrites a file in the workspace with the given content.",
            clay_fs_tool_write_schema(), write_tool_checkpointed, commands);
   add_tool(set, "edit",
-           "Replaces an exact, unique text match in a file. Prefer this over "
+           "Replaces exact, unique text matches in one file. Pass several "
+           "replacements via edits[] in one call. Prefer this over "
            "shell_exec/sed for edits.",
            clay_fs_tool_edit_schema(), edit_tool_checkpointed, commands);
   add_tool(set, "glob",
            "Lists files in the workspace whose path matches a wildcard pattern.",
            clay_fs_tool_glob_schema(), glob_tool_gated, commands);
   add_tool(set, "grep",
-           "Searches file contents in the workspace for a regular expression.",
+           "Searches file contents in the workspace for a regular expression. "
+           "Pass several files or directories via paths[] in one call.",
            clay_fs_tool_grep_schema(), grep_tool_gated, commands);
   add_tool(set, "todowrite",
            "Writes the full task plan, shown to the user as a checklist. Use for "
@@ -1656,6 +1739,55 @@ static void save_unrecorded_response(ClayJson *messages, size_t turn_start,
     clay_json_array_push(messages, clay_openai_message("assistant", response->data + saved));
 }
 
+/* The budget messages exist only while the turn runs. Keeping them in the
+   journal would make the next turn (or /resume) read a stale "48 of 64". */
+static void drop_synthetic_messages(ClayJson *messages) {
+  for (size_t i = clay_json_array_count(messages); i-- > 1;) {
+    if (clay_commands_is_synthetic_message(clay_json_array_get(messages, i)))
+      clay_json_array_remove(messages, i);
+  }
+}
+
+/* A turn gets CLAY_AGENT_MAX_SEGMENTS provider runs. When a run spends all
+   its rounds, the tool results are still in `messages`, so a synthetic user
+   message resumes from there instead of handing the user a half-finished
+   turn. The last segment ends with one no-tools request that consumes those
+   results and asks for a status. */
+static int run_agent_segments(ClayCommands *commands, ClayJson *messages,
+                              const ClayToolSet *tools,
+                              ClayConversationStream *stream,
+                              const ClayOpenAICallbacks *callbacks) {
+  for (int segment = 0; segment < CLAY_AGENT_MAX_SEGMENTS; segment++) {
+    stream->segment_round = 0;
+    stream->nudges_sent = 0;
+    int rc = clay_commands_run_completion(commands, messages, tools,
+                                          CLAY_AGENT_MAX_ROUNDS,
+                                          clay_chat_id(commands->chat),
+                                          callbacks);
+    if (rc != CLAY_RUN_OUT_OF_ROUNDS) return rc;
+    if (segment + 1 < CLAY_AGENT_MAX_SEGMENTS && callbacks->should_abort &&
+        callbacks->should_abort(callbacks->userdata))
+      return 1;
+    /* Stale "16 of 64" messages would refer to the segment that just ended. */
+    drop_synthetic_messages(messages);
+    if (segment + 1 >= CLAY_AGENT_MAX_SEGMENTS) break;
+    clay_sayc(CLAY_GRAY,
+              "Round budget reached; continuing automatically (%d/%d).",
+              segment + 2, CLAY_AGENT_MAX_SEGMENTS);
+    clay_json_array_push(messages,
+                         clay_openai_message("user", CLAY_AUTO_CONTINUE_PROMPT));
+  }
+  if (callbacks->should_abort && callbacks->should_abort(callbacks->userdata))
+    return 1;
+  /* Consume the last tool results even when the budget is gone. */
+  clay_json_array_push(messages,
+                       clay_openai_message("user", CLAY_FINAL_SUMMARY_PROMPT));
+  stream->segment_round = 0;
+  stream->nudges_sent = 7;
+  return clay_commands_run_completion(commands, messages, NULL, 1,
+                                      clay_chat_id(commands->chat), callbacks);
+}
+
 int clay_commands_run_message(ClayCommands *commands, const char *input) {
   if (!commands->selected_provider || !commands->selected_model) {
     clay_sayc(
@@ -1723,13 +1855,11 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   clay_commands_tools_build(commands, &commands->plan, &tools, 1);
   if (clay_term_is_interactive())
     clay_term_raw_enable();
-  int rc = clay_commands_run_completion(commands, messages, &tools,
-                                        CLAY_AGENT_MAX_ROUNDS,
-                                        clay_chat_id(commands->chat),
-                                        &callbacks);
+  int rc = run_agent_segments(commands, messages, &tools, &stream, &callbacks);
   if (clay_term_is_interactive())
     clay_term_raw_disable();
   clay_commands_tools_free(&tools);
+  drop_synthetic_messages(messages);
   struct timespec finished_at;
   clock_gettime(CLOCK_MONOTONIC, &finished_at);
   double seconds = (double)(finished_at.tv_sec - started_at.tv_sec) +
@@ -1755,7 +1885,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
     }
     /* Stop the clock and the spinner, or they keep running under the next
        prompt as if the turn were still going. */
-    set_status(seconds, 0);
+    set_status(seconds, 0, stream.tool_calls);
     clay_sayc(CLAY_YELLOW, "Operation aborted by user.");
     if (save_failed)
       clay_sayc(CLAY_RED, "Could not save the chat journal.");
@@ -1768,13 +1898,14 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   /* Running out of rounds is an unfinished turn, not a failed one: the tool
      results are real and the user can say "keep going". */
   int save_failed;
-  if (rc == 0 || rc == CLAY_RUN_OUT_OF_ROUNDS) {
+  int ok = rc == 0 || rc == CLAY_RUN_OUT_OF_ROUNDS;
+  if (ok) {
     persist_thinking(commands, &stream);
     save_failed =
         clay_chat_finish_turn(commands->chat, messages, turn_start, "completed") != 0;
     clay_json_free(commands->conversation);
     commands->conversation = messages;
-    set_status(seconds, rc == 0);
+    set_status(seconds, rc == 0, stream.tool_calls);
     if (stream.has_usage) {
       commands->last_prompt_tokens = stream.last_prompt_tokens;
       commands->accounted_messages = clay_json_array_count(messages);
@@ -1806,7 +1937,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
                                        stream.error_status > 0 ? "provider_error"
                                                                : "network_error") != 0;
     clay_json_free(messages);
-    set_status(seconds, 0);
+    set_status(seconds, 0, stream.tool_calls);
   }
   /* However the turn ended, say so: a turn that stops mid-job and one that
      dies on a provider error both used to end in silence once any output had
@@ -1823,7 +1954,7 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
                 "Stopped after %d rounds of tool calls with the job still "
                 "open. The work so far is kept - send another message to "
                 "continue.",
-                CLAY_AGENT_MAX_ROUNDS);
+                CLAY_AGENT_MAX_ROUNDS * CLAY_AGENT_MAX_SEGMENTS + 1);
     else if (rc != 0 && stream.sse_rate_limit)
       clay_sayc(CLAY_RED, "Provider request failed (SSE 429; HTTP %ld).",
                 stream.error_status);
@@ -1854,5 +1985,5 @@ int clay_commands_run_message(ClayCommands *commands, const char *input) {
   clay_wrap_free(&stream.wrap);
   clay_str_free(&stream.thinking);
   clay_app_set_state(commands->app, CLAY_APP_IDLE);
-  return 0;
+  return ok;
 }
